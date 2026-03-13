@@ -1,0 +1,48 @@
+#!/bin/bash
+# music-pipeline — manage the CD ripping pipeline
+# Usage: music-pipeline [start|stop|restart|status]
+
+AGENTS=(
+  "com.danielwilliams.music-watcher"
+  "com.danielwilliams.music-sync-rugged"
+)
+
+status() {
+  echo "Music pipeline status:"
+  for agent in "${AGENTS[@]}"; do
+    info=$(launchctl list | grep "$agent")
+    if [ -n "$info" ]; then
+      pid=$(echo "$info" | awk '{print $1}')
+      exit_code=$(echo "$info" | awk '{print $2}')
+      if [ "$pid" != "-" ]; then
+        echo "  ✓ $agent (pid $pid)"
+      else
+        echo "  ◌ $agent (loaded, not running — exit: $exit_code)"
+      fi
+    else
+      echo "  ✗ $agent (not loaded)"
+    fi
+  done
+}
+
+stop() {
+  echo "Stopping music pipeline..."
+  for agent in "${AGENTS[@]}"; do
+    launchctl unload ~/Library/LaunchAgents/${agent}.plist 2>/dev/null && echo "  stopped $agent" || echo "  $agent was not loaded"
+  done
+}
+
+start() {
+  echo "Starting music pipeline..."
+  for agent in "${AGENTS[@]}"; do
+    launchctl load ~/Library/LaunchAgents/${agent}.plist 2>/dev/null && echo "  started $agent" || echo "  $agent already loaded"
+  done
+}
+
+case "${1:-status}" in
+  start)   start ;;
+  stop)    stop ;;
+  restart) stop; sleep 1; start ;;
+  status)  status ;;
+  *)       echo "Usage: music-pipeline [start|stop|restart|status]" ;;
+esac
