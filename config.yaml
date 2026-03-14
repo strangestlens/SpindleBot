@@ -1,0 +1,57 @@
+directory: /Users/danielwilliams/Music/Library
+library: /Users/danielwilliams/.config/beets/library.db
+
+import:
+  write: yes
+  move: yes
+  log: /Users/danielwilliams/.config/beets/import.log
+  quiet: yes
+  quiet_fallback: asis
+  group_albums: yes
+  ignore: ['.*', '*.beets', '*.initfrag', '*.movpkg', 'iTunes']
+
+plugins:
+  - musicbrainz
+  - fetchart
+  - embedart
+  - lyrics
+  - scrub
+  - inline
+
+paths:
+  # Single disc:  Artist/Album/NN. Title.flac
+  # Multi disc:   Artist/Album [Disk N]/NN. Title.flac
+  default: $albumartist/%ifdef{multidisc,$album [Disk $disc],$album}/$track. $title
+
+inline:
+  # multidisc is now a stored flexible attribute set explicitly by music-import.sh.
+  # (Previously computed from disctotal here, but that overrode beet modify — removed.)
+
+# Allow periods in filenames (for artists like M.I.A.)
+replace:
+  '[\\/]': _
+  '^\.': _
+  '[\x00-\x1f]': _
+  '[<>:"\?\*\|]': _
+  '\.$': ''
+  '\s+$': ''
+
+fetchart:
+  auto: yes
+  sources: coverart musicbrainz itunes amazon filesystem
+
+embedart:
+  auto: yes
+
+lyrics:
+  auto: yes
+  sources: genius musixmatch tekstowo
+  genius_api_key: Jqv2DDIfn3b97zcp7V7Pvh6bb6bK39aBSfhAo09DWlpFQyWEIQ8KmbFU6MB5tOCc
+  fallback: ""
+
+scrub:
+  auto: yes
+
+musicbrainz:
+  searchlimit: 10
+  use_mbids: yes

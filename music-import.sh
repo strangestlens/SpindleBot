@@ -137,15 +137,15 @@ PYEOF
 )
   # Scope modify/move to local Library only — "added:today" also matches albums
   # already synced to DwRugged, and beet move would pull them all back to ~/Music/Library.
-  LOCAL_QUERY="added:${TODAY}.. path:/Users/danielwilliams/Music/"
+  # Pass as two separate args so beet doesn't parse the space as part of the date range.
   if [ "${ACTUAL_DISCS:-1}" -gt 1 ]; then
-    $BEET modify --yes "$LOCAL_QUERY" multidisc=1 >> "$LOGFILE" 2>&1
+    $BEET modify --yes "added:${TODAY}.." "path:/Users/danielwilliams/Music/" multidisc=1 >> "$LOGFILE" 2>&1
     log "Multi-disc rip ($ACTUAL_DISCS discs) — set multidisc=1"
   else
-    $BEET modify --yes "$LOCAL_QUERY" multidisc= >> "$LOGFILE" 2>&1
+    $BEET modify --yes "added:${TODAY}.." "path:/Users/danielwilliams/Music/" multidisc= >> "$LOGFILE" 2>&1
     log "Single-disc rip — cleared multidisc"
   fi
-  $BEET move "$LOCAL_QUERY" >> "$LOGFILE" 2>&1
+  $BEET move "added:${TODAY}.." "path:/Users/danielwilliams/Music/" >> "$LOGFILE" 2>&1
   log "Moved files to correct paths"
 
   # Step 4: Fetch synced lyrics (.lrc sidecar files)
