@@ -135,18 +135,25 @@ for path in files:
 print(len(discs))
 PYEOF
 )
+  # Scope modify/move to local Library only — "added:today" also matches albums
+  # already synced to DwRugged, and beet move would pull them all back to ~/Music/Library.
+  LOCAL_QUERY="added:${TODAY}.. path:/Users/danielwilliams/Music/"
   if [ "${ACTUAL_DISCS:-1}" -gt 1 ]; then
-    $BEET modify --yes "added:${TODAY}.." multidisc=1 >> "$LOGFILE" 2>&1
+    $BEET modify --yes "$LOCAL_QUERY" multidisc=1 >> "$LOGFILE" 2>&1
     log "Multi-disc rip ($ACTUAL_DISCS discs) — set multidisc=1"
   else
-    $BEET modify --yes "added:${TODAY}.." multidisc= >> "$LOGFILE" 2>&1
+    $BEET modify --yes "$LOCAL_QUERY" multidisc= >> "$LOGFILE" 2>&1
     log "Single-disc rip — cleared multidisc"
   fi
-  $BEET move "added:${TODAY}.." >> "$LOGFILE" 2>&1
+  $BEET move "$LOCAL_QUERY" >> "$LOGFILE" 2>&1
   log "Moved files to correct paths"
 
   # Step 4: Fetch synced lyrics (.lrc sidecar files)
-  ALBUM_DIRS=$($BEET ls -f '$path' "added:${TODAY}.." 2>/dev/null | while IFS= read -r p; do dirname "$p"; done | sort -u)
+  # Filter to local Library only — DwRugged may not be mounted, and today's query
+  # returns all modified items including previously synced DwRugged paths.
+  # Only fetch lyrics for local paths — DwRugged may not be mounted, and the
+  # added:today query returns all modified items including previously synced DwRugged paths.
+  ALBUM_DIRS=$($BEET ls -f '$path' "added:${TODAY}.." 2>/dev/null | grep -v '^/Volumes/' | while IFS= read -r p; do dirname "$p"; done | sort -u)
   if [ -n "$ALBUM_DIRS" ]; then
     while IFS= read -r dir; do
       log "Fetching lyrics for: $dir"
