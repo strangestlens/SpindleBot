@@ -61,8 +61,11 @@ if [ "$REMAINING" -eq 0 ]; then
   # Fetch lyrics for any albums on DwRugged missing .lrc files.
   # Runs here (not in import script) to avoid race condition with rsync.
   LYRICS_DIRS=$(find "$REMOTE" -name "*.flac" | while IFS= read -r f; do
+    dir=$(dirname "$f")
     lrc="${f%.flac}.lrc"
-    [ ! -f "$lrc" ] && dirname "$f"
+    # Skip albums marked as having no available lyrics
+    [ -f "$dir/.nolrc" ] && continue
+    [ ! -f "$lrc" ] && echo "$dir"
   done | sort -u)
   if [ -n "$LYRICS_DIRS" ]; then
     log "Fetching missing lyrics on DwRugged"

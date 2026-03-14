@@ -234,6 +234,19 @@ def main():
                 f.write(f"{m['artist']}\t{m['album']}\t{m['title']}\t{m['file']}\n")
         print(f"\n  📝 Missing logged to: {MISS_LOG}")
 
+    # If every track came up empty, stamp a .nolrc marker so the sync script
+    # skips this album on future runs. Remove it if lyrics were found.
+    if not args.dry_run and not args.recurse:
+        all_missing = counts["missing"] > 0 and counts["synced"] == 0 and counts["plain"] == 0
+        marker = os.path.join(args.path, ".nolrc")
+        if all_missing:
+            try:
+                open(marker, "w").close()
+            except OSError:
+                pass
+        elif os.path.exists(marker):
+            os.remove(marker)
+
 
 if __name__ == "__main__":
     main()
