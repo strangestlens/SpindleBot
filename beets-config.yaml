@@ -1,4 +1,4 @@
-directory: /Volumes/DwRugged/Music/Library
+directory: /Users/danielwilliams/Music/Library
 library: /Users/danielwilliams/.config/beets/library.db
 
 import:
@@ -8,6 +8,7 @@ import:
   quiet: yes
   quiet_fallback: asis
   group_albums: yes
+  ignore: ['.*', '*.beets', '*.initfrag', '*.movpkg', 'iTunes']
 
 plugins:
   - musicbrainz
