@@ -135,15 +135,28 @@ for path in files:
 print(len(discs))
 PYEOF
 )
-  # Scope modify/move to local Library only — "added:today" also matches albums
-  # already synced to DwRugged, and beet move would pull them all back to ~/Music/Library.
-  # Pass as two separate args so beet doesn't parse the space as part of the date range.
+  # Fix disctotal in DB and ensure multidisc flex attr row exists for every new item.
+  # MusicBrainz can say disctotal=2 for a single-disc rip (DualDiscs, deluxe editions);
+  # we patch disctotal to actual ripped count so the inline computes correctly.
+  # beet modify multidisc= DELETES the flex attr row (empty value), leaving $multidisc
+  # undefined in templates — which beet renders as the literal string "$multidisc" (truthy).
+  # So we INSERT the row directly via sqlite instead of relying on beet modify.
+  DB="/Users/danielwilliams/.config/beets/library.db"
   if [ "${ACTUAL_DISCS:-1}" -gt 1 ]; then
-    $BEET modify --yes "added:${TODAY}.." "path:/Users/danielwilliams/Music/" multidisc=1 >> "$LOGFILE" 2>&1
-    log "Multi-disc rip ($ACTUAL_DISCS discs) — set multidisc=1"
+    $BEET modify --yes "added:${TODAY}.." "path:/Users/danielwilliams/Music/" disctotal="${ACTUAL_DISCS}" >> "$LOGFILE" 2>&1
+    sqlite3 "$DB" "INSERT OR IGNORE INTO item_attributes (entity_id, key, value)
+      SELECT id, 'multidisc', '1' FROM items
+      WHERE added >= strftime('%s','${TODAY}') AND path LIKE '/Users/danielwilliams/Music/%'
+        AND id NOT IN (SELECT entity_id FROM item_attributes WHERE key='multidisc');" 2>/dev/null
+    log "Multi-disc rip ($ACTUAL_DISCS discs) — set disctotal=$ACTUAL_DISCS, multidisc=1"
   else
-    $BEET modify --yes "added:${TODAY}.." "path:/Users/danielwilliams/Music/" multidisc= >> "$LOGFILE" 2>&1
-    log "Single-disc rip — cleared multidisc"
+    $BEET modify --yes "added:${TODAY}.." "path:/Users/danielwilliams/Music/" disctotal=1 disc=1 >> "$LOGFILE" 2>&1
+    # Ensure multidisc="" row exists so $multidisc is never the undefined literal
+    sqlite3 "$DB" "INSERT OR IGNORE INTO item_attributes (entity_id, key, value)
+      SELECT id, 'multidisc', '' FROM items
+      WHERE added >= strftime('%s','${TODAY}') AND path LIKE '/Users/danielwilliams/Music/%'
+        AND id NOT IN (SELECT entity_id FROM item_attributes WHERE key='multidisc');" 2>/dev/null
+    log "Single-disc rip — patched disctotal=1, ensured multidisc row exists"
   fi
   $BEET move "added:${TODAY}.." "path:/Users/danielwilliams/Music/" >> "$LOGFILE" 2>&1
   log "Moved files to correct paths"

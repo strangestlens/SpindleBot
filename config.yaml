@@ -21,11 +21,13 @@ plugins:
 paths:
   # Single disc:  Artist/Album/NN. Title.flac
   # Multi disc:   Artist/Album [Disk N]/NN. Title.flac
-  default: $albumartist/%ifdef{multidisc,$album [Disk $disc],$album}/$track. $title
+  default: $albumartist/%if{$multidisc,$album [Disk $disc],$album}/$track. $title
 
 inline:
-  # multidisc is now a stored flexible attribute set explicitly by music-import.sh.
-  # (Previously computed from disctotal here, but that overrode beet modify — removed.)
+  # Computed dynamically from disctotal (not cached). Single-disc rips get disctotal
+  # patched to 1 in the DB by music-import.sh after beet import, so this correctly
+  # returns "" for them even when MusicBrainz said disctotal > 1.
+  multidisc: '"1" if int(disctotal or 0) > 1 else ""'
 
 # Allow periods in filenames (for artists like M.I.A.)
 replace:
