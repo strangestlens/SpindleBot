@@ -161,21 +161,25 @@ PYEOF
   $BEET move "added:${TODAY}.." "path:/Users/danielwilliams/Music/" >> "$LOGFILE" 2>&1
   log "Moved files to correct paths"
 
-  # Step 4: Fetch synced lyrics (.lrc sidecar files)
+  # Step 4: posttag — strip beets alias tags and truncate DATE to year only.
+  # Runs after beet move (beet is fully done writing at this point).
+  # Also runs in sync script as a no-op safety net for any pre-existing files.
+  IMPORT_FILES=$($BEET ls -f '$path' "added:${TODAY}.." 2>/dev/null | grep -v '^/Volumes/')
+  if [ -n "$IMPORT_FILES" ]; then
+    log "Running posttag on imported files"
+    echo "$IMPORT_FILES" | /opt/homebrew/bin/python3 /Users/danielwilliams/.local/bin/music-pretag.py --post >> "$LOGFILE" 2>&1
+  fi
+
+  # Step 5: Fetch synced lyrics (.lrc sidecar files)
   # Filter to local Library only — DwRugged may not be mounted, and today's query
   # returns all modified items including previously synced DwRugged paths.
-  # Only fetch lyrics for local paths — DwRugged may not be mounted, and the
-  # added:today query returns all modified items including previously synced DwRugged paths.
-  ALBUM_DIRS=$($BEET ls -f '$path' "added:${TODAY}.." 2>/dev/null | grep -v '^/Volumes/' | while IFS= read -r p; do dirname "$p"; done | sort -u)
+  ALBUM_DIRS=$(echo "$IMPORT_FILES" | while IFS= read -r p; do dirname "$p"; done | sort -u)
   if [ -n "$ALBUM_DIRS" ]; then
     while IFS= read -r dir; do
       log "Fetching lyrics for: $dir"
       /opt/homebrew/bin/python3 /Users/danielwilliams/.local/bin/music-fetch-lyrics.py "$dir" >> "$LOGFILE" 2>&1
     done <<< "$ALBUM_DIRS"
   fi
-
-  # Note: posttag (date truncation, alias tag cleanup) runs in music-sync-rugged.sh
-  # immediately before rsync, so it always runs last regardless of beet writes.
 
   # Archive all XLD logs from Staging (covers multi-disc albums where earlier disc logs remain)
   mkdir -p "$COMPLETE"
