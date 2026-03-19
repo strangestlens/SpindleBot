@@ -123,6 +123,8 @@ HTML = r"""<!DOCTYPE html>
     transition: opacity .15s;
   }
   button:hover { opacity: .85; }
+  #btn-undo   { background: #2a2a4a; color: #aaa; }
+  #btn-undo:disabled { opacity: .35; cursor: default; }
   #btn-save   { background: #0f3460; color: #e0e0e0; }
   #btn-preview{ background: #533483; color: #fff; }
   #btn-commit { background: #e94560; color: #fff; }
@@ -256,6 +258,7 @@ HTML = r"""<!DOCTYPE html>
 <div id="toolbar">
   <h1>🎵 LRC Editor</h1>
   <span class="file-name" id="file-label"></span>
+  <button id="btn-undo" disabled>↩ Undo</button>
   <button id="btn-save">💾 Save Draft</button>
   <button id="btn-preview">▶ Preview in mpv</button>
   <button id="btn-commit">✅ Commit</button>
@@ -281,9 +284,30 @@ HTML = r"""<!DOCTYPE html>
 // State
 // ────────────────────────────────────────────────────────────────────────────
 let lyrics = [];       // [{time, text}, ...]
+let undoStack = [];    // array of deep-copied lyrics snapshots
 let ws = null;
 let duration = 0;
 let activeIdx = -1;
+
+const btnUndo = document.getElementById("btn-undo");
+
+function pushUndo() {
+  undoStack.push(JSON.parse(JSON.stringify(lyrics)));
+  btnUndo.disabled = false;
+}
+
+function undo() {
+  if (!undoStack.length) return;
+  lyrics = undoStack.pop();
+  btnUndo.disabled = undoStack.length === 0;
+  sortAndRender();
+  setStatus("Undone ✓");
+}
+
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "z") { e.preventDefault(); undo(); }
+});
+btnUndo.addEventListener("click", undo);
 
 const markerLayer = document.getElementById("marker-layer");
 const lyricsPanel = document.getElementById("lyrics-panel");
@@ -396,6 +420,7 @@ function makeDraggable(el, idx) {
 
   el.addEventListener("mousedown", (e) => {
     e.preventDefault();
+    pushUndo();
     el.classList.add("dragging");
     startX = e.clientX;
     const rect = markerLayer.getBoundingClientRect();
