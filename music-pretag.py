@@ -46,19 +46,23 @@ def pretag(album_dir):
             changed = True
 
         # 3. Move feat. from artist into title
+        # Skip artist normalization for Various Artists compilations — each track
+        # has its own artist and flattening them to albumartist would lose that.
+        is_va = albumartist.lower() in ('various artists', 'various', 'va')
         m = re.search(r'\s*[\(\[]?feat\.?\s+([^\)\]\n]+?)[\)\]]?\s*$', artist, re.IGNORECASE)
-        if m and albumartist:
-            feat_str = m.group(1).strip()
-            new_title = f"{title} (feat. {feat_str})"
-            tags['title'] = [new_title]
-            tags['artist'] = [albumartist]
-            print(f"  fixed: '{title}' | artist '{artist}' → title '{new_title}', artist '{albumartist}'")
-            changed = True
-        elif albumartist and artist != albumartist:
-            # artist differs from albumartist but no feat. pattern — still normalize
-            tags['artist'] = [albumartist]
-            print(f"  normalized: artist '{artist}' → '{albumartist}'")
-            changed = True
+        if not is_va:
+            if m and albumartist:
+                feat_str = m.group(1).strip()
+                new_title = f"{title} (feat. {feat_str})"
+                tags['title'] = [new_title]
+                tags['artist'] = [albumartist]
+                print(f"  fixed: '{title}' | artist '{artist}' → title '{new_title}', artist '{albumartist}'")
+                changed = True
+            elif albumartist and artist != albumartist:
+                # artist differs from albumartist but no feat. pattern — still normalize
+                tags['artist'] = [albumartist]
+                print(f"  normalized: artist '{artist}' → '{albumartist}'")
+                changed = True
 
         if changed:
             flac.save()
