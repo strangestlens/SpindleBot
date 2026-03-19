@@ -90,12 +90,42 @@ Or just say "sync" — Ash knows what to do.
 
 ## Lyrics editing workflow
 
+### Quick playback check
 mpv picks up `.lrc` sidecar files automatically and displays them as subtitles over album art.
-Fast edit loop: tweak the `.lrc` in a text editor, relaunch mpv, see results immediately.
 
 ```bash
 mpv "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
 ```
 
-- Terminal keyboard controls: space to play/pause, arrow keys to seek
-- Or just tell Ash "pull up [song] by [artist]" and it'll find the path and launch mpv
+Or just tell Ash "pull up [song] by [artist]" and it'll find the path and launch mpv.
+
+### lrc-editor — visual timestamp editor
+
+Full browser-based waveform editor for adjusting lyric timestamps.
+
+```bash
+lrc-editor "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
+```
+
+- Looks for a `.lrc` sidecar alongside the FLAC automatically
+- Opens in the browser with a waveform and draggable timestamp markers
+- Drag markers left/right to adjust timing
+- Toolbar: **Save Draft** → **Preview in mpv** → **Commit** (overwrites original `.lrc`)
+
+#### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Space` | Play / Pause |
+| `m` | Mute toggle |
+| `Home` | Jump to start |
+| `←` / `→` | Seek ±1s |
+| `Ctrl+←` / `Ctrl+→` | Seek ±5s |
+| `Shift+←` / `Shift+→` | Fine seek ±0.1s |
+| `[` / `]` | Prev / Next marker (selects it) |
+| `,` / `.` | Nudge selected marker ±0.1s |
+| `Shift+,` / `Shift+.` | Nudge selected marker ±1s |
+| `Ctrl+Z` | Undo |
+| `?` | Keyboard shortcut reference |
+
+Click a marker or lyric row to select it (cyan highlight), then nudge with `,`/`.`.
