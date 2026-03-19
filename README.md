@@ -87,3 +87,15 @@ bash ~/.local/bin/music-sync-rugged.sh
 ```
 
 Or just say "sync" — Ash knows what to do.
+
+## Lyrics editing workflow
+
+mpv picks up `.lrc` sidecar files automatically and displays them as subtitles over album art.
+Fast edit loop: tweak the `.lrc` in a text editor, relaunch mpv, see results immediately.
+
+```bash
+mpv "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
+```
+
+- Terminal keyboard controls: space to play/pause, arrow keys to seek
+- Or just tell Ash "pull up [song] by [artist]" and it'll find the path and launch mpv
