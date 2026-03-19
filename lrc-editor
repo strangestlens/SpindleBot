@@ -1,0 +1,602 @@
+#!/opt/homebrew/bin/python3
+"""
+lrc-editor — Local web-based LRC lyrics timestamp editor.
+Usage: lrc-editor /path/to/song.flac
+"""
+
+import sys
+import os
+import re
+import json
+import shutil
+import socket
+import subprocess
+import threading
+import webbrowser
+from pathlib import Path
+
+# ── Flask auto-install check ────────────────────────────────────────────────
+try:
+    from flask import Flask, jsonify, request, Response, send_file
+except ImportError:
+    print("Installing flask...", flush=True)
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "flask",
+                           "--break-system-packages", "--quiet"])
+    from flask import Flask, jsonify, request, Response, send_file
+
+import logging
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+# ── Args ─────────────────────────────────────────────────────────────────────
+if len(sys.argv) < 2:
+    print("Usage: lrc-editor /path/to/song.flac")
+    sys.exit(1)
+
+FLAC_PATH = Path(sys.argv[1]).resolve()
+if not FLAC_PATH.exists():
+    print(f"Error: file not found: {FLAC_PATH}")
+    sys.exit(1)
+
+LRC_PATH = FLAC_PATH.with_suffix(".lrc")
+DRAFT_PATH = Path("/tmp/lrc-editor-draft.lrc")
+MPV_BIN = "/opt/homebrew/bin/mpv"
+
+# ── LRC helpers ──────────────────────────────────────────────────────────────
+_LRC_RE = re.compile(r"\[(\d+):(\d+\.\d+)\](.*)")
+
+def parse_lrc(path: Path):
+    lines = []
+    if not path.exists():
+        return lines
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        m = _LRC_RE.match(raw.strip())
+        if m:
+            mins, secs, text = m.groups()
+            t = int(mins) * 60 + float(secs)
+            lines.append({"time": round(t, 2), "text": text.strip()})
+    lines.sort(key=lambda x: x["time"])
+    return lines
+
+def format_lrc(lines):
+    out = []
+    for ln in sorted(lines, key=lambda x: x["time"]):
+        t = ln["time"]
+        mins = int(t) // 60
+        secs = t - mins * 60
+        out.append(f"[{mins:02d}:{secs:05.2f}]{ln['text']}")
+    return "\n".join(out) + "\n"
+
+# ── Free port ────────────────────────────────────────────────────────────────
+def free_port():
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+PORT = free_port()
+
+# ── HTML ─────────────────────────────────────────────────────────────────────
+HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LRC Editor</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── Toolbar ── */
+  #toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: #16213e;
+    border-bottom: 1px solid #0f3460;
+    flex-shrink: 0;
+  }
+  #toolbar h1 {
+    font-size: 15px;
+    font-weight: 600;
+    color: #e94560;
+    margin-right: auto;
+  }
+  #toolbar span.file-name {
+    font-size: 12px;
+    color: #8899aa;
+    margin-right: auto;
+  }
+  button {
+    padding: 7px 16px;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity .15s;
+  }
+  button:hover { opacity: .85; }
+  #btn-save   { background: #0f3460; color: #e0e0e0; }
+  #btn-preview{ background: #533483; color: #fff; }
+  #btn-commit { background: #e94560; color: #fff; }
+  #status {
+    font-size: 12px;
+    color: #4caf50;
+    min-width: 160px;
+    text-align: right;
+  }
+
+  /* ── Waveform section ── */
+  #waveform-section {
+    background: #0d1b2a;
+    padding: 12px 16px 0;
+    flex-shrink: 0;
+  }
+  #waveform {
+    width: 100%;
+    height: 120px;
+    position: relative;
+    cursor: crosshair;
+  }
+  /* marker layer sits on top of WaveSurfer canvas */
+  #marker-layer {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .marker {
+    position: absolute;
+    top: 0;
+    width: 2px;
+    height: 100%;
+    background: #e94560;
+    cursor: ew-resize;
+    pointer-events: all;
+    transform: translateX(-50%);
+    transition: background .1s;
+    z-index: 10;
+  }
+  .marker:hover, .marker.dragging { background: #ff7043; }
+  .marker.active { background: #ffeb3b; }
+  .marker-label {
+    position: absolute;
+    bottom: 2px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 9px;
+    color: #fff;
+    background: rgba(0,0,0,.55);
+    padding: 1px 3px;
+    border-radius: 3px;
+    white-space: nowrap;
+    pointer-events: none;
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ── Transport ── */
+  #transport {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    background: #0d1b2a;
+    border-bottom: 1px solid #0f3460;
+    flex-shrink: 0;
+  }
+  #btn-playpause {
+    background: #0f3460;
+    color: #e0e0e0;
+    padding: 6px 18px;
+    font-size: 18px;
+    line-height: 1;
+  }
+  #time-display {
+    font-size: 13px;
+    color: #8899aa;
+    font-variant-numeric: tabular-nums;
+    min-width: 120px;
+  }
+
+  /* ── Lyrics panel ── */
+  #lyrics-panel {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 16px 24px;
+  }
+  .lyric-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background .1s;
+    user-select: none;
+  }
+  .lyric-row:hover { background: #16213e; }
+  .lyric-row.active { background: #0f3460; }
+  .lyric-time {
+    font-size: 11px;
+    color: #8899aa;
+    font-variant-numeric: tabular-nums;
+    min-width: 68px;
+    flex-shrink: 0;
+  }
+  .lyric-time input {
+    width: 68px;
+    background: #1a1a2e;
+    border: 1px solid #0f3460;
+    border-radius: 4px;
+    color: #e0e0e0;
+    font-size: 11px;
+    padding: 2px 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .lyric-text {
+    font-size: 14px;
+    flex: 1;
+    color: #c8d6e5;
+  }
+  .lyric-row.active .lyric-text { color: #fff; font-weight: 500; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <h1>🎵 LRC Editor</h1>
+  <span class="file-name" id="file-label"></span>
+  <button id="btn-save">💾 Save Draft</button>
+  <button id="btn-preview">▶ Preview in mpv</button>
+  <button id="btn-commit">✅ Commit</button>
+  <span id="status"></span>
+</div>
+
+<div id="waveform-section">
+  <div id="waveform">
+    <div id="marker-layer"></div>
+  </div>
+</div>
+
+<div id="transport">
+  <button id="btn-playpause">▶</button>
+  <span id="time-display">0:00.00 / 0:00.00</span>
+</div>
+
+<div id="lyrics-panel" id="lyrics"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
+<script>
+// ────────────────────────────────────────────────────────────────────────────
+// State
+// ────────────────────────────────────────────────────────────────────────────
+let lyrics = [];       // [{time, text}, ...]
+let ws = null;
+let duration = 0;
+let activeIdx = -1;
+
+const markerLayer = document.getElementById("marker-layer");
+const lyricsPanel = document.getElementById("lyrics-panel");
+const timeDisplay = document.getElementById("time-display");
+const statusEl    = document.getElementById("status");
+const btnPlay     = document.getElementById("btn-playpause");
+
+function setStatus(msg, ok=true) {
+  statusEl.textContent = msg;
+  statusEl.style.color = ok ? "#4caf50" : "#e94560";
+  if (ok) setTimeout(() => statusEl.textContent = "", 3000);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Format helpers
+// ────────────────────────────────────────────────────────────────────────────
+function fmtTime(t) {
+  const m = Math.floor(t / 60);
+  const s = (t - m*60).toFixed(2).padStart(5,"0");
+  return `${m}:${s}`;
+}
+function parseTimeStr(s) {
+  // accepts m:ss.xx or raw seconds
+  const parts = s.split(":");
+  if (parts.length === 2) return parseFloat(parts[0])*60 + parseFloat(parts[1]);
+  return parseFloat(s);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// WaveSurfer init
+// ────────────────────────────────────────────────────────────────────────────
+function initWaveSurfer() {
+  ws = WaveSurfer.create({
+    container: "#waveform",
+    waveColor: "#4a6fa5",
+    progressColor: "#e94560",
+    height: 120,
+    barWidth: 2,
+    barGap: 1,
+    barRadius: 2,
+    url: "/audio",
+    backend: "WebAudio",
+    interact: true,
+    hideScrollbar: true,
+  });
+
+  ws.on("ready", () => {
+    duration = ws.getDuration();
+    renderMarkers();
+  });
+
+  ws.on("audioprocess", onTimeUpdate);
+  ws.on("seeking", onTimeUpdate);
+  ws.on("finish", () => btnPlay.textContent = "▶");
+  ws.on("play",   () => btnPlay.textContent = "⏸");
+  ws.on("pause",  () => btnPlay.textContent = "▶");
+
+  btnPlay.addEventListener("click", () => ws.playPause());
+}
+
+function onTimeUpdate() {
+  const cur = ws.getCurrentTime();
+  timeDisplay.textContent = `${fmtTime(cur)} / ${fmtTime(duration)}`;
+  // highlight active lyric
+  let idx = -1;
+  for (let i = lyrics.length - 1; i >= 0; i--) {
+    if (cur >= lyrics[i].time) { idx = i; break; }
+  }
+  if (idx !== activeIdx) {
+    activeIdx = idx;
+    highlightActive();
+  }
+  updateActiveMarker();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Markers
+// ────────────────────────────────────────────────────────────────────────────
+function renderMarkers() {
+  markerLayer.innerHTML = "";
+  if (!duration) return;
+  lyrics.forEach((ln, i) => {
+    const pct = ln.time / duration * 100;
+    const el = document.createElement("div");
+    el.className = "marker";
+    el.style.left = pct + "%";
+    el.dataset.idx = i;
+    el.title = `[${fmtTime(ln.time)}] ${ln.text}`;
+
+    const label = document.createElement("div");
+    label.className = "marker-label";
+    label.textContent = ln.text;
+    el.appendChild(label);
+
+    // click → seek
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      ws.seekTo(ln.time / duration);
+    });
+
+    // drag
+    makeDraggable(el, i);
+
+    markerLayer.appendChild(el);
+  });
+}
+
+function makeDraggable(el, idx) {
+  let startX, startPct, startTime;
+
+  el.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    el.classList.add("dragging");
+    startX = e.clientX;
+    const rect = markerLayer.getBoundingClientRect();
+    startPct = lyrics[idx].time / duration;
+
+    const onMove = (e2) => {
+      const rect2 = markerLayer.getBoundingClientRect();
+      const dx = e2.clientX - startX;
+      const newPct = Math.max(0, Math.min(1, startPct + dx / rect2.width));
+      const newTime = newPct * duration;
+      lyrics[idx].time = Math.round(newTime * 100) / 100;
+      el.style.left = (newPct * 100) + "%";
+      el.title = `[${fmtTime(lyrics[idx].time)}] ${lyrics[idx].text}`;
+      // sync lyrics row
+      const row = lyricsPanel.children[idx];
+      if (row) row.querySelector(".lyric-time-val").textContent = fmtTime(lyrics[idx].time);
+    };
+
+    const onUp = () => {
+      el.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      // re-sort if needed
+      sortAndRender();
+    };
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+function sortAndRender() {
+  lyrics.sort((a, b) => a.time - b.time);
+  renderMarkers();
+  renderLyrics();
+}
+
+function updateActiveMarker() {
+  const markers = markerLayer.querySelectorAll(".marker");
+  markers.forEach((m, i) => {
+    m.classList.toggle("active", i === activeIdx);
+  });
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Lyrics panel
+// ────────────────────────────────────────────────────────────────────────────
+function renderLyrics() {
+  lyricsPanel.innerHTML = "";
+  lyrics.forEach((ln, i) => {
+    const row = document.createElement("div");
+    row.className = "lyric-row";
+    row.dataset.idx = i;
+
+    const timeEl = document.createElement("span");
+    timeEl.className = "lyric-time";
+    const timeVal = document.createElement("span");
+    timeVal.className = "lyric-time-val";
+    timeVal.textContent = fmtTime(ln.time);
+    timeEl.appendChild(timeVal);
+
+    const textEl = document.createElement("span");
+    textEl.className = "lyric-text";
+    textEl.textContent = ln.text;
+
+    row.appendChild(timeEl);
+    row.appendChild(textEl);
+
+    row.addEventListener("click", () => {
+      if (duration) ws.seekTo(ln.time / duration);
+    });
+
+    lyricsPanel.appendChild(row);
+  });
+}
+
+function highlightActive() {
+  const rows = lyricsPanel.querySelectorAll(".lyric-row");
+  rows.forEach((r, i) => r.classList.toggle("active", i === activeIdx));
+  if (activeIdx >= 0 && rows[activeIdx]) {
+    rows[activeIdx].scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Toolbar actions
+// ────────────────────────────────────────────────────────────────────────────
+document.getElementById("btn-save").addEventListener("click", async () => {
+  const r = await fetch("/save", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(lyrics),
+  });
+  const j = await r.json();
+  setStatus(j.ok ? "Draft saved ✓" : "Save failed", j.ok);
+});
+
+document.getElementById("btn-preview").addEventListener("click", async () => {
+  // auto-save first
+  await fetch("/save", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(lyrics),
+  });
+  const r = await fetch("/preview", { method: "POST" });
+  const j = await r.json();
+  setStatus(j.ok ? "mpv launched ✓" : (j.error || "Failed"), j.ok);
+});
+
+document.getElementById("btn-commit").addEventListener("click", async () => {
+  if (!confirm("Overwrite the original .lrc file?")) return;
+  await fetch("/save", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(lyrics),
+  });
+  const r = await fetch("/commit", { method: "POST" });
+  const j = await r.json();
+  setStatus(j.ok ? "Committed to original file ✓" : (j.error || "Failed"), j.ok);
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Boot
+// ────────────────────────────────────────────────────────────────────────────
+(async () => {
+  // file label
+  const resp = await fetch("/meta");
+  const meta = await resp.json();
+  document.getElementById("file-label").textContent = meta.filename;
+  document.title = "LRC Editor — " + meta.filename;
+
+  // load lyrics
+  const lr = await fetch("/lrc");
+  lyrics = await lr.json();
+
+  renderLyrics();
+  initWaveSurfer();
+})();
+</script>
+</body>
+</html>
+"""
+
+# ── Flask app ─────────────────────────────────────────────────────────────────
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+@app.route("/meta")
+def meta():
+    return jsonify({"filename": FLAC_PATH.name, "lrc": str(LRC_PATH)})
+
+@app.route("/audio")
+def audio():
+    return send_file(str(FLAC_PATH), mimetype="audio/flac",
+                     conditional=True)
+
+@app.route("/lrc")
+def lrc():
+    return jsonify(parse_lrc(LRC_PATH))
+
+@app.route("/save", methods=["POST"])
+def save():
+    data = request.get_json(force=True)
+    DRAFT_PATH.write_text(format_lrc(data), encoding="utf-8")
+    return jsonify({"ok": True})
+
+@app.route("/commit", methods=["POST"])
+def commit():
+    if not DRAFT_PATH.exists():
+        return jsonify({"ok": False, "error": "No draft found — save first"})
+    shutil.copy2(DRAFT_PATH, LRC_PATH)
+    return jsonify({"ok": True})
+
+@app.route("/preview", methods=["POST"])
+def preview():
+    if not DRAFT_PATH.exists():
+        return jsonify({"ok": False, "error": "No draft — save first"})
+    if not os.path.exists(MPV_BIN):
+        return jsonify({"ok": False, "error": f"mpv not found at {MPV_BIN}"})
+    subprocess.Popen(
+        [MPV_BIN, f"--sub-file={DRAFT_PATH}", str(FLAC_PATH)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    return jsonify({"ok": True})
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    url = f"http://localhost:{PORT}"
+    print(f"🎵  lrc-editor")
+    print(f"    Audio : {FLAC_PATH}")
+    print(f"    LRC   : {LRC_PATH}" + ("" if LRC_PATH.exists() else "  (not found — starting empty)"))
+    print(f"    URL   : {url}")
+    print(f"    Ctrl+C to quit\n")
+
+    # Open browser after a short delay so Flask is ready
+    def open_browser():
+        import time; time.sleep(0.8)
+        subprocess.Popen(["open", url])
+    threading.Thread(target=open_browser, daemon=True).start()
+
+    app.run(host="127.0.0.1", port=PORT, debug=False, use_reloader=False)
