@@ -412,22 +412,27 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "[" || e.key === "]") {
     e.preventDefault();
     if (!lyrics.length) return;
-    const cur = ws.getCurrentTime();
     let idx;
-    if (e.key === "[") {
-      // prev: last marker strictly before current time, or last overall
-      idx = -1;
-      for (let i = lyrics.length - 1; i >= 0; i--) {
-        if (lyrics[i].time < cur - 0.05) { idx = i; break; }
-      }
-      if (idx < 0) idx = lyrics.length - 1;
+    if (selectedMarkerIdx >= 0) {
+      // already have a selection — just step relative to it
+      idx = selectedMarkerIdx + (e.key === "[" ? -1 : 1);
+      idx = Math.max(0, Math.min(lyrics.length - 1, idx));
     } else {
-      // next: first marker strictly after current time, or first overall
-      idx = -1;
-      for (let i = 0; i < lyrics.length; i++) {
-        if (lyrics[i].time > cur + 0.05) { idx = i; break; }
+      // no selection — find nearest to playback position
+      const cur = ws.getCurrentTime();
+      if (e.key === "[") {
+        idx = -1;
+        for (let i = lyrics.length - 1; i >= 0; i--) {
+          if (lyrics[i].time < cur - 0.05) { idx = i; break; }
+        }
+        if (idx < 0) idx = lyrics.length - 1;
+      } else {
+        idx = -1;
+        for (let i = 0; i < lyrics.length; i++) {
+          if (lyrics[i].time > cur + 0.05) { idx = i; break; }
+        }
+        if (idx < 0) idx = 0;
       }
-      if (idx < 0) idx = 0;
     }
     selectMarker(idx, true);
     return;
