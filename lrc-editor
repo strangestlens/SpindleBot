@@ -168,7 +168,9 @@ HTML = r"""<!DOCTYPE html>
     z-index: 10;
   }
   .marker:hover, .marker.dragging { background: #ff7043; }
-  .marker.active { background: #ffeb3b; }
+  .marker.active   { background: #ffeb3b; }
+  .marker.selected { background: #00bcd4; }
+  .marker.selected.active { background: #b2ebf2; }
   .marker-label {
     position: absolute;
     bottom: 2px;
@@ -250,7 +252,39 @@ HTML = r"""<!DOCTYPE html>
     flex: 1;
     color: #c8d6e5;
   }
-  .lyric-row.active .lyric-text { color: #fff; font-weight: 500; }
+  .lyric-row.active    .lyric-text { color: #fff; font-weight: 500; }
+  .lyric-row.selected { outline: 1px solid #00bcd4; }
+
+  /* ── Help modal ── */
+  #help-modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.7);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  #help-modal.open { display: flex; }
+  #help-box {
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 10px;
+    padding: 24px 32px;
+    min-width: 360px;
+    max-width: 500px;
+  }
+  #help-box h2 { font-size: 15px; color: #e94560; margin-bottom: 16px; }
+  #help-box table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  #help-box td { padding: 4px 8px; color: #c8d6e5; }
+  #help-box td:first-child { text-align: right; padding-right: 16px; }
+  kbd {
+    background: #0d1b2a; border: 1px solid #0f3460;
+    border-radius: 4px; padding: 1px 6px; font-size: 11px;
+    font-family: monospace; color: #8899aa;
+  }
+  #btn-help { background: #2a2a4a; color: #aaa; padding: 7px 12px; }
+  #help-close { margin-top: 16px; width: 100%; background: #0f3460; color: #e0e0e0; }
 </style>
 </head>
 <body>
@@ -262,7 +296,31 @@ HTML = r"""<!DOCTYPE html>
   <button id="btn-save">💾 Save Draft</button>
   <button id="btn-preview">▶ Preview in mpv</button>
   <button id="btn-commit">✅ Commit</button>
+  <button id="btn-help">? Keys</button>
   <span id="status"></span>
+</div>
+
+<div id="help-modal">
+  <div id="help-box">
+    <h2>⌨️ Keyboard Shortcuts</h2>
+    <table>
+      <tr><td><kbd>Space</kbd></td><td>Play / Pause</td></tr>
+      <tr><td><kbd>m</kbd></td><td>Mute toggle</td></tr>
+      <tr><td><kbd>Home</kbd></td><td>Jump to start</td></tr>
+      <tr><td></td><td></td></tr>
+      <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Seek ±1s</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd> <kbd>→</kbd></td><td>Seek ±5s</td></tr>
+      <tr><td><kbd>Shift</kbd>+<kbd>←</kbd> <kbd>→</kbd></td><td>Fine seek ±0.1s</td></tr>
+      <tr><td></td><td></td></tr>
+      <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Prev / Next marker</td></tr>
+      <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>Nudge selected marker ±0.1s</td></tr>
+      <tr><td><kbd>Shift</kbd>+<kbd>,</kbd> <kbd>.</kbd></td><td>Nudge selected marker ±1s</td></tr>
+      <tr><td></td><td></td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Undo</td></tr>
+      <tr><td><kbd>?</kbd></td><td>This help</td></tr>
+    </table>
+    <button id="help-close">Close</button>
+  </div>
 </div>
 
 <div id="waveform-section">
@@ -288,6 +346,7 @@ let undoStack = [];    // array of deep-copied lyrics snapshots
 let ws = null;
 let duration = 0;
 let activeIdx = -1;
+let selectedMarkerIdx = -1;
 
 const btnUndo = document.getElementById("btn-undo");
 
@@ -300,14 +359,92 @@ function undo() {
   if (!undoStack.length) return;
   lyrics = undoStack.pop();
   btnUndo.disabled = undoStack.length === 0;
+  selectedMarkerIdx = -1;
   sortAndRender();
   setStatus("Undone ✓");
 }
-
-document.addEventListener("keydown", (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key === "z") { e.preventDefault(); undo(); }
-});
 btnUndo.addEventListener("click", undo);
+
+// Help modal
+const helpModal = document.getElementById("help-modal");
+document.getElementById("btn-help").addEventListener("click", () => helpModal.classList.toggle("open"));
+document.getElementById("help-close").addEventListener("click", () => helpModal.classList.remove("open"));
+helpModal.addEventListener("click", (e) => { if (e.target === helpModal) helpModal.classList.remove("open"); });
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────
+document.addEventListener("keydown", (e) => {
+  // Don't fire when user is typing in an input
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+
+  const ctrl = e.ctrlKey || e.metaKey;
+
+  // Undo
+  if (ctrl && e.key === "z") { e.preventDefault(); undo(); return; }
+
+  // Help
+  if (e.key === "?") { e.preventDefault(); helpModal.classList.toggle("open"); return; }
+
+  // Escape closes modal
+  if (e.key === "Escape") { helpModal.classList.remove("open"); return; }
+
+  if (!ws) return;
+
+  // Play/pause
+  if (e.key === " ") { e.preventDefault(); ws.playPause(); return; }
+
+  // Mute
+  if (e.key === "m") { e.preventDefault(); ws.setMuted(!ws.getMuted()); setStatus(ws.getMuted() ? "Muted 🔇" : "Unmuted 🔊"); return; }
+
+  // Jump to start
+  if (e.key === "Home") { e.preventDefault(); ws.seekTo(0); return; }
+
+  // Seek
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    e.preventDefault();
+    const dir = e.key === "ArrowLeft" ? -1 : 1;
+    const delta = e.shiftKey ? 0.1 : ctrl ? 5 : 1;
+    const cur = ws.getCurrentTime();
+    ws.seekTo(Math.max(0, Math.min(1, (cur + dir * delta) / duration)));
+    return;
+  }
+
+  // Prev/next marker
+  if (e.key === "[" || e.key === "]") {
+    e.preventDefault();
+    if (!lyrics.length) return;
+    const cur = ws.getCurrentTime();
+    let idx;
+    if (e.key === "[") {
+      // prev: last marker strictly before current time, or last overall
+      idx = -1;
+      for (let i = lyrics.length - 1; i >= 0; i--) {
+        if (lyrics[i].time < cur - 0.05) { idx = i; break; }
+      }
+      if (idx < 0) idx = lyrics.length - 1;
+    } else {
+      // next: first marker strictly after current time, or first overall
+      idx = -1;
+      for (let i = 0; i < lyrics.length; i++) {
+        if (lyrics[i].time > cur + 0.05) { idx = i; break; }
+      }
+      if (idx < 0) idx = 0;
+    }
+    selectMarker(idx, true);
+    return;
+  }
+
+  // Nudge selected marker
+  if (e.key === "," || e.key === ".") {
+    e.preventDefault();
+    if (selectedMarkerIdx < 0 || selectedMarkerIdx >= lyrics.length) {
+      setStatus("No marker selected — click one first", false); return;
+    }
+    const dir = e.key === "," ? -1 : 1;
+    const delta = e.shiftKey ? 1.0 : 0.1;
+    nudgeSelected(dir * delta);
+    return;
+  }
+});
 
 const markerLayer = document.getElementById("marker-layer");
 const lyricsPanel = document.getElementById("lyrics-panel");
@@ -402,10 +539,10 @@ function renderMarkers() {
     label.textContent = ln.text;
     el.appendChild(label);
 
-    // click → seek
+    // click → select + seek
     el.addEventListener("click", (e) => {
       e.stopPropagation();
-      ws.seekTo(ln.time / duration);
+      selectMarker(i, true);
     });
 
     // drag
@@ -458,11 +595,46 @@ function sortAndRender() {
   renderLyrics();
 }
 
-function updateActiveMarker() {
+function selectMarker(idx, seek=false) {
+  selectedMarkerIdx = idx;
+  if (seek && idx >= 0 && duration) ws.seekTo(lyrics[idx].time / duration);
+  updateMarkerClasses();
+  updateSelectedRow();
+}
+
+function nudgeSelected(delta) {
+  if (selectedMarkerIdx < 0) return;
+  pushUndo();
+  const t = lyrics[selectedMarkerIdx].time + delta;
+  lyrics[selectedMarkerIdx].time = Math.round(Math.max(0, Math.min(duration, t)) * 100) / 100;
+  const ref = lyrics[selectedMarkerIdx]; // object ref survives sort
+  sortAndRender();
+  // re-find after sort
+  const reIdx = lyrics.indexOf(ref);
+  selectedMarkerIdx = reIdx >= 0 ? reIdx : 0;
+  updateMarkerClasses();
+  updateSelectedRow();
+  setStatus(`Nudged → ${fmtTime(lyrics[selectedMarkerIdx].time)}`);
+}
+
+function updateMarkerClasses() {
   const markers = markerLayer.querySelectorAll(".marker");
   markers.forEach((m, i) => {
-    m.classList.toggle("active", i === activeIdx);
+    m.classList.toggle("active",    i === activeIdx);
+    m.classList.toggle("selected",  i === selectedMarkerIdx);
   });
+}
+
+function updateActiveMarker() {
+  updateMarkerClasses();
+}
+
+function updateSelectedRow() {
+  const rows = lyricsPanel.querySelectorAll(".lyric-row");
+  rows.forEach((r, i) => r.classList.toggle("selected", i === selectedMarkerIdx));
+  if (selectedMarkerIdx >= 0 && rows[selectedMarkerIdx]) {
+    rows[selectedMarkerIdx].scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -490,7 +662,7 @@ function renderLyrics() {
     row.appendChild(textEl);
 
     row.addEventListener("click", () => {
-      if (duration) ws.seekTo(ln.time / duration);
+      selectMarker(i, true);
     });
 
     lyricsPanel.appendChild(row);
