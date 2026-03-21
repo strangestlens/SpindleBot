@@ -101,6 +101,7 @@ HTML = r"""<!DOCTYPE html>
     background: #16213e;
     border-bottom: 1px solid #0f3460;
     flex-shrink: 0;
+    flex-wrap: wrap;
   }
   #toolbar h1 {
     font-size: 15px;
@@ -123,11 +124,14 @@ HTML = r"""<!DOCTYPE html>
     transition: opacity .15s;
   }
   button:hover { opacity: .85; }
-  #btn-undo   { background: #2a2a4a; color: #aaa; }
-  #btn-undo:disabled { opacity: .35; cursor: default; }
-  #btn-save   { background: #0f3460; color: #e0e0e0; }
-  #btn-preview{ background: #533483; color: #fff; }
-  #btn-commit { background: #e94560; color: #fff; }
+  button:disabled { opacity: .35; cursor: default; }
+  #btn-undo    { background: #2a2a4a; color: #aaa; }
+  #btn-add     { background: #1b4332; color: #6fcf97; }
+  #btn-delete  { background: #3b1a1a; color: #e94560; }
+  #btn-save    { background: #0f3460; color: #e0e0e0; }
+  #btn-preview { background: #533483; color: #fff; }
+  #btn-commit  { background: #e94560; color: #fff; }
+  #btn-help    { background: #2a2a4a; color: #aaa; padding: 7px 12px; }
   #status {
     font-size: 12px;
     color: #4caf50;
@@ -147,7 +151,6 @@ HTML = r"""<!DOCTYPE html>
     position: relative;
     cursor: crosshair;
   }
-  /* marker layer sits on top of WaveSurfer canvas */
   #marker-layer {
     position: absolute;
     top: 0; left: 0;
@@ -230,6 +233,7 @@ HTML = r"""<!DOCTYPE html>
   }
   .lyric-row:hover { background: #16213e; }
   .lyric-row.active { background: #0f3460; }
+  .lyric-row.selected { outline: 1px solid #00bcd4; }
   .lyric-time {
     font-size: 11px;
     color: #8899aa;
@@ -237,26 +241,40 @@ HTML = r"""<!DOCTYPE html>
     min-width: 68px;
     flex-shrink: 0;
   }
-  .lyric-time input {
-    width: 68px;
-    background: #1a1a2e;
-    border: 1px solid #0f3460;
-    border-radius: 4px;
-    color: #e0e0e0;
-    font-size: 11px;
-    padding: 2px 4px;
-    font-variant-numeric: tabular-nums;
-  }
   .lyric-text {
     font-size: 14px;
     flex: 1;
     color: #c8d6e5;
   }
   .lyric-row.active    .lyric-text { color: #fff; font-weight: 500; }
-  .lyric-row.selected { outline: 1px solid #00bcd4; }
+  .lyric-text-input {
+    flex: 1;
+    background: #0d1b2a;
+    border: 1px solid #e94560;
+    border-radius: 4px;
+    color: #fff;
+    font-size: 14px;
+    padding: 2px 6px;
+    outline: none;
+  }
+  .lyric-del-btn {
+    opacity: 0;
+    background: transparent;
+    color: #e94560;
+    border: none;
+    font-size: 15px;
+    line-height: 1;
+    padding: 2px 6px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: opacity .12s, background .12s;
+    flex-shrink: 0;
+  }
+  .lyric-row:hover .lyric-del-btn { opacity: .55; }
+  .lyric-del-btn:hover { opacity: 1 !important; background: rgba(233,69,96,.18); }
 
-  /* ── Help modal ── */
-  #help-modal {
+  /* ── Shared modal backdrop ── */
+  .modal-backdrop {
     display: none;
     position: fixed;
     inset: 0;
@@ -265,26 +283,45 @@ HTML = r"""<!DOCTYPE html>
     align-items: center;
     justify-content: center;
   }
-  #help-modal.open { display: flex; }
+  .modal-backdrop.open { display: flex; }
+
+  /* ── Help modal ── */
   #help-box {
     background: #16213e;
     border: 1px solid #0f3460;
     border-radius: 10px;
     padding: 24px 32px;
-    min-width: 360px;
-    max-width: 500px;
+    min-width: 380px;
+    max-width: 520px;
   }
   #help-box h2 { font-size: 15px; color: #e94560; margin-bottom: 16px; }
   #help-box table { border-collapse: collapse; width: 100%; font-size: 13px; }
   #help-box td { padding: 4px 8px; color: #c8d6e5; }
   #help-box td:first-child { text-align: right; padding-right: 16px; }
+  #help-box tr.section-gap td { padding-top: 10px; }
   kbd {
     background: #0d1b2a; border: 1px solid #0f3460;
     border-radius: 4px; padding: 1px 6px; font-size: 11px;
     font-family: monospace; color: #8899aa;
   }
-  #btn-help { background: #2a2a4a; color: #aaa; padding: 7px 12px; }
   #help-close { margin-top: 16px; width: 100%; background: #0f3460; color: #e0e0e0; }
+
+  /* ── Confirm modal ── */
+  #confirm-box {
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 10px;
+    padding: 24px 28px;
+    min-width: 320px;
+    max-width: 440px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  #confirm-box p { font-size: 14px; color: #c8d6e5; line-height: 1.5; white-space: pre-wrap; }
+  #confirm-buttons { display: flex; gap: 10px; justify-content: flex-end; }
+  #confirm-cancel { background: #2a2a4a; color: #aaa; }
+  #confirm-ok     { background: #e94560; color: #fff; }
 </style>
 </head>
 <body>
@@ -293,6 +330,8 @@ HTML = r"""<!DOCTYPE html>
   <h1>🎵 LRC Editor</h1>
   <span class="file-name" id="file-label"></span>
   <button id="btn-undo" disabled>↩ Undo</button>
+  <button id="btn-add">➕ Add</button>
+  <button id="btn-delete" disabled>🗑 Delete</button>
   <button id="btn-save">💾 Save Draft</button>
   <button id="btn-preview">▶ Preview in mpv</button>
   <button id="btn-commit">✅ Commit</button>
@@ -300,23 +339,24 @@ HTML = r"""<!DOCTYPE html>
   <span id="status"></span>
 </div>
 
-<div id="help-modal">
+<div id="help-modal" class="modal-backdrop">
   <div id="help-box">
     <h2>⌨️ Keyboard Shortcuts</h2>
     <table>
       <tr><td><kbd>Space</kbd></td><td>Play / Pause</td></tr>
       <tr><td><kbd>m</kbd></td><td>Mute toggle</td></tr>
       <tr><td><kbd>Home</kbd></td><td>Jump to start</td></tr>
-      <tr><td></td><td></td></tr>
-      <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Seek ±1s</td></tr>
+      <tr class="section-gap"><td><kbd>←</kbd> <kbd>→</kbd></td><td>Seek ±1s</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>←</kbd> <kbd>→</kbd></td><td>Seek ±5s</td></tr>
       <tr><td><kbd>Shift</kbd>+<kbd>←</kbd> <kbd>→</kbd></td><td>Fine seek ±0.1s</td></tr>
-      <tr><td></td><td></td></tr>
-      <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Prev / Next marker</td></tr>
+      <tr class="section-gap"><td><kbd>[</kbd> <kbd>]</kbd></td><td>Prev / Next marker</td></tr>
       <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>Nudge selected marker ±0.1s</td></tr>
       <tr><td><kbd>Shift</kbd>+<kbd>,</kbd> <kbd>.</kbd></td><td>Nudge selected marker ±1s</td></tr>
-      <tr><td></td><td></td></tr>
-      <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Undo</td></tr>
+      <tr class="section-gap"><td><kbd>a</kbd></td><td>Add line at current position</td></tr>
+      <tr><td><kbd>e</kbd> / <kbd>Enter</kbd></td><td>Edit selected line text</td></tr>
+      <tr><td>double-click</td><td>Edit line text</td></tr>
+      <tr><td><kbd>Del</kbd> / <kbd>Backspace</kbd></td><td>Delete selected line</td></tr>
+      <tr class="section-gap"><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Undo</td></tr>
       <tr><td><kbd>?</kbd></td><td>This help</td></tr>
     </table>
     <button id="help-close">Close</button>
@@ -334,7 +374,17 @@ HTML = r"""<!DOCTYPE html>
   <span id="time-display">0:00.00 / 0:00.00</span>
 </div>
 
-<div id="lyrics-panel" id="lyrics"></div>
+<div id="confirm-modal" class="modal-backdrop">
+  <div id="confirm-box">
+    <p id="confirm-message"></p>
+    <div id="confirm-buttons">
+      <button id="confirm-cancel">Cancel</button>
+      <button id="confirm-ok">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div id="lyrics-panel"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
 <script>
@@ -348,7 +398,8 @@ let duration = 0;
 let activeIdx = -1;
 let selectedMarkerIdx = -1;
 
-const btnUndo = document.getElementById("btn-undo");
+const btnUndo   = document.getElementById("btn-undo");
+const btnDelete = document.getElementById("btn-delete");
 
 function pushUndo() {
   undoStack.push(JSON.parse(JSON.stringify(lyrics)));
@@ -359,46 +410,110 @@ function undo() {
   if (!undoStack.length) return;
   lyrics = undoStack.pop();
   btnUndo.disabled = undoStack.length === 0;
-  selectedMarkerIdx = -1;
+  selectedMarkerIdx = Math.min(selectedMarkerIdx, lyrics.length - 1);
   sortAndRender();
+  updateDeleteBtn();
   setStatus("Undone ✓");
 }
 btnUndo.addEventListener("click", undo);
 
-// Help modal
+function updateDeleteBtn() {
+  btnDelete.disabled = selectedMarkerIdx < 0 || selectedMarkerIdx >= lyrics.length;
+}
+
+// ── Help modal ───────────────────────────────────────────────────────────────
 const helpModal = document.getElementById("help-modal");
-document.getElementById("btn-help").addEventListener("click", () => helpModal.classList.toggle("open"));
+document.getElementById("btn-help").addEventListener("click",  () => helpModal.classList.toggle("open"));
 document.getElementById("help-close").addEventListener("click", () => helpModal.classList.remove("open"));
 helpModal.addEventListener("click", (e) => { if (e.target === helpModal) helpModal.classList.remove("open"); });
 
+// ── Non-blocking confirm modal ────────────────────────────────────────────────
+// Replaces window.confirm() so the audio context isn't suspended.
+const confirmModal  = document.getElementById("confirm-modal");
+const confirmMsg    = document.getElementById("confirm-message");
+const confirmOkBtn  = document.getElementById("confirm-ok");
+const confirmCancel = document.getElementById("confirm-cancel");
+let _confirmResolve = null;
+
+function showConfirm(message, okLabel = "Delete") {
+  return new Promise((resolve) => {
+    confirmMsg.textContent = message;
+    confirmOkBtn.textContent = okLabel;
+    _confirmResolve = resolve;
+    confirmModal.classList.add("open");
+    confirmCancel.focus(); // default focus on Cancel — safer
+  });
+}
+
+confirmOkBtn.addEventListener("click", () => {
+  confirmModal.classList.remove("open");
+  if (_confirmResolve) { _confirmResolve(true);  _confirmResolve = null; }
+});
+confirmCancel.addEventListener("click", () => {
+  confirmModal.classList.remove("open");
+  if (_confirmResolve) { _confirmResolve(false); _confirmResolve = null; }
+});
+confirmModal.addEventListener("click", (e) => {
+  if (e.target === confirmModal) {
+    confirmModal.classList.remove("open");
+    if (_confirmResolve) { _confirmResolve(false); _confirmResolve = null; }
+  }
+});
+
 // ── Keyboard shortcuts ────────────────────────────────────────────────────
 document.addEventListener("keydown", (e) => {
-  // Don't fire when user is typing in an input
+  // Don't intercept when user is typing in an input/textarea
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+
+  // Confirm modal takes full keyboard priority
+  if (confirmModal.classList.contains("open")) {
+    if (e.key === "Enter" || e.key === "y") {
+      e.preventDefault();
+      confirmOkBtn.click();
+    } else if (e.key === "Escape" || e.key === "n") {
+      e.preventDefault();
+      confirmCancel.click();
+    }
+    return; // swallow everything else while modal is open
+  }
+
+  // Help modal takes keyboard priority (after confirm)
+  if (helpModal.classList.contains("open")) {
+    if (e.key === "Escape" || e.key === "?" || e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      helpModal.classList.remove("open");
+    }
+    return; // swallow everything else while modal is open
+  }
 
   const ctrl = e.ctrlKey || e.metaKey;
 
-  // Undo
   if (ctrl && e.key === "z") { e.preventDefault(); undo(); return; }
+  if (e.key === "?") { e.preventDefault(); helpModal.classList.add("open"); document.getElementById("help-close").focus(); return; }
 
-  // Help
-  if (e.key === "?") { e.preventDefault(); helpModal.classList.toggle("open"); return; }
+  // Add line
+  if (e.key === "a" && !ctrl) { e.preventDefault(); addLine(); return; }
 
-  // Escape closes modal
-  if (e.key === "Escape") { helpModal.classList.remove("open"); return; }
+  // Delete selected
+  if ((e.key === "Delete" || e.key === "Backspace") && !ctrl) {
+    e.preventDefault(); deleteSelected(); return;
+  }
+
+  // Edit selected text
+  if ((e.key === "e" || e.key === "Enter") && !ctrl) {
+    e.preventDefault();
+    if (selectedMarkerIdx >= 0 && selectedMarkerIdx < lyrics.length) {
+      editLineText(selectedMarkerIdx);
+    }
+    return;
+  }
 
   if (!ws) return;
 
-  // Play/pause
   if (e.key === " ") { e.preventDefault(); ws.playPause(); return; }
-
-  // Mute
   if (e.key === "m") { e.preventDefault(); ws.setMuted(!ws.getMuted()); setStatus(ws.getMuted() ? "Muted 🔇" : "Unmuted 🔊"); return; }
-
-  // Jump to start
   if (e.key === "Home") { e.preventDefault(); ws.seekTo(0); return; }
 
-  // Seek
   if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
     e.preventDefault();
     const dir = e.key === "ArrowLeft" ? -1 : 1;
@@ -408,17 +523,14 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  // Prev/next marker
   if (e.key === "[" || e.key === "]") {
     e.preventDefault();
     if (!lyrics.length) return;
     let idx;
     if (selectedMarkerIdx >= 0) {
-      // already have a selection — just step relative to it
       idx = selectedMarkerIdx + (e.key === "[" ? -1 : 1);
       idx = Math.max(0, Math.min(lyrics.length - 1, idx));
     } else {
-      // no selection — find nearest to playback position
       const cur = ws.getCurrentTime();
       if (e.key === "[") {
         idx = -1;
@@ -438,7 +550,6 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  // Nudge selected marker
   if (e.key === "," || e.key === ".") {
     e.preventDefault();
     if (selectedMarkerIdx < 0 || selectedMarkerIdx >= lyrics.length) {
@@ -460,7 +571,7 @@ const btnPlay     = document.getElementById("btn-playpause");
 function setStatus(msg, ok=true) {
   statusEl.textContent = msg;
   statusEl.style.color = ok ? "#4caf50" : "#e94560";
-  if (ok) setTimeout(() => statusEl.textContent = "", 3000);
+  if (ok) setTimeout(() => { if (statusEl.textContent === msg) statusEl.textContent = ""; }, 3000);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -471,11 +582,106 @@ function fmtTime(t) {
   const s = (t - m*60).toFixed(2).padStart(5,"0");
   return `${m}:${s}`;
 }
-function parseTimeStr(s) {
-  // accepts m:ss.xx or raw seconds
-  const parts = s.split(":");
-  if (parts.length === 2) return parseFloat(parts[0])*60 + parseFloat(parts[1]);
-  return parseFloat(s);
+
+// ────────────────────────────────────────────────────────────────────────────
+// Add / Delete / Edit line
+// ────────────────────────────────────────────────────────────────────────────
+function addLine() {
+  const t = ws ? Math.round(ws.getCurrentTime() * 100) / 100 : 0;
+  pushUndo();
+  const newLn = { time: t, text: "" };
+  lyrics.push(newLn);
+  lyrics.sort((a, b) => a.time - b.time);
+  renderMarkers();
+  renderLyrics();
+  const idx = lyrics.indexOf(newLn);
+  selectedMarkerIdx = idx;
+  updateMarkerClasses();
+  updateSelectedRow();
+  updateDeleteBtn();
+  editLineText(idx);
+  setStatus("New line — type text, Enter to confirm");
+}
+
+async function deleteSelected() {
+  if (selectedMarkerIdx < 0 || selectedMarkerIdx >= lyrics.length) {
+    setStatus("No line selected", false);
+    return;
+  }
+  const ln = lyrics[selectedMarkerIdx];
+  const preview = ln.text ? `"${ln.text.substring(0, 40)}"` : "(empty line)";
+  const ok = await showConfirm(`Delete line at ${fmtTime(ln.time)}:\n${preview}`);
+  if (!ok) return;
+  pushUndo();
+  lyrics.splice(selectedMarkerIdx, 1);
+  selectedMarkerIdx = lyrics.length > 0 ? Math.min(selectedMarkerIdx, lyrics.length - 1) : -1;
+  sortAndRender();
+  updateDeleteBtn();
+  setStatus("Line deleted ✓");
+}
+
+function editLineText(idx) {
+  const rows = lyricsPanel.querySelectorAll(".lyric-row");
+  const row = rows[idx];
+  if (!row) return;
+
+  // If already editing this row, bail
+  if (row.querySelector(".lyric-text-input")) return;
+
+  const textEl = row.querySelector(".lyric-text");
+  if (!textEl) return;
+
+  const original = lyrics[idx].text;
+  let done = false;
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = original;
+  input.className = "lyric-text-input";
+
+  textEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+
+    const newText = save ? input.value : original;
+
+    if (save && newText !== original) {
+      pushUndo(); // snapshot BEFORE state (lyrics[idx].text still = original here)
+    }
+
+    lyrics[idx].text = newText;
+
+    const span = document.createElement("span");
+    span.className = "lyric-text";
+    span.textContent = newText;
+    attachTextDblClick(span, idx);
+    input.replaceWith(span);
+
+    if (save && newText !== original) {
+      renderMarkers(); // update marker labels
+      setStatus("Text updated ✓");
+    }
+  };
+
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation(); // prevent global shortcuts while typing
+    if (e.key === "Enter")  { e.preventDefault(); finish(true); }
+    if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+
+  input.addEventListener("blur", () => finish(true));
+}
+
+function attachTextDblClick(span, idx) {
+  span.addEventListener("dblclick", (e) => {
+    e.stopPropagation();
+    selectMarker(idx, false);
+    editLineText(idx);
+  });
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -513,7 +719,6 @@ function initWaveSurfer() {
 function onTimeUpdate() {
   const cur = ws.getCurrentTime();
   timeDisplay.textContent = `${fmtTime(cur)} / ${fmtTime(duration)}`;
-  // highlight active lyric
   let idx = -1;
   for (let i = lyrics.length - 1; i >= 0; i--) {
     if (cur >= lyrics[i].time) { idx = i; break; }
@@ -544,28 +749,24 @@ function renderMarkers() {
     label.textContent = ln.text;
     el.appendChild(label);
 
-    // click → select + seek
     el.addEventListener("click", (e) => {
       e.stopPropagation();
       selectMarker(i, true);
     });
 
-    // drag
     makeDraggable(el, i);
-
     markerLayer.appendChild(el);
   });
 }
 
 function makeDraggable(el, idx) {
-  let startX, startPct, startTime;
+  let startX, startPct;
 
   el.addEventListener("mousedown", (e) => {
     e.preventDefault();
     pushUndo();
     el.classList.add("dragging");
     startX = e.clientX;
-    const rect = markerLayer.getBoundingClientRect();
     startPct = lyrics[idx].time / duration;
 
     const onMove = (e2) => {
@@ -576,16 +777,14 @@ function makeDraggable(el, idx) {
       lyrics[idx].time = Math.round(newTime * 100) / 100;
       el.style.left = (newPct * 100) + "%";
       el.title = `[${fmtTime(lyrics[idx].time)}] ${lyrics[idx].text}`;
-      // sync lyrics row
       const row = lyricsPanel.children[idx];
-      if (row) row.querySelector(".lyric-time-val").textContent = fmtTime(lyrics[idx].time);
+      if (row) row.querySelector(".lyric-time").textContent = fmtTime(lyrics[idx].time);
     };
 
     const onUp = () => {
       el.classList.remove("dragging");
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
-      // re-sort if needed
       sortAndRender();
     };
 
@@ -605,16 +804,16 @@ function selectMarker(idx, seek=false) {
   if (seek && idx >= 0 && duration) ws.seekTo(lyrics[idx].time / duration);
   updateMarkerClasses();
   updateSelectedRow();
+  updateDeleteBtn();
 }
 
 function nudgeSelected(delta) {
   if (selectedMarkerIdx < 0) return;
   pushUndo();
   const t = lyrics[selectedMarkerIdx].time + delta;
-  lyrics[selectedMarkerIdx].time = Math.round(Math.max(0, Math.min(duration, t)) * 100) / 100;
-  const ref = lyrics[selectedMarkerIdx]; // object ref survives sort
+  lyrics[selectedMarkerIdx].time = Math.round(Math.max(0, Math.min(duration || 1e9, t)) * 100) / 100;
+  const ref = lyrics[selectedMarkerIdx];
   sortAndRender();
-  // re-find after sort
   const reIdx = lyrics.indexOf(ref);
   selectedMarkerIdx = reIdx >= 0 ? reIdx : 0;
   updateMarkerClasses();
@@ -625,14 +824,12 @@ function nudgeSelected(delta) {
 function updateMarkerClasses() {
   const markers = markerLayer.querySelectorAll(".marker");
   markers.forEach((m, i) => {
-    m.classList.toggle("active",    i === activeIdx);
-    m.classList.toggle("selected",  i === selectedMarkerIdx);
+    m.classList.toggle("active",   i === activeIdx);
+    m.classList.toggle("selected", i === selectedMarkerIdx);
   });
 }
 
-function updateActiveMarker() {
-  updateMarkerClasses();
-}
+function updateActiveMarker() { updateMarkerClasses(); }
 
 function updateSelectedRow() {
   const rows = lyricsPanel.querySelectorAll(".lyric-row");
@@ -654,21 +851,29 @@ function renderLyrics() {
 
     const timeEl = document.createElement("span");
     timeEl.className = "lyric-time";
-    const timeVal = document.createElement("span");
-    timeVal.className = "lyric-time-val";
-    timeVal.textContent = fmtTime(ln.time);
-    timeEl.appendChild(timeVal);
+    timeEl.textContent = fmtTime(ln.time);
 
     const textEl = document.createElement("span");
     textEl.className = "lyric-text";
-    textEl.textContent = ln.text;
+    textEl.textContent = ln.text || "";
+    attachTextDblClick(textEl, i);
+
+    // Per-row delete button (×), visible on hover
+    const delBtn = document.createElement("button");
+    delBtn.className = "lyric-del-btn";
+    delBtn.textContent = "×";
+    delBtn.title = "Delete line";
+    delBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      selectMarker(i, false);
+      deleteSelected();
+    });
 
     row.appendChild(timeEl);
     row.appendChild(textEl);
+    row.appendChild(delBtn);
 
-    row.addEventListener("click", () => {
-      selectMarker(i, true);
-    });
+    row.addEventListener("click", () => selectMarker(i, true));
 
     lyricsPanel.appendChild(row);
   });
@@ -685,6 +890,9 @@ function highlightActive() {
 // ────────────────────────────────────────────────────────────────────────────
 // Toolbar actions
 // ────────────────────────────────────────────────────────────────────────────
+document.getElementById("btn-add").addEventListener("click", addLine);
+document.getElementById("btn-delete").addEventListener("click", deleteSelected);
+
 document.getElementById("btn-save").addEventListener("click", async () => {
   const r = await fetch("/save", {
     method: "POST",
@@ -696,7 +904,6 @@ document.getElementById("btn-save").addEventListener("click", async () => {
 });
 
 document.getElementById("btn-preview").addEventListener("click", async () => {
-  // auto-save first
   await fetch("/save", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
@@ -708,7 +915,8 @@ document.getElementById("btn-preview").addEventListener("click", async () => {
 });
 
 document.getElementById("btn-commit").addEventListener("click", async () => {
-  if (!confirm("Overwrite the original .lrc file?")) return;
+  const ok = await showConfirm("Overwrite the original .lrc file?", "Commit");
+  if (!ok) return;
   await fetch("/save", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
@@ -723,13 +931,11 @@ document.getElementById("btn-commit").addEventListener("click", async () => {
 // Boot
 // ────────────────────────────────────────────────────────────────────────────
 (async () => {
-  // file label
   const resp = await fetch("/meta");
   const meta = await resp.json();
-  document.getElementById("file-label").textContent = meta.filename;
+  document.getElementById("file-label").textContent = meta.filename + (meta.lrc_new ? "  (new lyrics file)" : "");
   document.title = "LRC Editor — " + meta.filename;
 
-  // load lyrics
   const lr = await fetch("/lrc");
   lyrics = await lr.json();
 
@@ -750,16 +956,20 @@ def index():
 
 @app.route("/meta")
 def meta():
-    return jsonify({"filename": FLAC_PATH.name, "lrc": str(LRC_PATH)})
+    return jsonify({
+        "filename": FLAC_PATH.name,
+        "lrc": str(LRC_PATH),
+        "lrc_new": not LRC_PATH.exists(),
+    })
 
 @app.route("/audio")
 def audio():
-    return send_file(str(FLAC_PATH), mimetype="audio/flac",
-                     conditional=True)
+    return send_file(str(FLAC_PATH), mimetype="audio/flac", conditional=True)
 
 @app.route("/lrc")
 def lrc():
-    return jsonify(parse_lrc(LRC_PATH))
+    # Serve from draft (already initialized on startup)
+    return jsonify(parse_lrc(DRAFT_PATH))
 
 @app.route("/save", methods=["POST"])
 def save():
@@ -788,14 +998,22 @@ def preview():
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Initialize draft from existing LRC, or create an empty one
+    lrc_new = not LRC_PATH.exists()
+    if lrc_new:
+        DRAFT_PATH.write_text("", encoding="utf-8")
+        status_note = "  (no .lrc found — will be created on commit)"
+    else:
+        shutil.copy2(LRC_PATH, DRAFT_PATH)
+        status_note = ""
+
     url = f"http://localhost:{PORT}"
     print(f"🎵  lrc-editor")
     print(f"    Audio : {FLAC_PATH}")
-    print(f"    LRC   : {LRC_PATH}" + ("" if LRC_PATH.exists() else "  (not found — starting empty)"))
+    print(f"    LRC   : {LRC_PATH}{status_note}")
     print(f"    URL   : {url}")
     print(f"    Ctrl+C to quit\n")
 
-    # Open browser after a short delay so Flask is ready
     def open_browser():
         import time; time.sleep(0.8)
         subprocess.Popen(["open", url])

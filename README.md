@@ -108,9 +108,21 @@ lrc-editor "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
 ```
 
 - Looks for a `.lrc` sidecar alongside the FLAC automatically
+- If no `.lrc` exists, a working copy is created on open; Commit writes the new file
 - Opens in the browser with a waveform and draggable timestamp markers
 - Drag markers left/right to adjust timing
-- Toolbar: **Save Draft** → **Preview in mpv** → **Commit** (overwrites original `.lrc`)
+- Toolbar: **Save Draft** → **Preview in mpv** → **Commit** (overwrites/creates `.lrc`)
+
+#### Editing lyrics
+
+| Action | How |
+|--------|-----|
+| Select line | Click row or marker; use `[`/`]` to step through |
+| Edit text | `e` or `Enter` on selected line, or double-click |
+| Add line | `a` — inserts at current playback position, opens text editor |
+| Delete line | `Delete`/`Backspace` — confirm dialog, then gone |
+| Adjust timestamp | Drag marker on waveform, or nudge with `,`/`.` |
+| Undo | `Ctrl+Z` — all edits (add, delete, text change, nudge, drag) |
 
 #### Keyboard shortcuts
 
@@ -122,10 +134,14 @@ lrc-editor "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
 | `←` / `→` | Seek ±1s |
 | `Ctrl+←` / `Ctrl+→` | Seek ±5s |
 | `Shift+←` / `Shift+→` | Fine seek ±0.1s |
-| `[` / `]` | Prev / Next marker (selects it) |
+| `[` / `]` | Prev / Next marker |
 | `,` / `.` | Nudge selected marker ±0.1s |
 | `Shift+,` / `Shift+.` | Nudge selected marker ±1s |
+| `a` | Add line at current position |
+| `e` / `Enter` | Edit selected line text |
+| `Delete` / `Backspace` | Delete selected line |
 | `Ctrl+Z` | Undo |
 | `?` | Keyboard shortcut reference |
 
-Click a marker or lyric row to select it (cyan highlight), then nudge with `,`/`.`.
+**In confirm dialogs:** `Enter`/`y` to confirm, `Escape`/`n` to cancel.  
+**In help modal:** `Escape`, `Space`, `Enter`, or `?` to close.
