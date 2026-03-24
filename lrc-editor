@@ -1,7 +1,8 @@
 #!/opt/homebrew/bin/python3
 """
 lrc-editor — Local web-based LRC lyrics timestamp editor.
-Usage: lrc-editor /path/to/song.flac
+Usage: lrc-editor [/path/to/song.flac]
+       If no file is given, use the Open button in the UI.
 """
 
 import sys
@@ -27,19 +28,37 @@ except ImportError:
 import logging
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
-# ── Args ─────────────────────────────────────────────────────────────────────
-if len(sys.argv) < 2:
-    print("Usage: lrc-editor /path/to/song.flac")
-    sys.exit(1)
+# ── Mutable file state ────────────────────────────────────────────────────────
+state = {
+    "flac_path": None,   # Path | None
+    "lrc_path":  None,   # Path | None
+    "lrc_new":   False,
+}
 
-FLAC_PATH = Path(sys.argv[1]).resolve()
-if not FLAC_PATH.exists():
-    print(f"Error: file not found: {FLAC_PATH}")
-    sys.exit(1)
-
-LRC_PATH = FLAC_PATH.with_suffix(".lrc")
 DRAFT_PATH = Path("/tmp/lrc-editor-draft.lrc")
-MPV_BIN = "/opt/homebrew/bin/mpv"
+MPV_BIN    = "/opt/homebrew/bin/mpv"
+
+def _init_draft():
+    """Copy existing LRC → draft, or create an empty draft."""
+    lp = state["lrc_path"]
+    if lp and lp.exists():
+        shutil.copy2(lp, DRAFT_PATH)
+        state["lrc_new"] = False
+    else:
+        DRAFT_PATH.write_text("", encoding="utf-8")
+        state["lrc_new"] = True
+
+# ── Args ──────────────────────────────────────────────────────────────────────
+if len(sys.argv) >= 2:
+    p = Path(sys.argv[1]).resolve()
+    if not p.exists():
+        print(f"Error: file not found: {p}")
+        sys.exit(1)
+    state["flac_path"] = p
+    state["lrc_path"]  = p.with_suffix(".lrc")
+    _init_draft()
+else:
+    DRAFT_PATH.write_text("", encoding="utf-8")
 
 # ── LRC helpers ──────────────────────────────────────────────────────────────
 _LRC_RE = re.compile(r"\[(\d+):(\d+\.\d+)\](.*)")
@@ -125,6 +144,8 @@ HTML = r"""<!DOCTYPE html>
   }
   button:hover { opacity: .85; }
   button:disabled { opacity: .35; cursor: default; }
+  #btn-open    { background: #1a3a2a; color: #7ecfa0; }
+  #btn-import  { background: #2a1f3d; color: #b39ddb; }
   #btn-undo    { background: #2a2a4a; color: #aaa; }
   #btn-add     { background: #1b4332; color: #6fcf97; }
   #btn-delete  { background: #3b1a1a; color: #e94560; }
@@ -306,6 +327,44 @@ HTML = r"""<!DOCTYPE html>
   }
   #help-close { margin-top: 16px; width: 100%; background: #0f3460; color: #e0e0e0; }
 
+  /* ── Import modal ── */
+  #import-box {
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 10px;
+    padding: 24px 28px;
+    width: 540px;
+    max-width: 94vw;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  #import-box h2 { font-size: 15px; color: #b39ddb; }
+  #import-box p  { font-size: 12px; color: #6677aa; line-height: 1.5; }
+  #import-textarea {
+    width: 100%;
+    height: 220px;
+    background: #0d1b2a;
+    border: 1px solid #0f3460;
+    border-radius: 6px;
+    color: #c8d6e5;
+    font-size: 13px;
+    font-family: inherit;
+    padding: 10px 12px;
+    resize: vertical;
+    outline: none;
+    line-height: 1.6;
+  }
+  #import-textarea:focus { border-color: #b39ddb; }
+  #import-warning {
+    font-size: 12px;
+    color: #e9a040;
+    display: none;
+  }
+  #import-buttons { display: flex; gap: 10px; justify-content: flex-end; }
+  #import-cancel { background: #2a2a4a; color: #aaa; }
+  #import-ok     { background: #b39ddb; color: #1a1a2e; font-weight: 600; }
+
   /* ── Confirm modal ── */
   #confirm-box {
     background: #16213e;
@@ -328,7 +387,9 @@ HTML = r"""<!DOCTYPE html>
 
 <div id="toolbar">
   <h1>🎵 LRC Editor</h1>
-  <span class="file-name" id="file-label"></span>
+  <span class="file-name" id="file-label">No file loaded</span>
+  <button id="btn-open">📂 Open</button>
+  <button id="btn-import">📋 Lay Out Lyrics</button>
   <button id="btn-undo" disabled>↩ Undo</button>
   <button id="btn-add">➕ Add</button>
   <button id="btn-delete" disabled>🗑 Delete</button>
@@ -374,6 +435,21 @@ HTML = r"""<!DOCTYPE html>
   <span id="time-display">0:00.00 / 0:00.00</span>
 </div>
 
+<div id="import-modal" class="modal-backdrop">
+  <div id="import-box">
+    <h2>📋 Lay Out Lyrics</h2>
+    <p>Paste raw lyrics below — one line per lyric line. Empty lines are ignored.<br>
+       Lines will be spread across the track weighted by length.<br>
+       Use keyboard nudges to fine-tune timestamps afterward.</p>
+    <textarea id="import-textarea" placeholder="Paste lyrics here…" spellcheck="false"></textarea>
+    <span id="import-warning"></span>
+    <div id="import-buttons">
+      <button id="import-cancel">Cancel</button>
+      <button id="import-ok">Lay Out</button>
+    </div>
+  </div>
+</div>
+
 <div id="confirm-modal" class="modal-backdrop">
   <div id="confirm-box">
     <p id="confirm-message"></p>
@@ -397,6 +473,7 @@ let ws = null;
 let duration = 0;
 let activeIdx = -1;
 let selectedMarkerIdx = -1;
+let fileLoaded = false;
 
 const btnUndo   = document.getElementById("btn-undo");
 const btnDelete = document.getElementById("btn-delete");
@@ -428,7 +505,6 @@ document.getElementById("help-close").addEventListener("click", () => helpModal.
 helpModal.addEventListener("click", (e) => { if (e.target === helpModal) helpModal.classList.remove("open"); });
 
 // ── Non-blocking confirm modal ────────────────────────────────────────────────
-// Replaces window.confirm() so the audio context isn't suspended.
 const confirmModal  = document.getElementById("confirm-modal");
 const confirmMsg    = document.getElementById("confirm-message");
 const confirmOkBtn  = document.getElementById("confirm-ok");
@@ -441,7 +517,7 @@ function showConfirm(message, okLabel = "Delete") {
     confirmOkBtn.textContent = okLabel;
     _confirmResolve = resolve;
     confirmModal.classList.add("open");
-    confirmCancel.focus(); // default focus on Cancel — safer
+    confirmCancel.focus();
   });
 }
 
@@ -462,10 +538,8 @@ confirmModal.addEventListener("click", (e) => {
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────
 document.addEventListener("keydown", (e) => {
-  // Don't intercept when user is typing in an input/textarea
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
 
-  // Confirm modal takes full keyboard priority
   if (confirmModal.classList.contains("open")) {
     if (e.key === "Enter" || e.key === "y") {
       e.preventDefault();
@@ -474,16 +548,15 @@ document.addEventListener("keydown", (e) => {
       e.preventDefault();
       confirmCancel.click();
     }
-    return; // swallow everything else while modal is open
+    return;
   }
 
-  // Help modal takes keyboard priority (after confirm)
   if (helpModal.classList.contains("open")) {
     if (e.key === "Escape" || e.key === "?" || e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       helpModal.classList.remove("open");
     }
-    return; // swallow everything else while modal is open
+    return;
   }
 
   const ctrl = e.ctrlKey || e.metaKey;
@@ -491,15 +564,12 @@ document.addEventListener("keydown", (e) => {
   if (ctrl && e.key === "z") { e.preventDefault(); undo(); return; }
   if (e.key === "?") { e.preventDefault(); helpModal.classList.add("open"); document.getElementById("help-close").focus(); return; }
 
-  // Add line
   if (e.key === "a" && !ctrl) { e.preventDefault(); addLine(); return; }
 
-  // Delete selected
   if ((e.key === "Delete" || e.key === "Backspace") && !ctrl) {
     e.preventDefault(); deleteSelected(); return;
   }
 
-  // Edit selected text
   if ((e.key === "e" || e.key === "Enter") && !ctrl) {
     e.preventDefault();
     if (selectedMarkerIdx >= 0 && selectedMarkerIdx < lyrics.length) {
@@ -508,7 +578,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  if (!ws) return;
+  if (!ws || !fileLoaded) return;
 
   if (e.key === " ") { e.preventDefault(); ws.playPause(); return; }
   if (e.key === "m") { e.preventDefault(); ws.setMuted(!ws.getMuted()); setStatus(ws.getMuted() ? "Muted 🔇" : "Unmuted 🔊"); return; }
@@ -625,7 +695,6 @@ function editLineText(idx) {
   const row = rows[idx];
   if (!row) return;
 
-  // If already editing this row, bail
   if (row.querySelector(".lyric-text-input")) return;
 
   const textEl = row.querySelector(".lyric-text");
@@ -650,7 +719,7 @@ function editLineText(idx) {
     const newText = save ? input.value : original;
 
     if (save && newText !== original) {
-      pushUndo(); // snapshot BEFORE state (lyrics[idx].text still = original here)
+      pushUndo();
     }
 
     lyrics[idx].text = newText;
@@ -662,13 +731,13 @@ function editLineText(idx) {
     input.replaceWith(span);
 
     if (save && newText !== original) {
-      renderMarkers(); // update marker labels
+      renderMarkers();
       setStatus("Text updated ✓");
     }
   };
 
   input.addEventListener("keydown", (e) => {
-    e.stopPropagation(); // prevent global shortcuts while typing
+    e.stopPropagation();
     if (e.key === "Enter")  { e.preventDefault(); finish(true); }
     if (e.key === "Escape") { e.preventDefault(); finish(false); }
   });
@@ -685,9 +754,17 @@ function attachTextDblClick(span, idx) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// WaveSurfer init
+// WaveSurfer init / reload
 // ────────────────────────────────────────────────────────────────────────────
 function initWaveSurfer() {
+  if (ws) {
+    ws.destroy();
+    ws = null;
+  }
+  duration = 0;
+  timeDisplay.textContent = "0:00.00 / 0:00.00";
+  btnPlay.textContent = "▶";
+
   ws = WaveSurfer.create({
     container: "#waveform",
     waveColor: "#4a6fa5",
@@ -696,7 +773,7 @@ function initWaveSurfer() {
     barWidth: 2,
     barGap: 1,
     barRadius: 2,
-    url: "/audio",
+    url: "/audio?t=" + Date.now(),
     backend: "WebAudio",
     interact: true,
     hideScrollbar: true,
@@ -712,9 +789,9 @@ function initWaveSurfer() {
   ws.on("finish", () => btnPlay.textContent = "▶");
   ws.on("play",   () => btnPlay.textContent = "⏸");
   ws.on("pause",  () => btnPlay.textContent = "▶");
-
-  btnPlay.addEventListener("click", () => ws.playPause());
 }
+
+btnPlay.addEventListener("click", () => { if (ws && fileLoaded) ws.playPause(); });
 
 function onTimeUpdate() {
   const cur = ws.getCurrentTime();
@@ -729,6 +806,133 @@ function onTimeUpdate() {
   }
   updateActiveMarker();
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Open button
+// ────────────────────────────────────────────────────────────────────────────
+document.getElementById("btn-open").addEventListener("click", async () => {
+  setStatus("Opening file picker…");
+  let r, j;
+  try {
+    r = await fetch("/open", { method: "POST" });
+    j = await r.json();
+  } catch (err) {
+    setStatus("Open failed", false);
+    return;
+  }
+
+  if (!j.ok) {
+    if (!j.cancelled) setStatus(j.error || "Open failed", false);
+    else statusEl.textContent = ""; // silently clear on cancel
+    return;
+  }
+
+  // Reset all state
+  lyrics = [];
+  undoStack = [];
+  activeIdx = -1;
+  selectedMarkerIdx = -1;
+  btnUndo.disabled = true;
+  updateDeleteBtn();
+
+  // Reload meta
+  const meta = await (await fetch("/meta")).json();
+  const fileLabel = document.getElementById("file-label");
+  fileLabel.textContent = meta.filename + (meta.lrc_new ? "  (new lyrics file)" : "");
+  document.title = "LRC Editor — " + meta.filename;
+  fileLoaded = true;
+
+  // Reload lyrics
+  lyrics = await (await fetch("/lrc")).json();
+  renderLyrics();
+
+  // Reload audio (destroy + recreate WaveSurfer)
+  initWaveSurfer();
+
+  setStatus("Opened ✓");
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Lay Out Lyrics (import)
+// ────────────────────────────────────────────────────────────────────────────
+const importModal   = document.getElementById("import-modal");
+const importTA      = document.getElementById("import-textarea");
+const importWarning = document.getElementById("import-warning");
+const importOkBtn   = document.getElementById("import-ok");
+const importCancel  = document.getElementById("import-cancel");
+
+function openImportModal() {
+  importTA.value = "";
+  const warn = importWarning;
+  if (lyrics.length > 0) {
+    warn.textContent = `⚠ This will replace ${lyrics.length} existing line${lyrics.length === 1 ? "" : "s"}.`;
+    warn.style.display = "block";
+  } else {
+    warn.style.display = "none";
+  }
+  importModal.classList.add("open");
+  setTimeout(() => importTA.focus(), 50);
+}
+
+function closeImportModal() {
+  importModal.classList.remove("open");
+}
+
+function distributeLines(lines) {
+  // Length-weighted distribution across track (or 5s/line fallback)
+  const dur = duration > 0 ? duration : null;
+  const weights = lines.map(l => Math.max(l.length, 1));
+  const totalW  = weights.reduce((a, b) => a + b, 0);
+
+  let result = [];
+  if (dur) {
+    // Leave a small tail so the last line isn't at the very end
+    const usable = dur > 10 ? dur - 2 : dur * 0.95;
+    let t = 0;
+    for (let i = 0; i < lines.length; i++) {
+      result.push({ time: Math.round(t * 100) / 100, text: lines[i] });
+      t += (weights[i] / totalW) * usable;
+    }
+  } else {
+    // No track loaded — 5s per line, length-weighted within that budget
+    let t = 0;
+    for (let i = 0; i < lines.length; i++) {
+      result.push({ time: Math.round(t * 100) / 100, text: lines[i] });
+      t += (weights[i] / totalW) * lines.length * 5;
+    }
+  }
+  return result;
+}
+
+function doImport() {
+  const raw = importTA.value;
+  const lines = raw.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length === 0) {
+    importWarning.textContent = "No lines found — paste some lyrics first.";
+    importWarning.style.display = "block";
+    return;
+  }
+  pushUndo();
+  lyrics = distributeLines(lines);
+  activeIdx = -1;
+  selectedMarkerIdx = -1;
+  sortAndRender();
+  updateDeleteBtn();
+  closeImportModal();
+  setStatus(`Laid out ${lines.length} lines ✓${duration > 0 ? "" : " (no track — times are placeholders)"}`);
+}
+
+document.getElementById("btn-import").addEventListener("click", openImportModal);
+importOkBtn.addEventListener("click", doImport);
+importCancel.addEventListener("click", closeImportModal);
+importModal.addEventListener("click", (e) => { if (e.target === importModal) closeImportModal(); });
+
+importTA.addEventListener("keydown", (e) => {
+  e.stopPropagation(); // don't let global shortcuts fire while typing
+  if (e.key === "Escape") { e.preventDefault(); closeImportModal(); }
+  // Ctrl+Enter = confirm
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doImport(); }
+});
 
 // ────────────────────────────────────────────────────────────────────────────
 // Markers
@@ -764,6 +968,7 @@ function makeDraggable(el, idx) {
 
   el.addEventListener("mousedown", (e) => {
     e.preventDefault();
+    selectMarker(idx, false);
     pushUndo();
     el.classList.add("dragging");
     startX = e.clientX;
@@ -858,7 +1063,6 @@ function renderLyrics() {
     textEl.textContent = ln.text || "";
     attachTextDblClick(textEl, i);
 
-    // Per-row delete button (×), visible on hover
     const delBtn = document.createElement("button");
     delBtn.className = "lyric-del-btn";
     delBtn.textContent = "×";
@@ -933,14 +1137,19 @@ document.getElementById("btn-commit").addEventListener("click", async () => {
 (async () => {
   const resp = await fetch("/meta");
   const meta = await resp.json();
-  document.getElementById("file-label").textContent = meta.filename + (meta.lrc_new ? "  (new lyrics file)" : "");
-  document.title = "LRC Editor — " + meta.filename;
 
-  const lr = await fetch("/lrc");
-  lyrics = await lr.json();
+  if (meta.filename) {
+    document.getElementById("file-label").textContent =
+      meta.filename + (meta.lrc_new ? "  (new lyrics file)" : "");
+    document.title = "LRC Editor — " + meta.filename;
+    fileLoaded = true;
 
-  renderLyrics();
-  initWaveSurfer();
+    const lr = await fetch("/lrc");
+    lyrics = await lr.json();
+    renderLyrics();
+    initWaveSurfer();
+  }
+  // else: no file yet — just show the UI, Open button handles the rest
 })();
 </script>
 </body>
@@ -956,20 +1165,103 @@ def index():
 
 @app.route("/meta")
 def meta():
+    fp = state["flac_path"]
+    if not fp:
+        return jsonify({"filename": None, "lrc": None, "lrc_new": False})
     return jsonify({
-        "filename": FLAC_PATH.name,
-        "lrc": str(LRC_PATH),
-        "lrc_new": not LRC_PATH.exists(),
+        "filename": fp.name,
+        "lrc": str(state["lrc_path"]),
+        "lrc_new": state["lrc_new"],
     })
+
+CHUNK = 1 << 16  # 64 KB
 
 @app.route("/audio")
 def audio():
-    return send_file(str(FLAC_PATH), mimetype="audio/flac", conditional=True)
+    fp = state["flac_path"]
+    if not fp:
+        return ("No file loaded", 404)
+    suffix = fp.suffix.lower()
+    mime_map = {
+        ".flac": "audio/flac", ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",   ".aac": "audio/aac",
+        ".wav": "audio/wav",   ".ogg": "audio/ogg",
+    }
+    mime      = mime_map.get(suffix, "application/octet-stream")
+    file_size = fp.stat().st_size
+
+    rng = request.headers.get("Range")
+    if rng:
+        m = re.match(r"bytes=(\d+)-(\d*)", rng)
+        start = int(m.group(1)) if m else 0
+        end   = int(m.group(2)) if m and m.group(2) else file_size - 1
+        end   = min(end, file_size - 1)
+        length = end - start + 1
+
+        def stream_range():
+            with open(fp, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    data = f.read(min(CHUNK, remaining))
+                    if not data:
+                        break
+                    yield data
+                    remaining -= len(data)
+
+        headers = {
+            "Content-Range":  f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges":  "bytes",
+            "Content-Length": str(length),
+            "Content-Type":   mime,
+        }
+        return Response(stream_range(), status=206, headers=headers)
+
+    def stream_full():
+        with open(fp, "rb") as f:
+            while True:
+                data = f.read(CHUNK)
+                if not data:
+                    break
+                yield data
+
+    headers = {
+        "Accept-Ranges":  "bytes",
+        "Content-Length": str(file_size),
+        "Content-Type":   mime,
+    }
+    return Response(stream_full(), status=200, headers=headers)
 
 @app.route("/lrc")
 def lrc():
-    # Serve from draft (already initialized on startup)
     return jsonify(parse_lrc(DRAFT_PATH))
+
+@app.route("/open", methods=["POST"])
+def open_file():
+    try:
+        result = subprocess.run(
+            ["osascript", "-e",
+             'POSIX path of (choose file with prompt "Select audio file"'
+             ' of type {"flac", "mp3", "m4a", "aac", "wav", "ogg"})'],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            # User cancelled — osascript exits non-zero on cancel
+            return jsonify({"ok": False, "cancelled": True})
+        path = Path(result.stdout.strip()).resolve()
+        if not path.exists():
+            return jsonify({"ok": False, "error": "File not found"})
+        state["flac_path"] = path
+        state["lrc_path"]  = path.with_suffix(".lrc")
+        _init_draft()
+        lrc_note = "  (new .lrc)" if state["lrc_new"] else ""
+        print(f"\n    ↳ Audio : {path}")
+        print(f"      LRC   : {state['lrc_path']}{lrc_note}", flush=True)
+        return jsonify({"ok": True, "lrc_new": state["lrc_new"]})
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "cancelled": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/save", methods=["POST"])
 def save():
@@ -979,38 +1271,39 @@ def save():
 
 @app.route("/commit", methods=["POST"])
 def commit():
+    if not state["lrc_path"]:
+        return jsonify({"ok": False, "error": "No file loaded"})
     if not DRAFT_PATH.exists():
         return jsonify({"ok": False, "error": "No draft found — save first"})
-    shutil.copy2(DRAFT_PATH, LRC_PATH)
+    shutil.copy2(DRAFT_PATH, state["lrc_path"])
+    state["lrc_new"] = False
     return jsonify({"ok": True})
 
 @app.route("/preview", methods=["POST"])
 def preview():
+    if not state["flac_path"]:
+        return jsonify({"ok": False, "error": "No file loaded"})
     if not DRAFT_PATH.exists():
         return jsonify({"ok": False, "error": "No draft — save first"})
     if not os.path.exists(MPV_BIN):
         return jsonify({"ok": False, "error": f"mpv not found at {MPV_BIN}"})
     subprocess.Popen(
-        [MPV_BIN, f"--sub-file={DRAFT_PATH}", str(FLAC_PATH)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        [MPV_BIN, f"--sub-file={DRAFT_PATH}", str(state["flac_path"])],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     return jsonify({"ok": True})
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Initialize draft from existing LRC, or create an empty one
-    lrc_new = not LRC_PATH.exists()
-    if lrc_new:
-        DRAFT_PATH.write_text("", encoding="utf-8")
-        status_note = "  (no .lrc found — will be created on commit)"
-    else:
-        shutil.copy2(LRC_PATH, DRAFT_PATH)
-        status_note = ""
-
     url = f"http://localhost:{PORT}"
-    print(f"🎵  lrc-editor")
-    print(f"    Audio : {FLAC_PATH}")
-    print(f"    LRC   : {LRC_PATH}{status_note}")
+    fp = state["flac_path"]
+    if fp:
+        lrc_note = "" if not state["lrc_new"] else "  (new .lrc — will be created on commit)"
+        print(f"🎵  lrc-editor")
+        print(f"    Audio : {fp}")
+        print(f"    LRC   : {state['lrc_path']}{lrc_note}")
+    else:
+        print(f"🎵  lrc-editor  (no file — use the Open button)")
     print(f"    URL   : {url}")
     print(f"    Ctrl+C to quit\n")
 
