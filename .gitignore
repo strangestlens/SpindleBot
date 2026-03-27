@@ -1,1 +1,30 @@
 RERIP.md
+
+# Claude Code internals
+.claude/
+
+# Secrets and local config — never commit these
+config.toml
+secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
