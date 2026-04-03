@@ -1,0 +1,11 @@
+#!/bin/bash
+# Mock python: handles spindlebot.disc calls; exits 0 for everything else.
+if [[ "$1" == "-m" ]] && [[ "$2" == "spindlebot.disc" ]]; then
+  case "$3" in
+    check) echo "${MOCK_DISC_WAIT:-}"  ;;  # empty = pass, "WAIT:1:2" = hold
+    count) echo "${MOCK_DISC_COUNT:-1}" ;;
+  esac
+  exit 0
+fi
+echo "python $*" >> "${MOCK_LOG:-/dev/null}"
+exit 0

@@ -54,32 +54,7 @@ sleep 3
 # Check if all discs are present for multi-disc albums.
 # Skip with --force to import immediately regardless of disctotal tags.
 if [[ "$FORCE" -eq 0 ]]; then
-  WAIT_CHECK=$($PYTHON - "$ALBUM_DIR" << 'PYEOF'
-import sys, glob, mutagen.flac
-
-album_dir = sys.argv[1]
-files = glob.glob(album_dir + "/*.flac")
-if not files:
-    sys.exit(0)
-
-disc_totals = set()
-disc_numbers = set()
-for path in files:
-    try:
-        f = mutagen.flac.FLAC(path)
-        dt = int((f.tags.get('disctotal') or f.tags.get('totaldiscs') or ['1'])[0])
-        dn = int((f.tags.get('discnumber') or f.tags.get('disc') or ['1'])[0])
-        disc_totals.add(dt)
-        disc_numbers.add(dn)
-    except:
-        pass
-
-if len(disc_totals) == 1:
-    disctotal = disc_totals.pop()
-    if disctotal > 1 and len(disc_numbers) < disctotal:
-        print(f"WAIT:{len(disc_numbers)}:{disctotal}")
-PYEOF
-)
+  WAIT_CHECK=$(PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR" $PYTHON -m spindlebot.disc check "$ALBUM_DIR")
 
   if [[ "$WAIT_CHECK" == WAIT:* ]]; then
     HAVE=$(echo "$WAIT_CHECK" | cut -d: -f2)
@@ -95,8 +70,7 @@ fi
 
 # Step 1: Pre-process tags (feat., compilation, artist normalization)
 log "Running pretag on: $ALBUM_DIR"
-$PYTHON "$PRETAG" "$ALBUM_DIR" >> "$LOGFILE" 2>&1
-if [ $? -ne 0 ]; then
+if ! $PYTHON "$PRETAG" "$ALBUM_DIR" >> "$LOGFILE" 2>&1; then
   log "pretag failed — aborting import"
   exit 1
 fi
@@ -109,6 +83,7 @@ STATUS=$?
 if [ $STATUS -eq 0 ]; then
   log "Import complete: $ALBUM_DIR"
   TODAY=$(date +%Y-%m-%d)
+  # shellcheck disable=SC2016  # $albumartist/$album are beet template vars, not bash vars
   ARTIST_ALBUM=$($BEET ls -f '$albumartist - $album' "added:${TODAY}.." 2>/dev/null | sort -u | head -1)
   if [ -z "$ARTIST_ALBUM" ]; then
     ARTIST_ALBUM=$(basename "$ALBUM_DIR")
@@ -118,19 +93,7 @@ if [ $STATUS -eq 0 ]; then
   # Step 3: Post-import fixes
   # Fix multidisc: base it on how many disc numbers were ACTUALLY ripped,
   # not MusicBrainz disctotal (which can be >1 for DualDiscs, deluxe editions, etc.)
-  ACTUAL_DISCS=$($PYTHON - "$ALBUM_DIR" << 'PYEOF'
-import sys, glob, mutagen.flac
-files = glob.glob(sys.argv[1] + "/*.flac")
-discs = set()
-for path in files:
-    try:
-        f = mutagen.flac.FLAC(path)
-        dn = int((f.tags.get('discnumber') or f.tags.get('disc') or ['1'])[0])
-        discs.add(dn)
-    except: pass
-print(len(discs))
-PYEOF
-)
+  ACTUAL_DISCS=$(PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR" $PYTHON -m spindlebot.disc count "$ALBUM_DIR")
   # Fix disctotal in DB and ensure multidisc flex attr row exists for every new item.
   # MusicBrainz can say disctotal=2 for a single-disc rip (DualDiscs, deluxe editions);
   # we patch disctotal to actual ripped count so the inline computes correctly.
@@ -159,6 +122,7 @@ PYEOF
   # Step 4: posttag — strip beets alias tags and truncate DATE to year only.
   # Runs after beet move (beet is fully done writing at this point).
   # Also runs in sync script as a no-op safety net for any pre-existing files.
+  # shellcheck disable=SC2016  # $path is a beet template var, not a bash var
   IMPORT_FILES=$($BEET ls -f '$path' "added:${TODAY}.." 2>/dev/null | grep -v "^/Volumes/")
   if [ -n "$IMPORT_FILES" ]; then
     log "Running posttag on imported files"

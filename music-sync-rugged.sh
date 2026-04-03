@@ -31,7 +31,7 @@ if [ -f "$LOCKFILE" ]; then
   exit 0
 fi
 touch "$LOCKFILE"
-trap "rm -f '$LOCKFILE'" EXIT
+trap 'rm -f "$LOCKFILE"' EXIT
 
 # Confirm drive is actually mounted (launchd can fire spuriously)
 if [ ! -d "$REMOTE" ]; then
@@ -66,10 +66,12 @@ if [ "$REMAINING" -eq 0 ]; then
   log "Sync complete."
 
   # Update beets DB paths: local Library → DwRugged
-  sqlite3 "$DB" \
-    "UPDATE items SET path = replace(path, '${LOCAL}', '${REMOTE}') WHERE path LIKE '${LOCAL}/%';" 2>/dev/null \
-    && log "Beets DB paths updated to DwRugged" \
-    || log "WARNING: beets DB path update failed"
+  if sqlite3 "$DB" \
+      "UPDATE items SET path = replace(path, '${LOCAL}', '${REMOTE}') WHERE path LIKE '${LOCAL}/%';" 2>/dev/null; then
+    log "Beets DB paths updated to DwRugged"
+  else
+    log "WARNING: beets DB path update failed"
+  fi
 
   # Fetch lyrics for any albums on DwRugged missing .lrc files.
   # Runs here (not in import script) to avoid race condition with rsync.

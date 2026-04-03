@@ -1,0 +1,4 @@
+#!/bin/bash
+# Mock beet: logs args, exits with MOCK_BEET_EXIT (default 0).
+echo "beet $*" >> "${MOCK_LOG:-/dev/null}"
+exit "${MOCK_BEET_EXIT:-0}"
