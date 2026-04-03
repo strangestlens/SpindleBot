@@ -23,9 +23,17 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOGFILE"
 }
 
-log "Watcher fired: $1"
+FORCE=0
+CHANGED=""
+for arg in "$@"; do
+  if [[ "$arg" == "--force" ]]; then
+    FORCE=1
+  else
+    CHANGED="$arg"
+  fi
+done
 
-CHANGED="$1"
+log "Watcher fired: $CHANGED${FORCE:+ (--force)}"
 
 # Only care about .log files (XLD rip log = album complete)
 if [[ "$CHANGED" != *.log ]]; then
@@ -44,36 +52,9 @@ log "Detected completed rip: $ALBUM_DIR"
 sleep 3
 
 # Check if all discs are present for multi-disc albums.
-# Only wait if ALL flac files consistently report disctotal > 1 AND we're missing disc numbers.
-$PYTHON - "$ALBUM_DIR" << 'PYEOF'
-import sys, glob, mutagen.flac
-
-album_dir = sys.argv[1]
-files = glob.glob(album_dir + "/*.flac")
-if not files:
-    sys.exit(0)
-
-disc_totals = set()
-disc_numbers = set()
-for path in files:
-    try:
-        f = mutagen.flac.FLAC(path)
-        dt = int((f.tags.get('disctotal') or f.tags.get('totaldiscs') or ['1'])[0])
-        dn = int((f.tags.get('discnumber') or f.tags.get('disc') or ['1'])[0])
-        disc_totals.add(dt)
-        disc_numbers.add(dn)
-    except:
-        pass
-
-# Only hold if ALL files agree on disctotal > 1 and we're missing discs
-if len(disc_totals) == 1:
-    disctotal = disc_totals.pop()
-    if disctotal > 1 and len(disc_numbers) < disctotal:
-        print(f"WAIT:{len(disc_numbers)}:{disctotal}")
-        sys.exit(0)
-PYEOF
-
-WAIT_CHECK=$($PYTHON - "$ALBUM_DIR" << 'PYEOF'
+# Skip with --force to import immediately regardless of disctotal tags.
+if [[ "$FORCE" -eq 0 ]]; then
+  WAIT_CHECK=$($PYTHON - "$ALBUM_DIR" << 'PYEOF'
 import sys, glob, mutagen.flac
 
 album_dir = sys.argv[1]
@@ -100,13 +81,17 @@ if len(disc_totals) == 1:
 PYEOF
 )
 
-if [[ "$WAIT_CHECK" == WAIT:* ]]; then
-  HAVE=$(echo "$WAIT_CHECK" | cut -d: -f2)
-  NEED=$(echo "$WAIT_CHECK" | cut -d: -f3)
-  log "Multi-disc album: have $HAVE of $NEED discs — waiting for remaining discs before importing"
-  exit 0
+  if [[ "$WAIT_CHECK" == WAIT:* ]]; then
+    HAVE=$(echo "$WAIT_CHECK" | cut -d: -f2)
+    NEED=$(echo "$WAIT_CHECK" | cut -d: -f3)
+    log "Multi-disc album: have $HAVE of $NEED discs — waiting for remaining discs before importing"
+    log "  (run with --force to import immediately)"
+    exit 0
+  fi
+  log "Disc check passed — proceeding with import"
+else
+  log "Disc check skipped (--force)"
 fi
-log "Disc check passed — proceeding with import"
 
 # Step 1: Pre-process tags (feat., compilation, artist normalization)
 log "Running pretag on: $ALBUM_DIR"

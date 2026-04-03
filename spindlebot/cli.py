@@ -2,9 +2,10 @@
 SpindleBot CLI.
 
 Usage:
-    python -m spindlebot check              Validate config and tool availability
-    python -m spindlebot config shell       Print config as shell-sourceable exports
-    python -m spindlebot config get <key>   Print a single value (e.g. core.library_dir)
+    python -m spindlebot check                     Validate config and tool availability
+    python -m spindlebot config shell              Print config as shell-sourceable exports
+    python -m spindlebot config get <key>          Print a single value (e.g. core.library_dir)
+    python -m spindlebot import <log> [--force]    Run import pipeline for a staged album
 """
 
 from __future__ import annotations
@@ -162,6 +163,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "check":
         return cmd_check(cfg)
+
+    if command == "import":
+        if len(args) < 2:
+            print("Usage: spindlebot import <xld-log-path> [--force]", file=sys.stderr)
+            return 1
+        log_path = next(a for a in args[1:] if a != "--force")
+        force = "--force" in args
+        import subprocess
+        cmd = [str(cfg.pipeline_dir / "music-import.sh"), log_path]
+        if force:
+            cmd.append("--force")
+        return subprocess.call(cmd)
 
     if command == "config":
         if len(args) < 2:
