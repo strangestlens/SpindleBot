@@ -1,15 +1,18 @@
 #!/usr/bin/env bats
-# Tests for music-import.sh argument handling and disc-check behaviour.
+# Tests for music-import.sh:
+#   - argument parsing (--force placement, log vs directory input)
+#   - disc-check hold and --force bypass
+#   - double-fire guard (missing .log file)
+#   - directory input mode (digital downloads / Bandcamp)
+#   - unrecognised input exits cleanly
 
 SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/music-import.sh"
 FIXTURES="$(cd "$(dirname "$BATS_TEST_FILENAME")/fixtures" && pwd)"
 
 setup() {
-  # Isolated temp dirs per test
   export BATS_TMPDIR
   BATS_TMPDIR="$(mktemp -d)"
 
-  # Directory layout the script expects
   mkdir -p \
     "$BATS_TMPDIR/Staging" \
     "$BATS_TMPDIR/AllDiscs" \
@@ -18,29 +21,27 @@ setup() {
     "$BATS_TMPDIR/bin" \
     "$BATS_TMPDIR/pipeline"
 
-  # Copy mock executables into per-test bin dir (so we can customise per test)
   cp "$FIXTURES/bin/beet"   "$BATS_TMPDIR/bin/beet"
   cp "$FIXTURES/bin/python" "$BATS_TMPDIR/bin/python"
   cp "$FIXTURES/bin/sleep"  "$BATS_TMPDIR/bin/sleep"
 
-  # Copy mock pipeline scripts
-  cp "$FIXTURES/pipeline/music-pretag.py"    "$BATS_TMPDIR/pipeline/"
-  cp "$FIXTURES/pipeline/music-notify.sh"    "$BATS_TMPDIR/pipeline/"
-  cp "$FIXTURES/pipeline/music-fetch-lyrics.py" "$BATS_TMPDIR/pipeline/"
+  cp "$FIXTURES/pipeline/music-pretag.py"       "$BATS_TMPDIR/pipeline/"
+  cp "$FIXTURES/pipeline/music-notify.sh"        "$BATS_TMPDIR/pipeline/"
+  cp "$FIXTURES/pipeline/music-fetch-lyrics.py"  "$BATS_TMPDIR/pipeline/"
 
-  # Wire HOME so the script sources our mock bootstrap
   export REAL_HOME="$HOME"
   export HOME="$BATS_TMPDIR/home"
   mkdir -p "$HOME/.config/spindlebot"
-  sed "s|\${BATS_TMPDIR}|$BATS_TMPDIR|g" "$FIXTURES/bootstrap.sh" > "$HOME/.config/spindlebot/bootstrap.sh"
+  sed "s|\${BATS_TMPDIR}|$BATS_TMPDIR|g" "$FIXTURES/bootstrap.sh" \
+    > "$HOME/.config/spindlebot/bootstrap.sh"
 
-  # Put mock bin ahead of real PATH
   export PATH="$BATS_TMPDIR/bin:$PATH"
 
-  # Minimal sqlite DB so posttag sql calls don't error
   sqlite3 "$BATS_TMPDIR/library.db" \
-    "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, path TEXT, added INTEGER);
-     CREATE TABLE IF NOT EXISTS item_attributes (entity_id INTEGER, key TEXT, value TEXT);" 2>/dev/null || true
+    "CREATE TABLE IF NOT EXISTS items
+       (id INTEGER PRIMARY KEY, path TEXT, added INTEGER);
+     CREATE TABLE IF NOT EXISTS item_attributes
+       (entity_id INTEGER, key TEXT, value TEXT);" 2>/dev/null || true
 
   export MOCK_LOG="$BATS_TMPDIR/mock.log"
   export MOCK_BEET_EXIT=0
@@ -51,18 +52,19 @@ teardown() {
   rm -rf "$BATS_TMPDIR"
 }
 
-# ── helper ────────────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 log_contains() {
   grep -qF "$1" "$BATS_TMPDIR/logs/watcher.log" 2>/dev/null
 }
 
-# ── tests ─────────────────────────────────────────────────────────────────────
+# ── argument parsing ──────────────────────────────────────────────────────────
 
-@test "non-.log file exits immediately without logging" {
+@test "non-.log non-directory argument exits immediately" {
   run bash "$SCRIPT" "$BATS_TMPDIR/Staging/somefile.flac"
   [ "$status" -eq 0 ]
   ! log_contains "Detected completed rip"
+  ! log_contains "Directory import"
 }
 
 @test "missing .log file exits cleanly (double-fire guard)" {
@@ -71,11 +73,10 @@ log_contains() {
   ! log_contains "Detected completed rip"
 }
 
-@test "disc check holds when WAIT returned (no --force)" {
-  # Create a real .log file in Staging
-  touch "$BATS_TMPDIR/Staging/Album.log"
+# ── disc-check (log-file mode) ────────────────────────────────────────────────
 
-  # Mock python returns WAIT:1:2 for disc check
+@test "disc check holds on WAIT when no --force (log mode)" {
+  touch "$BATS_TMPDIR/Staging/Album.log"
   export MOCK_DISC_WAIT="WAIT:1:2"
 
   run bash "$SCRIPT" "$BATS_TMPDIR/Staging/Album.log"
@@ -92,19 +93,16 @@ log_contains() {
   log_contains "run with --force"
 }
 
-@test "--force skips disc check and proceeds to import" {
+@test "--force before log path skips disc check" {
   touch "$BATS_TMPDIR/Staging/Album.log"
-
-  # Even with WAIT signal set, --force should bypass it
   export MOCK_DISC_WAIT="WAIT:1:2"
-  export MOCK_BEET_EXIT=0
 
   bash "$SCRIPT" --force "$BATS_TMPDIR/Staging/Album.log"
   log_contains "Disc check skipped (--force)"
   log_contains "Running pretag"
 }
 
-@test "--force works when flag comes after log path" {
+@test "--force after log path skips disc check" {
   touch "$BATS_TMPDIR/Staging/Album.log"
   export MOCK_DISC_WAIT="WAIT:1:2"
 
@@ -112,11 +110,63 @@ log_contains() {
   log_contains "Disc check skipped (--force)"
 }
 
-@test "single disc passes check and proceeds to import" {
+@test "single disc passes check and proceeds to import (log mode)" {
   touch "$BATS_TMPDIR/Staging/Album.log"
-  # MOCK_DISC_WAIT unset → empty → no WAIT output → import proceeds
+  # MOCK_DISC_WAIT unset → empty output → no WAIT → proceeds
 
   bash "$SCRIPT" "$BATS_TMPDIR/Staging/Album.log"
   log_contains "Disc check passed"
+  log_contains "Running pretag"
+}
+
+# ── directory input mode ──────────────────────────────────────────────────────
+
+@test "directory argument enters directory import mode" {
+  album_dir="$BATS_TMPDIR/Staging/CLANN - Seelie"
+  mkdir -p "$album_dir"
+  touch "$album_dir/01 Caves.flac"
+
+  bash "$SCRIPT" "$album_dir"
+  log_contains "Directory import"
+}
+
+@test "directory mode runs disc check" {
+  album_dir="$BATS_TMPDIR/Staging/Album"
+  mkdir -p "$album_dir"
+  touch "$album_dir/01.flac"
+  export MOCK_DISC_WAIT=""  # empty = pass
+
+  bash "$SCRIPT" "$album_dir"
+  log_contains "Disc check passed"
+}
+
+@test "directory mode holds on WAIT without --force" {
+  album_dir="$BATS_TMPDIR/Staging/Album"
+  mkdir -p "$album_dir"
+  touch "$album_dir/01.flac"
+  export MOCK_DISC_WAIT="WAIT:1:2"
+
+  bash "$SCRIPT" "$album_dir"
+  log_contains "waiting for remaining discs"
+  ! log_contains "Running pretag"
+}
+
+@test "--force bypasses disc check in directory mode" {
+  album_dir="$BATS_TMPDIR/Staging/Album"
+  mkdir -p "$album_dir"
+  touch "$album_dir/01.flac"
+  export MOCK_DISC_WAIT="WAIT:1:2"
+
+  bash "$SCRIPT" --force "$album_dir"
+  log_contains "Disc check skipped (--force)"
+  log_contains "Running pretag"
+}
+
+@test "directory mode proceeds to pretag when disc check passes" {
+  album_dir="$BATS_TMPDIR/Staging/Album"
+  mkdir -p "$album_dir"
+  touch "$album_dir/01.flac"
+
+  bash "$SCRIPT" "$album_dir"
   log_contains "Running pretag"
 }

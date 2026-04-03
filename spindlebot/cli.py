@@ -2,10 +2,11 @@
 SpindleBot CLI.
 
 Usage:
-    python -m spindlebot check                     Validate config and tool availability
-    python -m spindlebot config shell              Print config as shell-sourceable exports
-    python -m spindlebot config get <key>          Print a single value (e.g. core.library_dir)
-    python -m spindlebot import <log> [--force]    Run import pipeline for a staged album
+    python -m spindlebot check                         Validate config and tool availability
+    python -m spindlebot config shell                  Print config as shell-sourceable exports
+    python -m spindlebot config get <key>              Print a single value (e.g. core.library_dir)
+    python -m spindlebot import <log|dir> [--force]   Run import pipeline for a staged album
+    python -m spindlebot import-staging [--dry-run]   Import everything currently in Staging
 """
 
 from __future__ import annotations
@@ -142,6 +143,53 @@ def cmd_config_get(cfg, key: str) -> int:
     return 0
 
 
+# ── import-staging ────────────────────────────────────────────────────────────
+
+def cmd_import_staging(cfg, args: list[str]) -> int:
+    """
+    Scan the staging directory and dispatch each found album through the import
+    pipeline sequentially.
+
+    With --dry-run, prints what would be imported without actually running
+    music-import.sh.  Use this to preview the dispatch list before committing.
+    """
+    import subprocess
+    from spindlebot.staging import scan_staging
+
+    dry_run = "--dry-run" in args
+    staging_dir = cfg.core.staging_dir
+
+    items = scan_staging(staging_dir)
+
+    if not items:
+        print(f"Nothing to import in {staging_dir}")
+        return 0
+
+    print(f"Found {len(items)} item(s) in {staging_dir}:")
+    for item in items:
+        kind_label = "log" if item.kind == "log" else "dir"
+        print(f"  [{kind_label}] {item.path.name}")
+
+    if dry_run:
+        print("\n(dry run — not dispatching)")
+        return 0
+
+    print()
+    import_script = str(cfg.pipeline_dir / "music-import.sh")
+    errors = 0
+    for item in items:
+        print(f"→ importing: {item.path.name}")
+        result = subprocess.call([import_script, str(item.path)])
+        if result != 0:
+            print(f"  warning: import exited {result} for {item.path.name}", file=sys.stderr)
+            errors += 1
+
+    if errors:
+        print(f"\n{errors} import(s) reported errors — check the log.", file=sys.stderr)
+        return 1
+    return 0
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -166,15 +214,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "import":
         if len(args) < 2:
-            print("Usage: spindlebot import <xld-log-path> [--force]", file=sys.stderr)
+            print("Usage: spindlebot import <log-or-dir> [--force]", file=sys.stderr)
             return 1
-        log_path = next(a for a in args[1:] if a != "--force")
+        target = next(a for a in args[1:] if a != "--force")
         force = "--force" in args
         import subprocess
-        cmd = [str(cfg.pipeline_dir / "music-import.sh"), log_path]
+        cmd = [str(cfg.pipeline_dir / "music-import.sh"), target]
         if force:
             cmd.append("--force")
         return subprocess.call(cmd)
+
+    if command == "import-staging":
+        return cmd_import_staging(cfg, args[1:])
 
     if command == "config":
         if len(args) < 2:

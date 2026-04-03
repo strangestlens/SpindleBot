@@ -1,5 +1,10 @@
 #!/bin/bash
-# music-import.sh — triggered when XLD finishes ripping an album to Staging
+# music-import.sh — import one album from Staging into the beets Library.
+#
+# Accepts either:
+#   music-import.sh /path/to/Staging/Album.log          CD rip (XLD log trigger)
+#   music-import.sh /path/to/Staging/Album/             Digital download (directory trigger)
+#   music-import.sh /path/to/Staging/Album/ --force     Skip multi-disc hold
 
 # ── Load SpindleBot config ────────────────────────────────────────────────────
 # shellcheck source=/dev/null
@@ -23,6 +28,7 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOGFILE"
 }
 
+# ── Argument parsing ──────────────────────────────────────────────────────────
 FORCE=0
 CHANGED=""
 for arg in "$@"; do
@@ -35,23 +41,35 @@ done
 
 log "Watcher fired: $CHANGED${FORCE:+ (--force)}"
 
-# Only care about .log files (XLD rip log = album complete)
-if [[ "$CHANGED" != *.log ]]; then
+# ── Determine album directory ─────────────────────────────────────────────────
+#
+# Directory mode  — digital download / Bandcamp:
+#   $CHANGED is a directory containing audio files.  No .log file exists.
+#
+# Log-file mode   — CD rip (XLD):
+#   $CHANGED is a .log file.  Album dir = dirname($CHANGED).
+#
+IS_DIR_MODE=0
+if [ -d "$CHANGED" ]; then
+  IS_DIR_MODE=1
+  ALBUM_DIR="$CHANGED"
+  log "Directory import: $ALBUM_DIR"
+elif [[ "$CHANGED" == *.log ]]; then
+  # Guard against double-fire (fswatch can see mv as an update before deletion)
+  if [ ! -f "$CHANGED" ]; then
+    exit 0
+  fi
+  ALBUM_DIR="$(dirname "$CHANGED")"
+  log "Detected completed rip: $ALBUM_DIR"
+else
+  # Neither a directory nor a .log file — nothing to do
   exit 0
 fi
 
-# Guard against double-fire (e.g. fswatch sees mv as an update before deletion)
-if [ ! -f "$CHANGED" ]; then
-  exit 0
-fi
-
-ALBUM_DIR="$(dirname "$CHANGED")"
-log "Detected completed rip: $ALBUM_DIR"
-
-# Brief pause to let XLD finish any final writes
+# Brief pause to let any final writes settle (relevant for CD rips; harmless otherwise)
 sleep 3
 
-# Check if all discs are present for multi-disc albums.
+# ── Disc check ────────────────────────────────────────────────────────────────
 # Skip with --force to import immediately regardless of disctotal tags.
 if [[ "$FORCE" -eq 0 ]]; then
   WAIT_CHECK=$(PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR" $PYTHON -m spindlebot.disc check "$ALBUM_DIR")
@@ -68,14 +86,14 @@ else
   log "Disc check skipped (--force)"
 fi
 
-# Step 1: Pre-process tags (feat., compilation, artist normalization)
+# ── Step 1: Pre-process tags ──────────────────────────────────────────────────
 log "Running pretag on: $ALBUM_DIR"
-if ! $PYTHON "$PRETAG" "$ALBUM_DIR" >> "$LOGFILE" 2>&1; then
+if ! PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR" $PYTHON "$PRETAG" "$ALBUM_DIR" >> "$LOGFILE" 2>&1; then
   log "pretag failed — aborting import"
   exit 1
 fi
 
-# Step 2: beets import
+# ── Step 2: beets import ──────────────────────────────────────────────────────
 log "Starting beet import on: $ALBUM_DIR"
 $BEET import "$ALBUM_DIR" >> "$LOGFILE" 2>&1
 STATUS=$?
@@ -88,15 +106,13 @@ if [ $STATUS -eq 0 ]; then
   if [ -z "$ARTIST_ALBUM" ]; then
     ARTIST_ALBUM=$(basename "$ALBUM_DIR")
   fi
-  "$NOTIFY" "Rip complete" "$ARTIST_ALBUM — reply 'sync' to move to DwRugged"
+  "$NOTIFY" "Import complete" "$ARTIST_ALBUM — reply 'sync' to move to DwRugged"
 
-  # Step 3: Post-import fixes
+  # ── Step 3: Post-import DB fixes ─────────────────────────────────────────
   # Fix multidisc: base it on how many disc numbers were ACTUALLY ripped,
   # not MusicBrainz disctotal (which can be >1 for DualDiscs, deluxe editions, etc.)
   ACTUAL_DISCS=$(PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR" $PYTHON -m spindlebot.disc count "$ALBUM_DIR")
-  # Fix disctotal in DB and ensure multidisc flex attr row exists for every new item.
-  # MusicBrainz can say disctotal=2 for a single-disc rip (DualDiscs, deluxe editions);
-  # we patch disctotal to actual ripped count so the inline computes correctly.
+
   # beet modify multidisc= DELETES the flex attr row (empty value), leaving $multidisc
   # undefined in templates — which beet renders as the literal string "$multidisc" (truthy).
   # So we INSERT the row directly via sqlite instead of relying on beet modify.
@@ -119,20 +135,51 @@ if [ $STATUS -eq 0 ]; then
   $BEET move "added:${TODAY}.." "path:${LIBRARY}/" >> "$LOGFILE" 2>&1
   log "Moved files to correct paths"
 
-  # Step 4: posttag — strip beets alias tags and truncate DATE to year only.
+  # ── Step 4: posttag ───────────────────────────────────────────────────────
+  # Strip beets alias tags and truncate DATE to year only.
   # Runs after beet move (beet is fully done writing at this point).
-  # Also runs in sync script as a no-op safety net for any pre-existing files.
   # shellcheck disable=SC2016  # $path is a beet template var, not a bash var
   IMPORT_FILES=$($BEET ls -f '$path' "added:${TODAY}.." 2>/dev/null | grep -v "^/Volumes/")
   if [ -n "$IMPORT_FILES" ]; then
     log "Running posttag on imported files"
-    echo "$IMPORT_FILES" | $PYTHON "$PRETAG" --post >> "$LOGFILE" 2>&1
+    echo "$IMPORT_FILES" | PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR" $PYTHON "$PRETAG" --post >> "$LOGFILE" 2>&1
   fi
 
-  # Step 5: Fetch synced lyrics (.lrc sidecar files)
-  # Filter to local Library only — DwRugged may not be mounted, and today's query
-  # returns all modified items including previously synced DwRugged paths.
+  # ── Step 5: Extra assets ──────────────────────────────────────────────────
+  # Copy non-audio files (artwork, liner notes, etc.) from the staging album
+  # directory to the library album directory.  This preserves bonus artwork
+  # like inner sleeve scans that Bandcamp and some download stores include.
+  #
+  # Rules:
+  #   - Only copies from the source album dir (never recurses into subdirs)
+  #   - Skips .log files (those are XLD artefacts, not assets)
+  #   - Does not overwrite files that already exist in the library
+  #   - Only runs when ALBUM_DIR is a real subdirectory (not the Staging root),
+  #     because Staging-root imports are CD rips and have no extra assets.
   ALBUM_DIRS=$(echo "$IMPORT_FILES" | while IFS= read -r p; do dirname "$p"; done | sort -u)
+  LIB_DEST=$(echo "$ALBUM_DIRS" | head -1)
+
+  if [ -n "$LIB_DEST" ] && [ -d "$LIB_DEST" ] && [ "$ALBUM_DIR" != "$STAGING" ]; then
+    AUDIO_PAT='\.(flac|mp3|m4a|aac|ogg|opus|wav|aif|aiff|wv|ape|wma|log)$'
+    COPIED=0
+    while IFS= read -r asset; do
+      dest="$LIB_DEST/$(basename "$asset")"
+      if [ ! -f "$dest" ]; then
+        if cp "$asset" "$dest" 2>/dev/null; then
+          log "Copied asset: $(basename "$asset") → $LIB_DEST"
+          COPIED=$((COPIED + 1))
+        else
+          log "  warning: could not copy asset $(basename "$asset")"
+        fi
+      fi
+    done < <(find "$ALBUM_DIR" -maxdepth 1 -type f | grep -viE "$AUDIO_PAT")
+    if [ "$COPIED" -gt 0 ]; then
+      log "Copied $COPIED extra asset(s) to library"
+    fi
+  fi
+
+  # ── Step 6: Fetch synced lyrics ───────────────────────────────────────────
+  # Filter to local Library only — DwRugged may not be mounted.
   if [ -n "$ALBUM_DIRS" ]; then
     while IFS= read -r dir; do
       log "Fetching lyrics for: $dir"
@@ -140,12 +187,21 @@ if [ $STATUS -eq 0 ]; then
     done <<< "$ALBUM_DIRS"
   fi
 
-  # Archive all XLD logs from Staging (covers multi-disc albums where earlier disc logs remain)
+  # ── Step 7: Archive XLD logs ──────────────────────────────────────────────
+  # Only relevant for CD rips.  For directory-mode imports there is no .log
+  # file to archive, so this loop is a no-op.
   mkdir -p "$COMPLETE"
-  find "$STAGING" -maxdepth 1 -name "*.log" | while read -r logfile; do
+  # Archive root-level .log files (standard XLD rip location)
+  while IFS= read -r logfile; do
     mv "$logfile" "$COMPLETE/"
     log "Archived XLD log to: $COMPLETE/$(basename "$logfile")"
-  done
+  done < <(find "$STAGING" -maxdepth 1 -name "*.log" 2>/dev/null)
+  # Also archive any .log file that came in a named subdir (less common)
+  if [[ "$IS_DIR_MODE" -eq 0 ]] && [ -f "$CHANGED" ]; then
+    mv "$CHANGED" "$COMPLETE/" 2>/dev/null && \
+      log "Archived XLD log to: $COMPLETE/$(basename "$CHANGED")"
+  fi
+
 else
   log "Import FAILED (exit $STATUS): $ALBUM_DIR"
 fi
