@@ -1,0 +1,3 @@
+#!/bin/bash
+# Mock sleep: returns immediately so tests don't wait for the 3-second pause.
+exit 0
