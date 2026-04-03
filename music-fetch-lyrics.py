@@ -20,7 +20,7 @@ import json
 import mutagen.flac
 
 LRCLIB_API = "https://lrclib.net/api/get"
-REQUEST_DELAY = 0.3  # seconds between API calls
+REQUEST_DELAY = float(os.environ.get("SPINDLEBOT_LYRICS_DELAY", "0.3"))  # seconds between API calls
 
 
 def get_tags(flac_path):

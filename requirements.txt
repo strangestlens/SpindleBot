@@ -1,0 +1,8 @@
+# SpindleBot Python dependencies
+#
+# Runtime
+tomli>=2.0; python_version < "3.11"   # built-in tomllib in 3.11+
+mutagen>=1.47                          # FLAC tag reading
+
+# Development / testing
+pytest>=7.0; extra == "dev"

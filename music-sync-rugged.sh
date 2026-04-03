@@ -3,10 +3,23 @@
 # Moves ~/Music/Library to /Volumes/DwRugged/Music/Library, updates beets DB paths.
 # Lyrics are fetched on DwRugged after sync so there's no race with the import pipeline.
 
-LOCAL="/Users/danielwilliams/Music/Library"
-REMOTE="/Volumes/DwRugged/Music/Library"
-LOGFILE="/Users/danielwilliams/.config/beets/rugged-sync.log"
+# ── Load SpindleBot config ────────────────────────────────────────────────────
+# shellcheck source=/dev/null
+source "$HOME/.config/spindlebot/bootstrap.sh" 2>/dev/null || {
+  echo "ERROR: SpindleBot not configured. Run setup.sh from the pipeline directory." >&2
+  exit 1
+}
+
+LOCAL="$SPINDLEBOT_LIBRARY_DIR"
+REMOTE="$SPINDLEBOT_DESTINATION_PATH"
+LOGFILE="$SPINDLEBOT_LOG_DIR/rugged-sync.log"
 LOCKFILE="/tmp/music-sync-rugged.lock"
+PYTHON="$SPINDLEBOT_PYTHON"
+NOTIFY="$SPINDLEBOT_PIPELINE_DIR/music-notify.sh"
+FETCH_ART="$SPINDLEBOT_PIPELINE_DIR/music-fetch-art.py"
+PRETAG="$SPINDLEBOT_PIPELINE_DIR/music-pretag.py"
+FETCH_LYRICS="$SPINDLEBOT_PIPELINE_DIR/music-fetch-lyrics.py"
+DB="$SPINDLEBOT_BEETS_DB"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOGFILE"
@@ -35,11 +48,11 @@ log "DWRugged mounted — syncing $LOCAL → $REMOTE"
 
 # Fetch missing album art before files leave local Library
 log "Fetching missing album art"
-/opt/homebrew/bin/python3 /Users/danielwilliams/.local/bin/music-fetch-art.py "$LOCAL" >> "$LOGFILE" 2>&1
+$PYTHON "$FETCH_ART" "$LOCAL" >> "$LOGFILE" 2>&1
 
 # Final tag cleanup before files leave local Library
 log "Running posttag before sync"
-find "$LOCAL" -name "*.flac" | /opt/homebrew/bin/python3 /Users/danielwilliams/.local/bin/music-pretag.py --post >> "$LOGFILE" 2>&1
+find "$LOCAL" -name "*.flac" | $PYTHON "$PRETAG" --post >> "$LOGFILE" 2>&1
 
 # Move files (rsync preserves structure, removes source files after success)
 rsync -av --remove-source-files "$LOCAL/" "$REMOTE/" >> "$LOGFILE" 2>&1
@@ -52,9 +65,9 @@ REMAINING=$(find "$LOCAL" -type f 2>/dev/null | wc -l | tr -d ' ')
 if [ "$REMAINING" -eq 0 ]; then
   log "Sync complete."
 
-  # Update beets DB paths: ~/Music/Library → DwRugged
-  sqlite3 /Users/danielwilliams/.config/beets/library.db \
-    "UPDATE items SET path = replace(path, '$LOCAL', '$REMOTE') WHERE path LIKE '$LOCAL/%';" 2>/dev/null \
+  # Update beets DB paths: local Library → DwRugged
+  sqlite3 "$DB" \
+    "UPDATE items SET path = replace(path, '${LOCAL}', '${REMOTE}') WHERE path LIKE '${LOCAL}/%';" 2>/dev/null \
     && log "Beets DB paths updated to DwRugged" \
     || log "WARNING: beets DB path update failed"
 
@@ -71,12 +84,12 @@ if [ "$REMAINING" -eq 0 ]; then
     log "Fetching missing lyrics on DwRugged"
     while IFS= read -r dir; do
       log "Fetching lyrics for: $dir"
-      /opt/homebrew/bin/python3 /Users/danielwilliams/.local/bin/music-fetch-lyrics.py "$dir" >> "$LOGFILE" 2>&1
+      $PYTHON "$FETCH_LYRICS" "$dir" >> "$LOGFILE" 2>&1
     done <<< "$LYRICS_DIRS"
   fi
 
-  /Users/danielwilliams/.local/bin/music-notify.sh "Sync complete" "All files moved to DwRugged ✓"
+  "$NOTIFY" "Sync complete" "All files moved to DwRugged ✓"
 else
   log "rsync FAILED (exit $RSYNC_STATUS) — $REMAINING files still in Library."
-  /Users/danielwilliams/.local/bin/music-notify.sh "Sync failed" "$REMAINING files still in Library — check rugged-sync.log"
+  "$NOTIFY" "Sync failed" "$REMAINING files still in Library — check rugged-sync.log"
 fi

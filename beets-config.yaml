@@ -1,14 +1,14 @@
-directory: /Users/danielwilliams/Music/Library
-library: /Users/danielwilliams/.config/beets/library.db
+directory: ~/Music/Library
+library: ~/.config/beets/library.db
 
 import:
   write: yes
   move: yes
-  log: /Users/danielwilliams/.config/beets/import.log
+  log: ~/.config/beets/import.log
   quiet: yes
   quiet_fallback: asis
   group_albums: yes
-  ignore: ['.*', '*.beets', '*.initfrag', '*.movpkg', 'iTunes']
+  ignore: ['.*', '*.beets', '*.initflag', '*.movpkg', 'iTunes']
 
 plugins:
   - musicbrainz
@@ -49,6 +49,9 @@ embedart:
 lyrics:
   auto: yes
   sources: genius musixmatch tekstowo
+  # NOTE: Move genius_api_key to ~/.config/spindlebot/secrets.toml [genius] section.
+  # Pipeline's music-fetch-lyrics.py reads it from there via SPINDLEBOT env vars.
+  # This key is only used by the beets lyrics plugin (auto-fetch during import).
   genius_api_key: Jqv2DDIfn3b97zcp7V7Pvh6bb6bK39aBSfhAo09DWlpFQyWEIQ8KmbFU6MB5tOCc
   fallback: ""
 

@@ -1,0 +1,46 @@
+# SpindleBot configuration
+# Copy to ~/.config/spindlebot/config.toml and edit for your machine.
+# Run: python3 -m spindlebot check
+
+[core]
+library_dir = "~/Music/Library"
+staging_dir = "~/Music/Staging"
+log_dir     = "~/.config/beets"    # watcher.log and rugged-sync.log land here
+archive_dir = "~/Music/All Discs"  # XLD .log files archived here after import
+
+[tools]
+beet         = "/opt/homebrew/bin/beet"
+python       = "/opt/homebrew/bin/python3"
+beets_config = "~/.config/beets/config.yaml"
+beets_db     = "~/.config/beets/library.db"
+mpv          = "/opt/homebrew/bin/mpv"  # used by lrc-editor preview
+
+[notifications]
+macos_notify     = true
+telegram_enabled = true   # set to false to disable Telegram without removing secrets
+
+[lyrics]
+sources               = ["lrclib"]   # future: add "shazam"
+request_delay_seconds = 0.3          # politeness delay between lrclib API calls
+
+[art]
+sources     = ["caa", "itunes"]   # Cover Art Archive, then iTunes Store fallback
+min_size_px = 500
+
+# -- Sync destinations ---------------------------------------------------------
+# Add as many [[destinations]] blocks as you like.
+# The first enabled destination is used by music-sync-rugged.sh.
+# type = "local_drive"  -> rsync to a mounted volume
+# type = "rclone"       -> rclone to any configured remote (B2, S3, SFTP, etc.)
+
+[[destinations]]
+name    = "DwRugged"
+type    = "local_drive"
+path    = "/Volumes/DwRugged/Music/Library"
+enabled = true
+
+# [[destinations]]
+# name    = "Backblaze"
+# type    = "rclone"
+# path    = "b2:my-music-bucket/Library"
+# enabled = false
