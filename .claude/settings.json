@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m spindlebot check)",
+      "Bash(python3 -m spindlebot import:*)",
+      "Bash(python3 -m pytest tests/ -v)",
+      "Bash(pip3 install:*)",
+      "Bash(brew install:*)",
+      "Bash(python3 -m pytest --version)",
+      "Bash(pytest --version)",
+      "Bash(pytest tests/ -v)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(launchctl list:*)",
+      "Bash(python3 -m spindlebot config get core.staging_dir)",
+      "Bash(python3 -m spindlebot config get core.log_dir)",
+      "Bash(ls -la ~/.local/bin/music-*.sh)",
+      "Bash(launchctl unload:*)",
+      "Bash(launchctl load:*)",
+      "Bash(shellcheck music-import.sh music-sync-rugged.sh music-notify.sh music-watcher.sh)",
+      "Bash(shellcheck music-import.sh music-sync-rugged.sh music-notify.sh)",
+      "Bash(apt-cache show:*)",
+      "Bash(/opt/homebrew/bin/python3 -m pytest tests/ -v)",
+      "Bash(/opt/homebrew/bin/python3.11 -m pytest tests/ -v)",
+      "Bash(/opt/homebrew/bin/python3.13 -m pytest tests/ -v)",
+      "Bash(/opt/homebrew/bin/python3.13 -m pip install pytest mutagen)",
+      "Bash(/opt/homebrew/bin/python3.10 -m pytest tests/ -v)",
+      "Bash(/opt/homebrew/bin/python3 --version)",
+      "Bash(/opt/homebrew/bin/python3 -c \"import pytest; print\\(pytest.__version__\\)\")",
+      "Bash(python3 -c \"import mutagen; import pytest; print\\(''''ok''''\\)\")",
+      "Bash(pip3 show:*)",
+      "Bash(python3 -c \"import mutagen; print\\(mutagen.__version__\\)\")",
+      "Bash(chmod +x /Users/danielwilliams/Music/music-pipeline/tests/shell/fixtures/bin/beet /Users/danielwilliams/Music/music-pipeline/tests/shell/fixtures/bin/python /Users/danielwilliams/Music/music-pipeline/tests/shell/fixtures/bin/sleep /Users/danielwilliams/Music/music-pipeline/tests/shell/fixtures/pipeline/music-notify.sh)",
+      "Bash(bats tests/shell/test_import.bats)",
+      "Bash(gh pr:*)"
+    ]
+  }
+}

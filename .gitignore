@@ -1,7 +1,10 @@
 RERIP.md
 
-# Claude Code internals
-.claude/
+# Claude Code internals — ignore everything except project-wide config
+.claude/*
+!.claude/settings.json
+!.claude/skills/
+!.claude/skills/**
 
 # Secrets and local config — never commit these
 config.toml
