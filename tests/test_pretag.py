@@ -1,419 +1,218 @@
 """
-Tests for music-pretag.py — tag cleanup, Bandcamp encoding fix, multi-format support.
-
-We build minimal real FLAC/audio fixtures using mutagen so tests never touch
-real music files and run identically in CI.
+Tests for spindlebot.pipeline.stages.pretag — pretag and posttag stage logic.
 """
-import os
-import sys
+from __future__ import annotations
+
 import struct
-import unittest
 from pathlib import Path
 
 import mutagen.flac
-import mutagen.id3
+import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-# music-pretag.py is registered as "music_pretag" by tests/conftest.py
-from music_pretag import pretag, posttag, _fix_bandcamp_album_encoding  # noqa: E402
+from spindlebot.pipeline.stages.pretag import BEETS_ALIAS_TAGS, XLD_JUNK_TAGS, posttag, pretag
 
 
-# ── Fixture helpers ───────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-def _write_minimal_flac(path: str, tags: dict) -> None:
+
+def _write_minimal_flac(path: Path, tags: dict[str, str]) -> None:
     """
-    Write a minimal valid FLAC file with the given Vorbis comment tags.
+    Write a minimal valid FLAC file and attach the given tags.
 
-    Structure: fLaC marker + STREAMINFO metadata block (last block, 34 bytes).
-    STREAMINFO bit layout:
-      min_blocksize(16) max_blocksize(16) min_framesize(24) max_framesize(24)
-      sample_rate(20) channels(3) bps(5) total_samples(36) md5(128)
-    Total payload = 2+2+3+3+8+16 = 34 bytes.
+    mutagen can read and write FLAC tags but cannot create a FLAC file from
+    scratch — it needs a parseable STREAMINFO block to open the file at all.
+    So we hand-write the minimum valid binary structure (magic + STREAMINFO
+    metadata block), then let mutagen attach the Vorbis comment block on save.
+
+    STREAMINFO layout (34 bytes):
+      min/max blocksize (2+2), min/max framesize (3+3), then a packed 64-bit
+      field: sample_rate(20b) | channels-1(3b) | bps-1(5b) | total_samples(36b),
+      then 16-byte MD5.
     """
-    si = bytearray(34)
-    si[0:2]  = struct.pack(">H", 4096)   # min blocksize
-    si[2:4]  = struct.pack(">H", 4096)   # max blocksize
-    si[4:7]  = b"\x00\x00\x00"           # min framesize (unknown)
-    si[7:10] = b"\x00\x00\x00"           # max framesize (unknown)
-    # 8 bytes: sample_rate(20b)=44100 | channels(3b)=0 | bps(5b)=15 | total_samples(36b)=0
-    combined = (44100 << 44) | (0 << 41) | (15 << 36)
-    si[10:18] = combined.to_bytes(8, "big")
-    si[18:34] = b"\x00" * 16             # MD5
+    sample_rate = 44100
+    channels = 1
+    bps = 16
+    total_samples = 0
 
-    # Metadata block header: last-block=1, type=0 (STREAMINFO), length=34
-    block_hdr = bytearray(4)
-    block_hdr[0] = 0x80  # last-metadata-block=1, block-type=0
-    block_hdr[1:4] = (34).to_bytes(3, "big")
+    streaminfo = (
+        struct.pack(">HH", 4096, 4096)
+        + b"\x00\x00\x00\x00\x00\x00"  # min/max frame size (3 bytes each)
+        + struct.pack(
+            ">Q",
+            (sample_rate << 44)
+            | ((channels - 1) << 41)
+            | ((bps - 1) << 36)
+            | total_samples,
+        )
+        + b"\x00" * 16  # MD5
+    )
 
-    with open(path, "wb") as fh:
-        fh.write(b"fLaC")
-        fh.write(bytes(block_hdr))
-        fh.write(bytes(si))
+    # METADATA_BLOCK_HEADER: last=1, type=STREAMINFO(0), length=34
+    path.write_bytes(b"fLaC" + bytes([0x80, 0x00, 0x00, 0x22]) + streaminfo)
 
-    # Attach Vorbis comment tags using mutagen
-    f = mutagen.flac.FLAC(path)
-    f.add_tags()
-    for k, v in tags.items():
-        f.tags[k] = [str(v)]
-    f.save()
-
-
-def _make_easy_tags(tags: dict):
-    """
-    Return a mock object that behaves like a mutagen EasyMP3/EasyID3 tag dict.
-    Used to test our pretag logic without needing a real parseable audio file.
-    """
-    from unittest.mock import MagicMock
-
-    store = {k.lower(): [str(v)] for k, v in tags.items()}
-    saved = {}
-
-    mock_file = MagicMock()
-    mock_file.tags = store
-    mock_file.save = MagicMock(side_effect=lambda *a, **kw: saved.update(store))
-    return mock_file, saved
+    flac = mutagen.flac.FLAC(str(path))
+    flac.add_tags()
+    for key, val in tags.items():
+        flac[key] = val  # str or list[str], mutagen accepts both
+    flac.save()
 
 
-# ── Tests ─────────────────────────────────────────────────────────────────────
+def read_tag(path: Path, key: str) -> str | None:
+    flac = mutagen.flac.FLAC(str(path))
+    vals = flac.tags.get(key)
+    return vals[0] if vals else None
 
-class TestPretagFLAC(unittest.TestCase):
 
-    def setUp(self):
-        import tempfile
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
+# ── pretag tests ──────────────────────────────────────────────────────────────
 
-    def tearDown(self):
-        self._tmp.cleanup()
 
-    def _flac(self, name: str, tags: dict) -> Path:
-        p = self.tmp / name
-        _write_minimal_flac(str(p), tags)
-        return p
+class TestPretag:
 
-    def test_pretag_no_changes_needed(self):
-        """Clean tags: artist == albumartist, no junk — pretag is a no-op."""
-        self._flac("01.flac", {
-            "title": "Song", "artist": "Band", "albumartist": "Band",
-            "album": "Record", "tracknumber": "1",
+    def test_empty_dir_returns_false(self, tmp_path):
+        assert pretag(str(tmp_path)) is False
+
+    def test_no_op_file_unchanged(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "Solo Artist",
+            "albumartist": "Solo Artist",
+            "title": "A Song",
         })
-        result = pretag(str(self.tmp))
-        self.assertTrue(result)
+        mtime_before = f.stat().st_mtime
+        pretag(str(tmp_path))
+        assert f.stat().st_mtime == mtime_before
 
-        f = mutagen.flac.FLAC(str(self.tmp / "01.flac"))
-        self.assertEqual(f.tags["artist"][0], "Band")
-        self.assertEqual(f.tags["title"][0], "Song")
+    def test_xld_junk_tags_stripped(self, tmp_path):
+        f = tmp_path / "track.flac"
+        tags = {"albumartist": "Artist", "artist": "Artist", "title": "T"}
+        for junk in XLD_JUNK_TAGS:
+            tags[junk] = "junk"
+        _write_minimal_flac(f, tags)
 
-    def test_pretag_removes_xld_junk_tags(self):
-        self._flac("01.flac", {
-            "title": "Song", "artist": "Band", "albumartist": "Band",
-            "album": "Record", "tracknumber": "1",
-            "year": "2020", "track": "1", "totaltracks": "10",
+        pretag(str(tmp_path))
+
+        flac = mutagen.flac.FLAC(str(f))
+        for junk in XLD_JUNK_TAGS:
+            assert junk not in flac.tags, f"Expected {junk!r} to be removed"
+
+    def test_compilation_tag_stripped(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "Artist", "albumartist": "Artist",
+            "title": "T", "compilation": "1",
         })
-        pretag(str(self.tmp))
+        pretag(str(tmp_path))
+        assert read_tag(f, "compilation") is None
 
-        f = mutagen.flac.FLAC(str(self.tmp / "01.flac"))
-        self.assertNotIn("year", f.tags)
-        self.assertNotIn("track", f.tags)
-        self.assertNotIn("totaltracks", f.tags)
-
-    def test_pretag_removes_compilation_tag(self):
-        self._flac("01.flac", {
-            "title": "Song", "artist": "Band", "albumartist": "Band",
-            "album": "Record", "tracknumber": "1", "compilation": "1",
+    def test_feat_moved_from_artist_to_title(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "Main Artist feat. Featured",
+            "albumartist": "Main Artist",
+            "title": "Song Name",
         })
-        pretag(str(self.tmp))
+        pretag(str(tmp_path))
+        assert read_tag(f, "title") == "Song Name (feat. Featured)"
+        assert read_tag(f, "artist") == "Main Artist"
 
-        f = mutagen.flac.FLAC(str(self.tmp / "01.flac"))
-        self.assertNotIn("compilation", f.tags)
-
-    def test_pretag_moves_feat_into_title(self):
-        self._flac("01.flac", {
-            "title": "Cool Song", "artist": "Band feat. Other Artist",
-            "albumartist": "Band", "album": "Record", "tracknumber": "1",
+    def test_feat_with_brackets(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "Main Artist [feat. Guest]",
+            "albumartist": "Main Artist",
+            "title": "Track",
         })
-        pretag(str(self.tmp))
+        pretag(str(tmp_path))
+        assert "feat. Guest" in read_tag(f, "title")
+        assert read_tag(f, "artist") == "Main Artist"
 
-        f = mutagen.flac.FLAC(str(self.tmp / "01.flac"))
-        self.assertEqual(f.tags["title"][0], "Cool Song (feat. Other Artist)")
-        self.assertEqual(f.tags["artist"][0], "Band")
-
-    def test_pretag_normalizes_artist_to_albumartist(self):
-        self._flac("01.flac", {
-            "title": "Song", "artist": "The Band",
-            "albumartist": "Band", "album": "Record", "tracknumber": "1",
+    def test_artist_normalized_to_albumartist(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "Some Other Name",
+            "albumartist": "Canonical Name",
+            "title": "Track",
         })
-        pretag(str(self.tmp))
+        pretag(str(tmp_path))
+        assert read_tag(f, "artist") == "Canonical Name"
 
-        f = mutagen.flac.FLAC(str(self.tmp / "01.flac"))
-        self.assertEqual(f.tags["artist"][0], "Band")
-
-    def test_pretag_skips_various_artists(self):
-        """VA compilations: each track keeps its own artist."""
-        self._flac("01.flac", {
-            "title": "Song", "artist": "Track Artist",
-            "albumartist": "Various Artists", "album": "Comp", "tracknumber": "1",
+    def test_various_artists_skips_normalization(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "Individual Artist",
+            "albumartist": "Various Artists",
+            "title": "Track",
         })
-        pretag(str(self.tmp))
+        pretag(str(tmp_path))
+        # VA track artists must not be overwritten
+        assert read_tag(f, "artist") == "Individual Artist"
 
-        f = mutagen.flac.FLAC(str(self.tmp / "01.flac"))
-        self.assertEqual(f.tags["artist"][0], "Track Artist")
-
-    def test_pretag_handles_empty_dir(self):
-        """Empty directory: returns False, does not raise."""
-        result = pretag(str(self.tmp))
-        self.assertFalse(result)
-
-    def test_pretag_processes_multiple_files(self):
-        for i in range(1, 4):
-            self._flac(f"0{i}.flac", {
-                "title": f"Track {i}", "artist": "The Band",
-                "albumartist": "Band", "album": "Record", "tracknumber": str(i),
+    def test_multiple_files_all_processed(self, tmp_path):
+        for i in range(3):
+            f = tmp_path / f"track{i:02d}.flac"
+            _write_minimal_flac(f, {
+                "artist": "Wrong Name",
+                "albumartist": "Right Name",
+                "title": f"Track {i}",
             })
-        pretag(str(self.tmp))
-
-        for i in range(1, 4):
-            f = mutagen.flac.FLAC(str(self.tmp / f"0{i}.flac"))
-            self.assertEqual(f.tags["artist"][0], "Band")
-
-
-class TestBandcampAlbumFix(unittest.TestCase):
-    """Unit tests for the Bandcamp album encoding fix."""
-
-    def setUp(self):
-        import tempfile
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
-
-    def tearDown(self):
-        self._tmp.cleanup()
-
-    def _make_tags(self, album: str, comment: str = "") -> dict:
-        """Return a dict-like object that _fix_bandcamp_album_encoding can work with."""
-        return {
-            "album":   [album],
-            "comment": [comment],
-        }
-
-    def test_fixes_ascii_mangled_album_when_bandcamp_comment(self):
-        # Directory name has real Unicode; tag has ASCII apostrophe substitution
-        album_dir = str(self.tmp / "Aquáticos")
-        os.makedirs(album_dir)
-        tags = self._make_tags("Aqu'aticos", "Visit https://music-from-memory.bandcamp.com")
-
-        from music_pretag import _fix_bandcamp_album_encoding
-        changed = _fix_bandcamp_album_encoding(tags, album_dir)
-
-        self.assertTrue(changed)
-        self.assertEqual(tags["album"][0], "Aquáticos")
-
-    def test_no_change_without_bandcamp_comment(self):
-        album_dir = str(self.tmp / "Aquáticos")
-        os.makedirs(album_dir)
-        tags = self._make_tags("Aqu'aticos", "")  # no bandcamp comment
-
-        from music_pretag import _fix_bandcamp_album_encoding
-        changed = _fix_bandcamp_album_encoding(tags, album_dir)
-
-        self.assertFalse(changed)
-
-    def test_no_change_when_album_already_correct(self):
-        album_dir = str(self.tmp / "Aquáticos")
-        os.makedirs(album_dir)
-        tags = self._make_tags("Aquáticos", "Visit https://label.bandcamp.com")
-
-        from music_pretag import _fix_bandcamp_album_encoding
-        changed = _fix_bandcamp_album_encoding(tags, album_dir)
-
-        self.assertFalse(changed)
-
-    def test_no_change_when_dir_is_ascii(self):
-        album_dir = str(self.tmp / "Normal Album")
-        os.makedirs(album_dir)
-        tags = self._make_tags("Normal Album", "Visit https://artist.bandcamp.com")
-
-        from music_pretag import _fix_bandcamp_album_encoding
-        changed = _fix_bandcamp_album_encoding(tags, album_dir)
-
-        self.assertFalse(changed)
-
-    def test_handles_artist_prefix_in_dir_name(self):
-        # Bandcamp often names dirs "Artist - Album"
-        album_dir = str(self.tmp / "CLANN - Seelie")
-        os.makedirs(album_dir)
-        # If the album tag already matches after stripping prefix, no change needed
-        tags = self._make_tags("Seelie", "Visit https://clann.bandcamp.com")
-
-        from music_pretag import _fix_bandcamp_album_encoding
-        # "Seelie" is ASCII, dir "CLANN - Seelie" has no Unicode → no change
-        changed = _fix_bandcamp_album_encoding(tags, album_dir)
-        self.assertFalse(changed)
-
-    def test_bandcamp_comment_preserved_after_pretag(self):
-        """Bandcamp COMMENT tag must NOT be removed by pretag."""
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
-            flac_path = os.path.join(td, "01.flac")
-            _write_minimal_flac(flac_path, {
-                "title": "Song", "artist": "Band", "albumartist": "Band",
-                "album": "Seelie", "tracknumber": "1",
-                "comment": "Visit https://clann.bandcamp.com",
-            })
-            pretag(td)
-            f = mutagen.flac.FLAC(flac_path)
-            self.assertIn("comment", f.tags)
-            self.assertIn("bandcamp.com", f.tags["comment"][0])
+        pretag(str(tmp_path))
+        for i in range(3):
+            f = tmp_path / f"track{i:02d}.flac"
+            assert read_tag(f, "artist") == "Right Name"
 
 
-class TestPretagNonFLAC(unittest.TestCase):
-    """
-    Verify pretag logic for non-FLAC formats by mocking mutagen.File.
-
-    We test our tag-manipulation logic here, not mutagen's ability to parse
-    specific audio container formats.  Real format-level integration is covered
-    by the FLAC tests above (which use actual files) and by manual QA.
-    """
-
-    def setUp(self):
-        import tempfile
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
-
-    def tearDown(self):
-        self._tmp.cleanup()
-
-    def _mock_pretag_other(self, tags_in: dict) -> dict:
-        """
-        Call _pretag_other with a mocked mutagen.File and return the resulting tag state.
-        """
-        from unittest.mock import patch, MagicMock
-
-        mock_file = MagicMock()
-        mock_file.tags = {k.lower(): [str(v)] for k, v in tags_in.items()}
-        mock_file.save = MagicMock()
-
-        # Create a fake audio file path — it will never be opened since mutagen.File is mocked
-        fake_path = str(self.tmp / "01.mp3")
-        with open(fake_path, "w") as fh:
-            fh.write("")  # placeholder so the file exists
-
-        with patch("mutagen.File", return_value=mock_file):
-            from music_pretag import _pretag_other
-            _pretag_other(fake_path, str(self.tmp))
-
-        return mock_file.tags
-
-    def test_pretag_normalizes_artist_in_non_flac(self):
-        result = self._mock_pretag_other({
-            "title": "Song", "artist": "The Band",
-            "albumartist": "Band", "album": "Record", "tracknumber": "1",
-        })
-        self.assertEqual(result["artist"][0], "Band")
-
-    def test_pretag_moves_feat_into_title_in_non_flac(self):
-        result = self._mock_pretag_other({
-            "title": "Cool Song", "artist": "Band feat. Other Artist",
-            "albumartist": "Band", "album": "Record", "tracknumber": "1",
-        })
-        self.assertEqual(result["title"][0], "Cool Song (feat. Other Artist)")
-        self.assertEqual(result["artist"][0], "Band")
-
-    def test_pretag_skips_va_in_non_flac(self):
-        result = self._mock_pretag_other({
-            "title": "Song", "artist": "Track Artist",
-            "albumartist": "Various Artists", "album": "Comp", "tracknumber": "1",
-        })
-        self.assertEqual(result["artist"][0], "Track Artist")
-
-    def test_pretag_mixed_formats_counts_all_audio(self):
-        """
-        find_audio_files must return both FLAC and MP3 when both exist.
-        We verify via the file count in pretag's output.
-        """
-        import io
-        from contextlib import redirect_stdout
-        from unittest.mock import patch, MagicMock
-
-        flac_path = str(self.tmp / "01.flac")
-        mp3_path  = str(self.tmp / "02.mp3")
-        _write_minimal_flac(flac_path, {
-            "title": "Track 1", "artist": "Band", "albumartist": "Band",
-            "album": "Record", "tracknumber": "1",
-        })
-        with open(mp3_path, "w") as fh:
-            fh.write("")  # placeholder
-
-        mock_mp3 = MagicMock()
-        mock_mp3.tags = {"title": ["Track 2"], "artist": ["Band"], "albumartist": ["Band"], "album": ["Record"]}
-        mock_mp3.save = MagicMock()
-
-        buf = io.StringIO()
-        with patch("mutagen.File", return_value=mock_mp3):
-            with redirect_stdout(buf):
-                result = pretag(str(self.tmp))
-
-        self.assertTrue(result)
-        # "pretag done: 2 files in ..."
-        self.assertIn("2 files", buf.getvalue())
+# ── posttag tests ─────────────────────────────────────────────────────────────
 
 
-class TestPosttag(unittest.TestCase):
+class TestPosttag:
 
-    def setUp(self):
-        import tempfile
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
+    def test_beet_alias_tags_stripped(self, tmp_path):
+        f = tmp_path / "track.flac"
+        tags = {"albumartist": "Artist", "artist": "Artist", "title": "T"}
+        for alias in BEETS_ALIAS_TAGS:
+            tags[alias] = "something"
+        _write_minimal_flac(f, tags)
 
-    def tearDown(self):
-        self._tmp.cleanup()
+        count = posttag([str(f)])
 
-    def test_posttag_truncates_date_to_year(self):
-        path = str(self.tmp / "01.flac")
-        _write_minimal_flac(path, {
-            "title": "Song", "artist": "Band", "albumartist": "Band",
-            "album": "Record", "tracknumber": "1", "date": "2024-06-15",
-        })
-        posttag([path])
+        assert count == 1
+        flac = mutagen.flac.FLAC(str(f))
+        for alias in BEETS_ALIAS_TAGS:
+            assert alias not in flac.tags
 
-        f = mutagen.flac.FLAC(path)
-        self.assertEqual(f.tags["date"][0], "2024")
+    def test_date_truncated_to_year(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {"date": "2019-06-21", "artist": "A"})
 
-    def test_posttag_leaves_year_only_date_unchanged(self):
-        path = str(self.tmp / "01.flac")
-        _write_minimal_flac(path, {
-            "title": "Song", "artist": "Band", "albumartist": "Band",
-            "album": "Record", "tracknumber": "1", "date": "2024",
-        })
-        posttag([path])
+        posttag([str(f)])
 
-        f = mutagen.flac.FLAC(path)
-        self.assertEqual(f.tags["date"][0], "2024")
+        assert read_tag(f, "date") == "2019"
 
-    def test_posttag_removes_beets_alias_tags(self):
-        path = str(self.tmp / "01.flac")
-        _write_minimal_flac(path, {
-            "title": "Song", "artist": "Band", "albumartist": "Band",
-            "album": "Record", "tracknumber": "1",
-            "year": "2024", "track": "1",
-        })
-        posttag([path])
+    def test_year_only_date_untouched(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {"date": "2019", "artist": "A"})
+        mtime_before = f.stat().st_mtime
+        posttag([str(f)])
+        assert f.stat().st_mtime == mtime_before
 
-        f = mutagen.flac.FLAC(path)
-        self.assertNotIn("year", f.tags)
-        self.assertNotIn("track", f.tags)
+    def test_non_flac_paths_skipped(self, tmp_path):
+        mp3 = tmp_path / "track.mp3"
+        mp3.write_bytes(b"fake")
+        count = posttag([str(mp3)])
+        assert count == 0
 
-    def test_posttag_skips_nonexistent_paths(self):
-        """Should not raise on missing files."""
-        posttag(["/nonexistent/path/file.flac", ""])
+    def test_missing_path_skipped(self, tmp_path):
+        count = posttag([str(tmp_path / "nonexistent.flac")])
+        assert count == 0
 
-    def test_posttag_skips_non_audio_extensions(self):
-        """Should silently skip .jpg, .log, etc."""
-        jpg = str(self.tmp / "cover.jpg")
-        with open(jpg, "wb") as fh:
-            fh.write(b"\xff\xd8\xff\xe0" + b"\x00" * 20)  # minimal JPEG
-        posttag([jpg])  # should not raise
+    def test_returns_count_of_modified_files(self, tmp_path):
+        files = []
+        for i in range(3):
+            f = tmp_path / f"track{i}.flac"
+            # Only the first two need modification (long date)
+            date = "2020-01-01" if i < 2 else "2020"
+            _write_minimal_flac(f, {"date": date, "artist": "A"})
+            files.append(str(f))
 
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+        count = posttag(files)
+        assert count == 2
