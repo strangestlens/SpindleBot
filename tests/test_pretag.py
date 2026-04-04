@@ -16,7 +16,19 @@ from spindlebot.pipeline.stages.pretag import BEETS_ALIAS_TAGS, XLD_JUNK_TAGS, p
 
 
 def _write_minimal_flac(path: Path, tags: dict[str, str]) -> None:
-    """Write a minimal valid FLAC file with the given Vorbis comment tags."""
+    """
+    Write a minimal valid FLAC file and attach the given tags.
+
+    mutagen can read and write FLAC tags but cannot create a FLAC file from
+    scratch — it needs a parseable STREAMINFO block to open the file at all.
+    So we hand-write the minimum valid binary structure (magic + STREAMINFO
+    metadata block), then let mutagen attach the Vorbis comment block on save.
+
+    STREAMINFO layout (34 bytes):
+      min/max blocksize (2+2), min/max framesize (3+3), then a packed 64-bit
+      field: sample_rate(20b) | channels-1(3b) | bps-1(5b) | total_samples(36b),
+      then 16-byte MD5.
+    """
     sample_rate = 44100
     channels = 1
     bps = 16

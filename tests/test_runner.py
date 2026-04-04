@@ -205,12 +205,8 @@ def test_successful_import_all_stages(tmp_path):
         result = ImportRunner(cfg).run()
 
     assert result.success
-    stage_names = [s.name for s in result.stages]
-    assert "disc_check" in stage_names
-    assert "pretag" in stage_names
-    assert "beet_import" in stage_names
-    assert "multidisc" in stage_names
-    assert "posttag" in stage_names
+    completed = {s.name for s in result.stages}
+    assert {"disc_check", "pretag", "beet_import", "multidisc", "posttag"} <= completed
 
 
 def test_successful_import_archives_log(tmp_path):

@@ -40,6 +40,9 @@ BEETS_ALIAS_TAGS = {
     "discc",   # duplicate of 'disctotal'
 }
 
+# Matches "feat." credits at the end of an artist field, with optional
+# surrounding parens or brackets. Captures the featured artist(s).
+# Examples: "Band feat. Guest", "Band (feat. Guest)", "Band [feat. Guest]"
 _FEAT_RE = re.compile(r"\s*[\(\[]?feat\.?\s+([^\)\]\n]+?)[\)\]]?\s*$", re.IGNORECASE)
 
 
