@@ -5,8 +5,8 @@ Usage:
     python -m spindlebot check                         Validate config and tool availability
     python -m spindlebot config shell                  Print config as shell-sourceable exports
     python -m spindlebot config get <key>              Print a single value (e.g. core.library_dir)
-    python -m spindlebot import <log|dir> [--force]   Run import pipeline for a staged album
-    python -m spindlebot import-staging [--dry-run]   Import everything currently in Staging
+    python -m spindlebot import <trigger> [--force]    Run import pipeline for a staged album
+    python -m spindlebot import-staging [--dry-run]    Import everything currently in Staging
 """
 
 from __future__ import annotations
@@ -214,15 +214,26 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "import":
         if len(args) < 2:
-            print("Usage: spindlebot import <log-or-dir> [--force]", file=sys.stderr)
+            print("Usage: spindlebot import <trigger> [--force]", file=sys.stderr)
             return 1
-        target = next(a for a in args[1:] if a != "--force")
+        trigger = next(a for a in args[1:] if a != "--force")
         force = "--force" in args
-        import subprocess
-        cmd = [str(cfg.pipeline_dir / "music-import.sh"), target]
-        if force:
-            cmd.append("--force")
-        return subprocess.call(cmd)
+        from spindlebot.pipeline.runner import ImportConfig, ImportRunner
+        import_cfg = ImportConfig(
+            trigger=Path(trigger),
+            force=force,
+            beet=cfg.tools.beet,
+            python=cfg.tools.python,
+            db=cfg.tools.beets_db,
+            library=cfg.core.library_dir,
+            staging=cfg.core.staging_dir,
+            archive=cfg.core.archive_dir,
+            pipeline_dir=cfg.pipeline_dir,
+            log_file=cfg.core.log_dir / "watcher.log",
+        )
+        runner = ImportRunner(import_cfg)
+        result = runner.run()
+        return 0 if result.success else 1
 
     if command == "import-staging":
         return cmd_import_staging(cfg, args[1:])
