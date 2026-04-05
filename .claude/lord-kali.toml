@@ -16,3 +16,10 @@ reason = "Do not add PR comments without explicit permission"
 [[bash.rules]]
 command = "gh"
 decision = "allow"
+
+# Allow spindlebot CLI via full-path python (used by this project's shell scripts and Claude).
+# The global config covers bare `python3`, but not /opt/homebrew/bin/python3.
+[[bash.rules]]
+command = "/opt/homebrew/bin/python3"
+args = "-m spindlebot{, **}"
+decision = "allow"
