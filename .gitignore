@@ -5,6 +5,7 @@ RERIP.md
 !.claude/settings.json
 !.claude/skills/
 !.claude/skills/**
+!.claude/lord-kali.toml
 
 # Secrets and local config — never commit these
 config.toml
