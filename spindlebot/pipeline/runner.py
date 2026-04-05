@@ -12,7 +12,7 @@ Stages (in order):
   6. multidisc fix        — patch disctotal + multidisc flex attr in beets DB
   7. beet move            — relocate files to canonical library paths
   8. posttag              — strip beet alias tags, truncate DATE to year
-  9. fetch lyrics         — .lrc sidecars via music-fetch-lyrics.py
+  9. fetch lyrics         — .lrc sidecars (stage function)
  10. archive              — mv XLD .log files to archive dir
 """
 from __future__ import annotations
@@ -22,8 +22,10 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+from typing import Optional
 
 from spindlebot.disc import check_wait, count_discs
+from spindlebot.pipeline.stages.notify import notify
 from spindlebot.pipeline.stages.pretag import posttag, pretag
 
 
@@ -39,6 +41,9 @@ class ImportConfig:
     archive: Path
     pipeline_dir: Path
     log_file: Path
+    # Full SpindleBotConfig — used by stages that need notifications/secrets.
+    # Optional so existing tests that build ImportConfig directly don't break.
+    spindlebot_cfg: Optional[object] = None
 
 
 @dataclass
@@ -143,11 +148,16 @@ class ImportRunner:
         result.artist_album = lines[0] if lines else album_dir.name
 
         # Notify (fire-and-forget, non-critical)
-        subprocess.run(
-            [str(cfg.pipeline_dir / "music-notify.sh"), "Rip complete",
-             f"{result.artist_album} — reply 'sync' to move to DwRugged"],
-            capture_output=True,
-        )
+        if cfg.spindlebot_cfg is not None:
+            notify_result = notify(
+                "Rip complete",
+                f"{result.artist_album} — reply 'sync' to move to DwRugged",
+                cfg.spindlebot_cfg,
+            )
+            if notify_result.macos_error:
+                self._log(f"macOS notify failed: {notify_result.macos_error}")
+            if notify_result.telegram_error:
+                self._log(f"Telegram notify failed: {notify_result.telegram_error}")
 
         # Stage 6: multidisc fix
         actual_discs = count_discs(str(album_dir))
@@ -182,12 +192,25 @@ class ImportRunner:
         else:
             result.stages.append(StageResult("posttag", success=True, skipped=True))
 
-        # Stage 9: fetch lyrics
-        album_dirs = sorted({str(Path(p).parent) for p in import_files})
-        fetch_lyrics = cfg.pipeline_dir / "music-fetch-lyrics.py"
-        for d in album_dirs:
-            self._log(f"Fetching lyrics for: {d}")
-            subprocess.run([str(cfg.python), str(fetch_lyrics), d], capture_output=True)
+        # Stage 9: fetch lyrics + art
+        if cfg.spindlebot_cfg is not None:
+            from spindlebot.pipeline.stages.fetch_art import fetch_art as _fetch_art
+            from spindlebot.pipeline.stages.fetch_lyrics import fetch_lyrics as _fetch_lyrics
+            album_dirs = sorted({str(Path(p).parent) for p in import_files})
+            for d in album_dirs:
+                self._log(f"Fetching art for: {d}")
+                ar = _fetch_art(d, cfg.spindlebot_cfg)
+                self._log(
+                    f"fetch-art: embedded={ar.embedded} skipped={ar.skipped} missing={ar.missing}"
+                    + (f" errors={ar.errors}" if ar.errors else "")
+                )
+                self._log(f"Fetching lyrics for: {d}")
+                lr = _fetch_lyrics(d, cfg.spindlebot_cfg)
+                self._log(
+                    f"fetch-lyrics: synced={lr.synced} plain={lr.plain} "
+                    f"skipped={lr.skipped} missing={lr.missing}"
+                    + (f" errors={lr.errors}" if lr.errors else "")
+                )
 
         # Stage 10: archive XLD logs
         cfg.archive.mkdir(parents=True, exist_ok=True)
