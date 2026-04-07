@@ -300,8 +300,8 @@ def main(argv: list[str] | None = None) -> int:
     if command == "restart":
         import subprocess
         agents = [
-            "com.danielwilliams.music-watcher",
-            "com.danielwilliams.music-sync-rugged",
+            "com.strangestlens.music-watcher",
+            "com.strangestlens.music-sync-rugged",
         ]
         uid = os.getuid()
         any_failed = False
