@@ -217,10 +217,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check(cfg)
 
     if command == "import":
-        if len(args) < 2:
+        trigger = next((a for a in args[1:] if not a.startswith("-")), None)
+        if trigger is None:
             print("Usage: spindlebot import <trigger> [--force]", file=sys.stderr)
             return 1
-        trigger = next(a for a in args[1:] if a != "--force")
         force = "--force" in args
         from spindlebot.pipeline.runner import ImportConfig, ImportRunner
         import_cfg = ImportConfig(
