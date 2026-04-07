@@ -10,6 +10,7 @@ Usage:
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
+    python -m spindlebot restart                                     Restart launchd agents
 """
 
 from __future__ import annotations
@@ -294,6 +295,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         if result.errors:
             print(f"errors: {result.errors}", file=sys.stderr)
+        return 0
+
+    if command == "restart":
+        import subprocess
+        agents = [
+            "com.danielwilliams.music-watcher",
+            "com.danielwilliams.music-sync-rugged",
+        ]
+        uid = os.getuid()
+        any_failed = False
+        for agent in agents:
+            target = f"gui/{uid}/{agent}"
+            result = subprocess.run(
+                ["launchctl", "kickstart", "-k", target],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                print(f"  restarted  {agent}")
+            else:
+                # agent may not be loaded (e.g. sync agent when drive not mounted)
+                print(f"  skipped    {agent}  ({result.stderr.strip()})")
         return 0
 
     if command == "config":
