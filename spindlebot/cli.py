@@ -236,8 +236,15 @@ def main(argv: list[str] | None = None) -> int:
             log_file=cfg.core.log_dir / "watcher.log",
             spindlebot_cfg=cfg,
         )
-        runner = ImportRunner(import_cfg)
+        print(f"💿 {Path(trigger).name}")
+        runner = ImportRunner(import_cfg, echo=lambda msg: print(f"  {msg}"))
         result = runner.run()
+        if result.success and result.artist_album:
+            print(f"\n✅ {result.artist_album}")
+        elif result.success:
+            print("\n✅ done")
+        else:
+            print("\n✗  import failed — check the log", file=sys.stderr)
         return 0 if result.success else 1
 
     if command == "import-staging":

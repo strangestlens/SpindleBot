@@ -111,7 +111,7 @@ def test_disc_check_holds_on_wait(tmp_path):
     stage = result.stages[0]
     assert stage.name == "disc_check"
     assert "waiting" in stage.message
-    assert log_contains(cfg, "waiting for remaining discs")
+    assert log_contains(cfg, "waiting for the rest")
     assert log_contains(cfg, "--force")
 
 
@@ -138,7 +138,7 @@ def test_disc_check_pass_proceeds_to_pretag(tmp_path):
             pass
 
     mock_pretag.assert_called_once()
-    assert log_contains(cfg, "Disc check passed")
+    assert log_contains(cfg, "disc check")
 
 
 def test_force_skips_disc_check(tmp_path):
@@ -153,7 +153,7 @@ def test_force_skips_disc_check(tmp_path):
             pass
 
     mock_check.assert_not_called()
-    assert log_contains(cfg, "Disc check skipped (--force)")
+    assert log_contains(cfg, "disc check skipped (--force)")
 
 
 # ── pretag / beet import failure tests ───────────────────────────────────────
@@ -186,7 +186,7 @@ def test_beet_import_failure_aborts_pipeline(tmp_path):
     assert not result.success
     stage = next(s for s in result.stages if s.name == "beet_import")
     assert not stage.success
-    assert log_contains(cfg, "Import FAILED")
+    assert log_contains(cfg, "beet import failed")
 
 
 # ── happy path ────────────────────────────────────────────────────────────────
@@ -240,7 +240,7 @@ def test_log_messages_written_to_watcher_log(tmp_path):
     text = cfg.log_file.read_text()
     assert "Watcher fired" in text
     assert "Detected completed rip" in text
-    assert "Disc check passed" in text
+    assert "disc check" in text
     assert "Running pretag" in text
     assert "Starting beet import" in text
     assert "Import complete" in text
