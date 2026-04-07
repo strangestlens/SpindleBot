@@ -4,14 +4,14 @@
 [[bash.rules]]
 command = "gh"
 args = "pr create{, **}"
-decision = "deny"
-reason = "Do not create PRs without explicit permission"
+decision = "ask"
+reason = "Confirm before creating PR — approve in the UI to proceed"
 
 [[bash.rules]]
 command = "gh"
 args = "pr comment{, **}"
-decision = "deny"
-reason = "Do not add PR comments without explicit permission"
+decision = "ask"
+reason = "Confirm before adding PR comment — approve in the UI to proceed"
 
 [[bash.rules]]
 command = "gh"
