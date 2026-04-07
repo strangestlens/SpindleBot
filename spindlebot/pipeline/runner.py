@@ -110,7 +110,7 @@ class ImportRunner:
             self._log("✓  disc check")
             result.stages.append(StageResult("disc_check", success=True))
         else:
-            self._log("⏭  disc check (--force)")
+            self._log("⏭  disc check skipped (--force)")
             result.stages.append(StageResult("disc_check", success=True, skipped=True))
 
         # Stage 4: pretag

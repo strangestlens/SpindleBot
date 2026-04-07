@@ -153,7 +153,7 @@ def test_force_skips_disc_check(tmp_path):
             pass
 
     mock_check.assert_not_called()
-    assert log_contains(cfg, "disc check (--force)")
+    assert log_contains(cfg, "disc check skipped (--force)")
 
 
 # ── pretag / beet import failure tests ───────────────────────────────────────
