@@ -4,7 +4,7 @@
 
 SpindleBot is an event-driven pipeline for ripping, tagging, and managing a lossless music library on macOS. It handles two primary flows:
 
-**Import:** XLD rips a CD → writes a `.log` to Staging → fswatch triggers `music-import.sh` → pretag → `beet import` → posttag → fetch-lyrics → notify
+**Import:** XLD rips a CD → writes a `.log` to Staging → fswatch triggers `music-import.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → beet move → posttag → fetch-art → fetch-lyrics → archive log → notify
 
 **Sync:** launchd detects DwRugged mount → `music-sync-rugged.sh` → fetch-art → posttag → rsync → beets DB path reconciliation → fetch-lyrics → notify
 
@@ -13,32 +13,78 @@ SpindleBot is an event-driven pipeline for ripping, tagging, and managing a loss
 | Phase | Status | Notes |
 |-------|--------|-------|
 | 1 — Config & Portability | Complete | `config.toml`, `bootstrap.sh`, `spindlebot check`, all scripts use `$SPINDLEBOT_*` env vars |
-| 2 — Modular Architecture | In progress | `disc.py` and `staging.py` extracted and tested. Core pipeline logic still in shell. Runner + stages structure is the next major milestone. |
-| 3–6 | Not started | |
-
-Partial Phase 5 groundwork exists: `scan_staging()`, directory import mode, and the `import-staging` CLI command are already in place.
-
-**What "Phase 2 complete" means:** Shell scripts become one-liners (`exec "$PYTHON" -m spindlebot import "$1"`). All logic lives in `spindlebot/pipeline/stages/` as discrete, testable Python modules. `runner.py` orchestrates stage sequencing. Each stage takes typed input, returns typed result, no global state. Tests use pytest + `tmp_path` + `unittest.mock`.
+| 2 — Modular Architecture | Complete | All import pipeline logic in Python (`runner.py` + `stages/`). Shell scripts are one-liner shims. Full test coverage. |
+| 3 — Sync pipeline in Python | Not started | `music-sync-rugged.sh` still shell; next target for Pythonification |
+| 4–6 | Not started | |
 
 ## Current file map
 
 ```
-spindlebot/config.py         — config loading, typed dataclasses, env var overrides
-spindlebot/cli.py            — check / config shell / config get / import / import-staging
-spindlebot/disc.py           — AUDIO_EXTENSIONS, find_audio_files(), check_wait(), count_discs()
-spindlebot/staging.py        — scan_staging() → list[StagingItem]
-music-pretag.py              — pretag() + posttag(), format-agnostic, Bandcamp encoding fix
-music-import.sh              — main import pipeline (accepts .log or directory), --force flag
-music-sync-rugged.sh         — sync to DwRugged
-music-notify.sh              — macOS + Telegram notifications
-music-fetch-lyrics.py        — lrclib lyrics fetcher
-music-fetch-art.py           — album art fetcher
-lrc-editor/                  — standalone Flask/WaveSurfer.js lyrics timing editor
+spindlebot/
+  cli.py                         — CLI entry point: check / config / import / import-staging /
+                                     fetch-lyrics / fetch-art / notify / restart
+  config.py                      — typed config dataclasses, loads config.toml + secrets.toml,
+                                     env var overrides
+  disc.py                        — AUDIO_EXTENSIONS, find_audio_files(), check_wait(),
+                                     count_discs()
+  staging.py                     — scan_staging() → list[StagingItem]
+  pipeline/
+    runner.py                    — ImportRunner: orchestrates all 10 import stages, echo
+                                     callback for live terminal output
+    stages/
+      pretag.py                  — pretag() + posttag(): normalize tags pre/post beet import,
+                                     Bandcamp encoding fix
+      notify.py                  — notify(): macOS + Telegram notifications
+      fetch_lyrics.py            — fetch_lyrics(): lrclib .lrc sidecar fetching
+      fetch_art.py               — fetch_art(): embed album art (CAA → iTunes fallback),
+                                     writes cover.jpg sidecar
+
+music-import.sh                  — shim: sources bootstrap.sh, exec's spindlebot import "$@"
+music-sync-rugged.sh             — sync to DwRugged (still shell, Phase 3 target)
+music-notify.sh                  — legacy notify shim (superseded by stages/notify.py)
+music-pretag.py                  — legacy root-level script (superseded by stages/pretag.py)
+music-fetch-lyrics.py            — legacy root-level script (superseded by stages/fetch_lyrics.py)
+music-fetch-art.py               — legacy root-level script (superseded by stages/fetch_art.py)
+setup.sh                         — first-time environment setup
+lrc-editor/                      — standalone Flask/WaveSurfer.js lyrics timing editor
+
+tests/
+  test_config.py
+  test_disc_check.py
+  test_fetch_art.py
+  test_fetch_lyrics.py
+  test_notify.py
+  test_pretag.py
+  test_runner.py
+  test_staging.py
+  shell/                         — bats shell tests (shellcheck + integration)
 ```
+
+## ImportRunner stage sequence
+
+`spindlebot/pipeline/runner.py` — `ImportRunner.run()`:
+
+1. **trigger validation** — non-`.log` events silently ignored
+2. **double-fire guard** — already-archived log → clean exit
+3. **disc check** — `check_wait()`: wait if multi-disc set incomplete (bypass with `--force`)
+4. **pretag** — normalize tags before beet sees them
+5. **beet import** — streams live to terminal when echo callback set
+6. **multidisc fix** — patch `disctotal` + `multidisc` flex attr in beets DB via `sqlite3`
+7. **beet move** — relocate to canonical library paths
+8. **posttag** — strip beet alias tags, truncate DATE to year
+9. **fetch-art + fetch-lyrics** — embed art, write `.lrc` sidecars
+10. **archive** — move XLD `.log` to archive dir
+
+`ImportRunner.__init__` accepts an optional `echo: Callable[[str], None]` for live terminal
+feedback. `_log(msg, *, echo=True)` always writes to the log file; routes to echo only for
+user-facing milestones (emoji-prefixed). Verbose/internal messages pass `echo=False`.
 
 ## Testing
 
-Tests are the contract, not the implementation. A failing test after a code change means: investigate whether the behavior broke first. Only change a test if the intended behavior intentionally changed — and that should be an explicit decision, not a response to friction. Never silently update tests to make CI green.
+Tests are the contract, not the implementation. A failing test after a code change means:
+investigate whether the behavior broke first. Only change a test if the intended behavior
+intentionally changed — and that should be an explicit decision, not a response to friction.
+Never silently update tests to make CI green.
 
 CI runs on every push/PR:
 - `python` job: `pytest tests/ --ignore=tests/shell`
@@ -49,28 +95,39 @@ Both must pass. shellcheck must be clean — no suppressions without a comment e
 ## Known gotchas
 
 **1. multidisc flex attribute**
-`beet modify multidisc=` **deletes** the DB row, causing `$multidisc` to render as the literal string `"$multidisc"` (truthy) in templates. Always INSERT via `sqlite3` directly. This is already handled in `music-import.sh` — don't change it.
+`beet modify multidisc=` **deletes** the DB row, causing `$multidisc` to render as the literal
+string `"$multidisc"` (truthy) in templates. Always INSERT via `sqlite3` directly. This is
+handled in `runner.py` `_fix_multidisc()` — don't change the approach.
 
 **2. disctotal from MusicBrainz**
-Can report `disctotal=2` for single-disc albums (DualDiscs, conceptual A/B sides). The import script patches this post-import based on actual disc numbers ripped, not MusicBrainz metadata.
+Can report `disctotal=2` for single-disc albums (DualDiscs, conceptual A/B sides). The runner
+patches this post-import based on actual disc count, not MusicBrainz metadata.
 
 **3. beets `path:` query syntax**
 Always use a trailing slash: `path:/full/path/` — without it, matches may be missed.
 
 **4. DwRugged path reconciliation**
-After rsync, the beets DB still has local paths. The sync script updates them via `sqlite3 UPDATE`. This must happen before any lyrics fetch on DwRugged.
+After rsync, the beets DB still has local paths. The sync script updates them via `sqlite3
+UPDATE`. This must happen before any lyrics fetch on DwRugged.
 
 **5. bootstrap.sh sourcing**
-Every shell script sources `~/.config/spindlebot/bootstrap.sh`, which evals `python -m spindlebot config shell`. If Python or the config fails, all `$SPINDLEBOT_*` vars will be empty. Scripts should fail loudly, not silently.
+Every shell script sources `~/.config/spindlebot/bootstrap.sh`, which evals
+`python -m spindlebot config shell`. If Python or the config fails, all `$SPINDLEBOT_*` vars
+will be empty. Scripts should fail loudly, not silently.
 
 **6. PYTHONPATH in shell scripts**
-When calling spindlebot modules from shell scripts, always prefix with `PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR"`. See `music-import.sh` for the pattern.
+When calling spindlebot modules from shell scripts, always `export PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR"` on a separate line before `exec`. Using `exec VAR=val cmd` syntax doesn't work — the assignment gets prepended to the binary path.
+
+**7. fetch_art test fixtures**
+Tests that need controlled art-fetching behaviour must include `musicbrainz_albumid` in the
+FLAC fixture tags. Without it, `_fetch_from_caa` is skipped entirely (no MBID → `if mbid:`
+not entered), so `_fetch_from_itunes` runs for real against the network.
 
 ## Code quality non-negotiables
 
 - shellcheck clean on all `.sh` files before commit. Use `# shellcheck disable=SC####` with a comment explaining why — no blanket suppressions.
 - ruff for Python linting (configured in `requirements.txt`).
-- No print-driven side effects in library code. `print()` only in CLI entry points and stage logging.
+- No print-driven side effects in library code. `print()` only in CLI entry points.
 - beets template vars (`$albumartist`, `$path`, etc.) must be in single quotes in shell — use `# shellcheck disable=SC2016` with the comment `"beet template var, not a bash var"`.
 - All new Python modules go in `spindlebot/` and must have corresponding tests in `tests/`.
 
@@ -84,9 +141,14 @@ When calling spindlebot modules from shell scripts, always prefix with `PYTHONPA
 
 ## Future constraints to keep in mind
 
-**DAP/multi-device library tracking:** Daniel has DAPs (digital audio players) each with their own Library folders. The current model ("library = whatever is at known paths") will eventually need a device registry: which copies exist, on which device, at what sync state. This is orthogonal to beets' per-track metadata. When building Phase 3 destination flexibility, destinations should be first-class named entities with sync state — not just rsync targets.
+**DAP/multi-device library tracking:** Daniel has DAPs (digital audio players) each with their
+own Library folders. The current model ("library = whatever is at known paths") will eventually
+need a device registry: which copies exist, on which device, at what sync state. This is
+orthogonal to beets' per-track metadata. When building Phase 3 destination flexibility,
+destinations should be first-class named entities with sync state — not just rsync targets.
 
-**The beets DB is not the long-term source of truth.** It knows about local paths. A future SpindleBot DB would track copies across devices.
+**The beets DB is not the long-term source of truth.** It knows about local paths. A future
+SpindleBot DB would track copies across devices.
 
 ## Environment
 
@@ -97,17 +159,21 @@ When calling spindlebot modules from shell scripts, always prefix with `PYTHONPA
 - Library: `~/Music/Library` → `/Volumes/DwRugged/Music/Library`
 - Staging: `~/Music/Staging`
 - beets DB: `~/.config/beets/library.db`
+- launchd agents: `com.strangestlens.music-watcher`, `com.strangestlens.music-sync-rugged`
 
 ## Setup and useful commands
 
 ```bash
 cd ~/Music/music-pipeline
-./setup.sh                                               # first time only
-python3 -m spindlebot check                              # validate environment
-python3 -m pytest tests/ -v                              # run test suite
-bats tests/shell/                                        # run shell tests
+./setup.sh                                                   # first time only
+python3 -m spindlebot check                                  # validate environment
+python3 -m pytest tests/ -v                                  # run test suite
+bats tests/shell/                                            # run shell tests
 
-python3 -m spindlebot import-staging --dry-run           # preview what's in staging
-python3 -m spindlebot import ~/Music/Staging/Album/      # import a specific directory
+python3 -m spindlebot import-staging --dry-run               # preview what's in staging
+python3 -m spindlebot import ~/Music/Staging/Album/          # import a specific directory
 python3 -m spindlebot import ~/Music/Staging/Album.log --force   # skip disc check
+python3 -m spindlebot fetch-art <album_dir> [--dry-run] [--force]
+python3 -m spindlebot fetch-lyrics <album_dir> [--dry-run] [--force]
+python3 -m spindlebot restart                                # restart launchd agents
 ```
