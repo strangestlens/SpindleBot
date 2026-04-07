@@ -8,4 +8,5 @@ source "$HOME/.config/spindlebot/bootstrap.sh" 2>/dev/null || {
   exit 1
 }
 
+export PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR"
 exec "$SPINDLEBOT_PYTHON" -m spindlebot import "$@"
