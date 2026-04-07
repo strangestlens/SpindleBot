@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.danielwilliams.music-sync-rugged</string>
+  <string>com.strangestlens.music-sync-rugged</string>
 
   <key>ProgramArguments</key>
   <array>
