@@ -7,6 +7,9 @@ Usage:
     python -m spindlebot config get <key>              Print a single value (e.g. core.library_dir)
     python -m spindlebot import <trigger> [--force]    Run import pipeline for a staged album
     python -m spindlebot import-staging [--dry-run]    Import everything currently in Staging
+    python -m spindlebot notify <title> <message>      Send a test notification via all channels
+    python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
+    python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
 """
 
 from __future__ import annotations
@@ -230,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
             archive=cfg.core.archive_dir,
             pipeline_dir=cfg.pipeline_dir,
             log_file=cfg.core.log_dir / "watcher.log",
+            spindlebot_cfg=cfg,
         )
         runner = ImportRunner(import_cfg)
         result = runner.run()
@@ -237,6 +241,60 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "import-staging":
         return cmd_import_staging(cfg, args[1:])
+
+    if command == "notify":
+        if len(args) < 3:
+            print("Usage: spindlebot notify <title> <message>", file=sys.stderr)
+            return 1
+        from spindlebot.pipeline.stages.notify import notify
+        title, message = args[1], args[2]
+        result = notify(title, message, cfg)
+        if result.macos_sent:
+            print("macOS notification sent")
+        elif cfg.notifications.macos_notify and result.macos_error:
+            print(f"macOS notification failed: {result.macos_error}", file=sys.stderr)
+        if result.telegram_sent:
+            print("Telegram notification sent")
+        elif cfg.notifications.telegram_enabled and result.telegram_error:
+            print(f"Telegram notification failed: {result.telegram_error}", file=sys.stderr)
+        return 0 if result.any_sent else 1
+
+    if command == "fetch-lyrics":
+        if len(args) < 2:
+            print("Usage: spindlebot fetch-lyrics <album_dir> [--dry-run] [--force]",
+                  file=sys.stderr)
+            return 1
+        album_dir = next(a for a in args[1:] if not a.startswith("--"))
+        dry_run = "--dry-run" in args
+        force = "--force" in args
+        from spindlebot.pipeline.stages.fetch_lyrics import fetch_lyrics
+        result = fetch_lyrics(album_dir, cfg, dry_run=dry_run, force=force)
+        print(
+            f"{'[dry-run] ' if dry_run else ''}"
+            f"synced={result.synced} plain={result.plain} "
+            f"skipped={result.skipped} missing={result.missing}"
+        )
+        if result.errors:
+            print(f"errors: {result.errors}", file=sys.stderr)
+        return 0
+
+    if command == "fetch-art":
+        if len(args) < 2:
+            print("Usage: spindlebot fetch-art <album_dir> [--dry-run] [--force]",
+                  file=sys.stderr)
+            return 1
+        album_dir = next(a for a in args[1:] if not a.startswith("--"))
+        dry_run = "--dry-run" in args
+        force = "--force" in args
+        from spindlebot.pipeline.stages.fetch_art import fetch_art
+        result = fetch_art(album_dir, cfg, dry_run=dry_run, force=force)
+        print(
+            f"{'[dry-run] ' if dry_run else ''}"
+            f"embedded={result.embedded} skipped={result.skipped} missing={result.missing}"
+        )
+        if result.errors:
+            print(f"errors: {result.errors}", file=sys.stderr)
+        return 0
 
     if command == "config":
         if len(args) < 2:
