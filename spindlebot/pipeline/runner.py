@@ -22,7 +22,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from spindlebot.disc import check_wait, count_discs
 from spindlebot.pipeline.stages.notify import notify
@@ -62,13 +62,20 @@ class ImportResult:
 
 
 class ImportRunner:
-    def __init__(self, config: ImportConfig) -> None:
+    def __init__(
+        self,
+        config: ImportConfig,
+        echo: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self.cfg = config
+        self._echo = echo
 
     def _log(self, msg: str) -> None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(self.cfg.log_file, "a") as fh:
             fh.write(f"[{ts}] {msg}\n")
+        if self._echo:
+            self._echo(msg)
 
     def run(self) -> ImportResult:
         cfg = self.cfg
@@ -118,15 +125,22 @@ class ImportRunner:
 
         # Stage 5: beet import
         self._log(f"Starting beet import on: {album_dir}")
-        beet_proc = subprocess.run(
-            [str(cfg.beet), "import", str(album_dir)],
-            capture_output=True,
-            text=True,
-        )
-        if beet_proc.stdout.strip():
-            self._log(beet_proc.stdout.strip())
-        if beet_proc.stderr.strip():
-            self._log(beet_proc.stderr.strip())
+        if self._echo is not None:
+            # Stream beet output live to the terminal — capture is skipped so
+            # the user sees progress in real time (beet can take a while).
+            beet_proc = subprocess.run(
+                [str(cfg.beet), "import", str(album_dir)],
+            )
+        else:
+            beet_proc = subprocess.run(
+                [str(cfg.beet), "import", str(album_dir)],
+                capture_output=True,
+                text=True,
+            )
+            if beet_proc.stdout.strip():
+                self._log(beet_proc.stdout.strip())
+            if beet_proc.stderr.strip():
+                self._log(beet_proc.stderr.strip())
 
         if beet_proc.returncode != 0:
             self._log(f"Import FAILED (exit {beet_proc.returncode}): {album_dir}")
