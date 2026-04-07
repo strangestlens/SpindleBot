@@ -70,11 +70,11 @@ class ImportRunner:
         self.cfg = config
         self._echo = echo
 
-    def _log(self, msg: str) -> None:
+    def _log(self, msg: str, *, echo: bool = True) -> None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(self.cfg.log_file, "a") as fh:
             fh.write(f"[{ts}] {msg}\n")
-        if self._echo:
+        if self._echo and echo:
             self._echo(msg)
 
     def run(self) -> ImportResult:
@@ -82,7 +82,7 @@ class ImportRunner:
         result = ImportResult(success=False)
         trigger = cfg.trigger
 
-        self._log(f"Watcher fired: {trigger}{' (--force)' if cfg.force else ''}")
+        self._log(f"Watcher fired: {trigger}{' (--force)' if cfg.force else ''}", echo=False)
 
         # Stage 1: trigger validation — non-.log events are silently ignored
         if trigger.suffix != ".log":
@@ -95,36 +95,38 @@ class ImportRunner:
             return result
 
         album_dir = trigger.parent
-        self._log(f"Detected completed rip: {album_dir}")
+        self._log(f"Detected completed rip: {album_dir}", echo=False)
 
         # Stage 3: disc check
         if not cfg.force:
             wait = check_wait(str(album_dir))
             if wait:
                 _, have, need = wait.split(":")
-                self._log(f"Multi-disc album: have {have} of {need} discs — waiting for remaining discs before importing")
-                self._log("  (run with --force to import immediately)")
+                self._log(f"⏸  multi-disc: have {have} of {need} discs — waiting for the rest")
+                self._log("   (run with --force to import immediately)", echo=False)
                 result.success = True
                 result.stages.append(StageResult("disc_check", success=True, message=f"waiting:{have}:{need}"))
                 return result
-            self._log("Disc check passed — proceeding with import")
+            self._log("✓  disc check")
             result.stages.append(StageResult("disc_check", success=True))
         else:
-            self._log("Disc check skipped (--force)")
+            self._log("⏭  disc check (--force)")
             result.stages.append(StageResult("disc_check", success=True, skipped=True))
 
         # Stage 4: pretag
-        self._log(f"Running pretag on: {album_dir}")
+        self._log(f"🏷  pretagging")
+        self._log(f"Running pretag on: {album_dir}", echo=False)
         try:
             pretag(str(album_dir))
             result.stages.append(StageResult("pretag", success=True))
         except Exception as exc:
-            self._log(f"pretag failed — aborting import: {exc}")
+            self._log(f"✗  pretag failed: {exc}")
             result.stages.append(StageResult("pretag", success=False, message=str(exc)))
             return result
 
         # Stage 5: beet import
-        self._log(f"Starting beet import on: {album_dir}")
+        self._log("💿 importing with beet...")
+        self._log(f"Starting beet import on: {album_dir}", echo=False)
         if self._echo is not None:
             # Stream beet output live to the terminal — capture is skipped so
             # the user sees progress in real time (beet can take a while).
@@ -143,11 +145,12 @@ class ImportRunner:
                 self._log(beet_proc.stderr.strip())
 
         if beet_proc.returncode != 0:
-            self._log(f"Import FAILED (exit {beet_proc.returncode}): {album_dir}")
+            self._log(f"✗  beet import failed (exit {beet_proc.returncode})")
+            self._log(f"Import FAILED (exit {beet_proc.returncode}): {album_dir}", echo=False)
             result.stages.append(StageResult("beet_import", success=False, message=f"exit {beet_proc.returncode}"))
             return result
 
-        self._log(f"Import complete: {album_dir}")
+        self._log(f"Import complete: {album_dir}", echo=False)
         result.stages.append(StageResult("beet_import", success=True))
 
         today = date.today().isoformat()
@@ -184,7 +187,7 @@ class ImportRunner:
             capture_output=True,
             text=True,
         )
-        self._log("Moved files to correct paths")
+        self._log("Moved files to correct paths", echo=False)
 
         # Get canonical paths of imported files (local library only)
         paths_proc = subprocess.run(
@@ -199,9 +202,9 @@ class ImportRunner:
 
         # Stage 8: posttag
         if import_files:
-            self._log("Running posttag on imported files")
+            self._log("Running posttag on imported files", echo=False)
             fixed = posttag(import_files)
-            self._log(f"posttag done: {fixed} files updated")
+            self._log(f"🏷  posttag ({fixed} file{'s' if fixed != 1 else ''} updated)")
             result.stages.append(StageResult("posttag", success=True, message=f"{fixed} files updated"))
         else:
             result.stages.append(StageResult("posttag", success=True, skipped=True))
@@ -212,17 +215,16 @@ class ImportRunner:
             from spindlebot.pipeline.stages.fetch_lyrics import fetch_lyrics as _fetch_lyrics
             album_dirs = sorted({str(Path(p).parent) for p in import_files})
             for d in album_dirs:
-                self._log(f"Fetching art for: {d}")
+                self._log(f"Fetching art for: {d}", echo=False)
                 ar = _fetch_art(d, cfg.spindlebot_cfg)
                 self._log(
-                    f"fetch-art: embedded={ar.embedded} skipped={ar.skipped} missing={ar.missing}"
+                    f"🎨 art: embedded={ar.embedded} skipped={ar.skipped} missing={ar.missing}"
                     + (f" errors={ar.errors}" if ar.errors else "")
                 )
-                self._log(f"Fetching lyrics for: {d}")
+                self._log(f"Fetching lyrics for: {d}", echo=False)
                 lr = _fetch_lyrics(d, cfg.spindlebot_cfg)
                 self._log(
-                    f"fetch-lyrics: synced={lr.synced} plain={lr.plain} "
-                    f"skipped={lr.skipped} missing={lr.missing}"
+                    f"🎵 lyrics: synced={lr.synced} plain={lr.plain} missing={lr.missing}"
                     + (f" errors={lr.errors}" if lr.errors else "")
                 )
 
@@ -231,7 +233,8 @@ class ImportRunner:
         for logfile in sorted(cfg.staging.glob("*.log")):
             dest = cfg.archive / logfile.name
             logfile.rename(dest)
-            self._log(f"Archived XLD log to: {dest}")
+            self._log(f"Archived XLD log to: {dest}", echo=False)
+        self._log("📦 log archived")
 
         result.success = True
         return result
