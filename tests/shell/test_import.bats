@@ -54,3 +54,11 @@ teardown() {
   run bash "$SCRIPT" "$BATS_TMPDIR/Staging/Album.log"
   [ "$status" -ne 0 ]
 }
+
+@test "script sets PYTHONPATH when calling python -m spindlebot" {
+  # The mock python exits 1 if PYTHONPATH is unset for -m spindlebot calls.
+  # This guards against the shim omitting PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR",
+  # which causes "No module named spindlebot" in the watcher's stripped environment.
+  run bash "$SCRIPT" "$BATS_TMPDIR/Staging/Album.log"
+  [ "$status" -eq 0 ]
+}

@@ -1,4 +1,10 @@
 #!/bin/bash
 # Mock python: logs all invocations, exits 0.
+# Enforces that PYTHONPATH is set when called as -m spindlebot, matching the
+# requirement that callers must set PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR".
+if [[ "$1 $2" == "-m spindlebot" ]] && [[ -z "$PYTHONPATH" ]]; then
+  echo "mock python: PYTHONPATH not set for -m spindlebot call" >&2
+  exit 1
+fi
 echo "python $*" >> "${MOCK_LOG:-/dev/null}"
 exit 0
