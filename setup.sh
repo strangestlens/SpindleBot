@@ -6,7 +6,9 @@
 #   2. Copies config/secrets example files if they don't already exist
 #   3. Writes ~/.config/spindlebot/bootstrap.sh (pipeline dir baked in)
 #   4. Installs tomli if Python < 3.11
-#   5. Runs `python -m spindlebot check` so you can see what needs filling in
+#   5. Installs music-watcher.sh to ~/.local/bin/
+#   6. Installs launchd plists to ~/Library/LaunchAgents/
+#   7. Runs `python -m spindlebot check` so you can see what needs filling in
 
 set -euo pipefail
 
@@ -66,6 +68,7 @@ chmod +x "$CONFIG_DIR/bootstrap.sh"
 echo "Wrote $CONFIG_DIR/bootstrap.sh"
 
 # ── 4. Install tomli if needed ────────────────────────────────────────────────
+# (done before watcher install so bootstrap.sh is ready when watcher starts)
 PY_VERSION=$("$PYTHON" -c "import sys; print(sys.version_info[:2])")
 if [[ "$PY_VERSION" < "(3, 11)" ]]; then
   if ! "$PYTHON" -c "import tomli" 2>/dev/null; then
@@ -74,7 +77,30 @@ if [[ "$PY_VERSION" < "(3, 11)" ]]; then
   fi
 fi
 
-# ── 5. Validate ────────────────────────────────────────────────────────────────
+# ── 5. Install music-watcher.sh ───────────────────────────────────────────────
+mkdir -p "$HOME/.local/bin"
+cp "$PIPELINE_DIR/music-watcher.sh" "$HOME/.local/bin/music-watcher.sh"
+chmod +x "$HOME/.local/bin/music-watcher.sh"
+echo "Installed music-watcher.sh → ~/.local/bin/music-watcher.sh"
+
+# ── 6. Install launchd plists ─────────────────────────────────────────────────
+LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+mkdir -p "$LAUNCH_AGENTS"
+for plist in \
+  com.strangestlens.music-watcher.plist \
+  com.strangestlens.music-sync-rugged.plist; do
+  if [ -f "$PIPELINE_DIR/$plist" ]; then
+    cp "$PIPELINE_DIR/$plist" "$LAUNCH_AGENTS/$plist"
+    echo "Installed $plist → ~/Library/LaunchAgents/"
+  fi
+done
+echo ""
+echo "Launchd agents installed. To load them:"
+echo "  launchctl bootstrap gui/\$(id -u) $LAUNCH_AGENTS/com.strangestlens.music-watcher.plist"
+echo "  launchctl bootstrap gui/\$(id -u) $LAUNCH_AGENTS/com.strangestlens.music-sync-rugged.plist"
+echo "(Or use: python -m spindlebot restart)"
+
+# ── 7. Validate ────────────────────────────────────────────────────────────────
 echo ""
 echo "Running validation..."
 PYTHONPATH="$PIPELINE_DIR" "$PYTHON" -m spindlebot check

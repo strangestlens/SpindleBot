@@ -4,7 +4,9 @@
 
 SpindleBot is an event-driven pipeline for ripping, tagging, and managing a lossless music library on macOS. It handles two primary flows:
 
-**Import:** XLD rips a CD → writes a `.log` to Staging → fswatch triggers `music-import.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → beet move → posttag → fetch-art → fetch-lyrics → archive log → notify
+**Import:** XLD rips a CD → writes a `.log` to Staging → fswatch triggers `music-watcher.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → beet move → posttag → fetch-art → fetch-lyrics → archive log → notify
+
+Also triggered automatically when a directory is dropped into Staging (e.g. Amazon download).
 
 **Sync:** launchd detects DwRugged mount → `music-sync-rugged.sh` → fetch-art → posttag → rsync → beets DB path reconciliation → fetch-lyrics → notify
 
@@ -39,13 +41,18 @@ spindlebot/
       fetch_art.py               — fetch_art(): embed album art (CAA → iTunes fallback),
                                      writes cover.jpg sidecar
 
+music-watcher.sh                 — fswatch daemon: fires spindlebot import on .log or dir drop
+                                     installed to ~/.local/bin/ by setup.sh
 music-import.sh                  — shim: sources bootstrap.sh, exec's spindlebot import "$@"
 music-sync-rugged.sh             — sync to DwRugged (still shell, Phase 3 target)
 music-notify.sh                  — legacy notify shim (superseded by stages/notify.py)
 music-pretag.py                  — legacy root-level script (superseded by stages/pretag.py)
 music-fetch-lyrics.py            — legacy root-level script (superseded by stages/fetch_lyrics.py)
 music-fetch-art.py               — legacy root-level script (superseded by stages/fetch_art.py)
-setup.sh                         — first-time environment setup
+setup.sh                         — first-time environment setup: config files, bootstrap.sh,
+                                     music-watcher.sh → ~/.local/bin/, plists → ~/Library/LaunchAgents/
+com.strangestlens.music-watcher.plist       — launchd agent for the fswatch watcher daemon
+com.strangestlens.music-sync-rugged.plist   — launchd agent for DwRugged sync
 lrc-editor/                      — standalone Flask/WaveSurfer.js lyrics timing editor
 
 tests/
@@ -64,8 +71,8 @@ tests/
 
 `spindlebot/pipeline/runner.py` — `ImportRunner.run()`:
 
-1. **trigger validation** — non-`.log` events silently ignored
-2. **double-fire guard** — already-archived log → clean exit
+1. **trigger validation** — directory → `album_dir = trigger`; `.log` → `album_dir = trigger.parent`; other → logged and skipped
+2. **double-fire guard** — `.log` mode only: already-archived log → clean exit
 3. **disc check** — `check_wait()`: wait if multi-disc set incomplete (bypass with `--force`)
 4. **pretag** — normalize tags before beet sees them
 5. **beet import** — streams live to terminal when echo callback set
@@ -118,7 +125,10 @@ will be empty. Scripts should fail loudly, not silently.
 **6. PYTHONPATH in shell scripts**
 When calling spindlebot modules from shell scripts, always `export PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR"` on a separate line before `exec`. Using `exec VAR=val cmd` syntax doesn't work — the assignment gets prepended to the binary path.
 
-**7. fetch_art test fixtures**
+**7. `SPINDLEBOT_STAGING_DIR` not `SPINDLEBOT_STAGING`**
+The bootstrap env var for the staging directory is `SPINDLEBOT_STAGING_DIR`. Using `$SPINDLEBOT_STAGING` (without the `_DIR` suffix) silently resolves to empty — fswatch will then watch the wrong directory (the cwd at daemon launch) with no error. `music-watcher.sh` guards against this at startup with an explicit empty-check.
+
+**8. fetch_art test fixtures**
 Tests that need controlled art-fetching behaviour must include `musicbrainz_albumid` in the
 FLAC fixture tags. Without it, `_fetch_from_caa` is skipped entirely (no MBID → `if mbid:`
 not entered), so `_fetch_from_itunes` runs for real against the network.
@@ -165,7 +175,8 @@ SpindleBot DB would track copies across devices.
 
 ```bash
 cd ~/Music/music-pipeline
-./setup.sh                                                   # first time only
+./setup.sh                                                   # first time (and after moving pipeline dir)
+                                                             # installs music-watcher.sh + plists
 python3 -m spindlebot check                                  # validate environment
 python3 -m pytest tests/ -v                                  # run test suite
 bats tests/shell/                                            # run shell tests
