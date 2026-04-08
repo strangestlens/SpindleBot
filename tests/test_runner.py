@@ -81,12 +81,20 @@ def _init_db(cfg: ImportConfig) -> None:
 # ── early-exit tests ──────────────────────────────────────────────────────────
 
 
-def test_non_log_trigger_exits_cleanly(tmp_path):
+def test_non_log_trigger_logs_and_exits(tmp_path):
     cfg = _make_config(tmp_path, trigger=tmp_path / "Staging" / "track.flac")
     result = ImportRunner(cfg).run()
     assert result.success
     assert result.stages == []
-    assert not log_contains(cfg, "Detected completed rip")
+    assert log_contains(cfg, "Nothing to import")
+    assert not log_contains(cfg, "Detected")
+
+
+def test_non_log_trigger_echo_message(tmp_path):
+    cfg = _make_config(tmp_path, trigger=tmp_path / "Staging" / "track.flac")
+    echoed = []
+    ImportRunner(cfg, echo=echoed.append).run()
+    assert any("Nothing to import" in m for m in echoed)
 
 
 def test_missing_log_exits_cleanly(tmp_path):
@@ -94,7 +102,44 @@ def test_missing_log_exits_cleanly(tmp_path):
     result = ImportRunner(cfg).run()
     assert result.success
     assert result.stages == []
+    assert log_contains(cfg, "Already imported")
     assert not log_contains(cfg, "Detected completed rip")
+
+
+def test_directory_trigger_detects_album_dir(tmp_path):
+    album_dir = tmp_path / "Staging" / "Yin Yin - The Rabbit That Hunts Tigers"
+    album_dir.mkdir(parents=True)
+    cfg = _make_config(tmp_path, trigger=album_dir)
+
+    with patch(_CHECK_WAIT, return_value=None), \
+         patch(_PRETAG, side_effect=Exception("stop")):
+        try:
+            ImportRunner(cfg).run()
+        except Exception:
+            pass
+
+    assert log_contains(cfg, "Detected album directory")
+    assert not log_contains(cfg, "Detected completed rip")
+
+
+def test_directory_trigger_skips_archive(tmp_path):
+    album_dir = tmp_path / "Staging" / "Album"
+    album_dir.mkdir(parents=True)
+    cfg = _make_config(tmp_path, trigger=album_dir)
+    _init_db(cfg)
+    # Plant a .log in staging — it should NOT be archived for a dir-triggered run
+    stray_log = cfg.staging / "Album.log"
+    stray_log.touch()
+
+    with patch(_CHECK_WAIT, return_value=None), \
+         patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_COUNT_DISCS, return_value=1), \
+         patch(_SUBPROCESS, side_effect=_successful_subprocess_sequence(cfg.library)):
+        ImportRunner(cfg).run()
+
+    assert stray_log.exists(), "Directory-triggered import must not archive .log files"
+    assert not log_contains(cfg, "log archived")
 
 
 # ── disc check tests ──────────────────────────────────────────────────────────
