@@ -3,17 +3,22 @@ Import pipeline runner — Python equivalent of music-import.sh.
 
 Called via: python -m spindlebot import <trigger> [--force]
 
+Trigger types:
+  directory  — manual drop or watcher event: album_dir = trigger, no archive step
+  .log file  — XLD rip complete: album_dir = trigger.parent, log archived at end
+  other      — logged and skipped (fswatch fires for individual files mid-copy)
+
 Stages (in order):
-  1. trigger validation   — non-.log files are silently ignored
-  2. double-fire guard    — missing log = already archived, exit cleanly
+  1. trigger validation   — resolve album_dir; log + skip unrecognised triggers
+  2. double-fire guard    — .log mode only: missing log = already archived, exit cleanly
   3. disc check           — wait if multi-disc set is incomplete (unless --force)
   4. pretag               — normalize tags before beet import
   5. beet import          — beet import <album_dir>
   6. multidisc fix        — patch disctotal + multidisc flex attr in beets DB
   7. beet move            — relocate files to canonical library paths
   8. posttag              — strip beet alias tags, truncate DATE to year
-  9. fetch lyrics         — .lrc sidecars (stage function)
- 10. archive              — mv XLD .log files to archive dir
+  9. fetch art + lyrics   — embed art, write .lrc sidecars
+ 10. archive              — mv XLD .log to archive dir (.log mode only)
 """
 from __future__ import annotations
 
@@ -84,18 +89,24 @@ class ImportRunner:
 
         self._log(f"Watcher fired: {trigger}{' (--force)' if cfg.force else ''}", echo=False)
 
-        # Stage 1: trigger validation — non-.log events are silently ignored
-        if trigger.suffix != ".log":
+        # Stage 1: trigger validation — resolve album_dir from trigger type
+        if trigger.is_dir():
+            album_dir = trigger
+            has_log = False
+            self._log(f"Detected album directory: {album_dir}", echo=False)
+        elif trigger.suffix == ".log":
+            # Stage 2: double-fire guard — log may have already been archived
+            if not trigger.exists():
+                self._log(f"Already imported (log archived): {trigger}", echo=False)
+                result.success = True
+                return result
+            album_dir = trigger.parent
+            has_log = True
+            self._log(f"Detected completed rip: {album_dir}", echo=False)
+        else:
+            self._log(f"Nothing to import: {trigger.name} is not a directory or .log file")
             result.success = True
             return result
-
-        # Stage 2: double-fire guard — log may have already been archived
-        if not trigger.exists():
-            result.success = True
-            return result
-
-        album_dir = trigger.parent
-        self._log(f"Detected completed rip: {album_dir}", echo=False)
 
         # Stage 3: disc check
         if not cfg.force:
@@ -228,13 +239,14 @@ class ImportRunner:
                     + (f" errors={lr.errors}" if lr.errors else "")
                 )
 
-        # Stage 10: archive XLD logs
-        cfg.archive.mkdir(parents=True, exist_ok=True)
-        for logfile in sorted(cfg.staging.glob("*.log")):
-            dest = cfg.archive / logfile.name
-            logfile.rename(dest)
-            self._log(f"Archived XLD log to: {dest}", echo=False)
-        self._log("📦 log archived")
+        # Stage 10: archive XLD logs (.log-triggered runs only)
+        if has_log:
+            cfg.archive.mkdir(parents=True, exist_ok=True)
+            for logfile in sorted(cfg.staging.glob("*.log")):
+                dest = cfg.archive / logfile.name
+                logfile.rename(dest)
+                self._log(f"Archived XLD log to: {dest}", echo=False)
+            self._log("📦 log archived")
 
         result.success = True
         return result
