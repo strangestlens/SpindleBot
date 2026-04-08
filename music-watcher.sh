@@ -30,6 +30,7 @@ log "Watcher started, monitoring: $SPINDLEBOT_STAGING_DIR"
 /opt/homebrew/bin/fswatch \
   --event=Created \
   --event=Updated \
+  --event=Renamed \
   -0 \
   "$SPINDLEBOT_STAGING_DIR" \
 | while IFS= read -r -d "" changed_file; do
