@@ -177,8 +177,9 @@ class ImportRunner:
 
         # Notify (fire-and-forget, non-critical)
         if cfg.spindlebot_cfg is not None:
+            title = "Rip complete" if has_log else "Import complete"
             notify_result = notify(
-                "Rip complete",
+                title,
                 f"{result.artist_album} — reply 'sync' to move to DwRugged",
                 cfg.spindlebot_cfg,
             )
