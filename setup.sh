@@ -94,11 +94,16 @@ for plist in \
     echo "Installed $plist → ~/Library/LaunchAgents/"
   fi
 done
-echo ""
-echo "Launchd agents installed. To load them:"
-echo "  launchctl bootstrap gui/\$(id -u) $LAUNCH_AGENTS/com.strangestlens.music-watcher.plist"
-echo "  launchctl bootstrap gui/\$(id -u) $LAUNCH_AGENTS/com.strangestlens.music-sync-rugged.plist"
-echo "(Or use: python -m spindlebot restart)"
+
+# Reload agents — bootout is a no-op if not currently loaded
+GUI_UID="gui/$(id -u)"
+for label in \
+  com.strangestlens.music-watcher \
+  com.strangestlens.music-sync-rugged; do
+  launchctl bootout "$GUI_UID/$label" 2>/dev/null || true
+  launchctl bootstrap "$GUI_UID" "$LAUNCH_AGENTS/$label.plist"
+  echo "Started $label"
+done
 
 # ── 7. Validate ────────────────────────────────────────────────────────────────
 echo ""
