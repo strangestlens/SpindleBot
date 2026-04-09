@@ -13,6 +13,7 @@ import pytest
 
 from spindlebot.pipeline.stages.fetch_lyrics import (
     LyricsResult,
+    _fetch_from_lrclib,
     _get_tags,
     _plain_to_lrc,
     _strip_cjk,
@@ -259,3 +260,130 @@ class TestFetchLyrics:
         assert result.plain == 1
         lrc_path = tmp_path / "track.lrc"
         assert "Embedded verse" in lrc_path.read_text()
+
+
+# ── unit: _get_tags sort/English fields ───────────────────────────────────────
+
+
+class TestGetTagsSortFields:
+
+    def test_reads_artistsort(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "ベック", "title": "ハイパーライフ", "album": "ハイパースペース",
+            "artistsort": "Beck",
+        })
+        tags = _get_tags(str(f))
+        assert tags["artist_sort"] == "Beck"
+
+    def test_reads_title_english(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "ベック", "title": "ハイパーライフ", "album": "ハイパースペース",
+            "title_english": "Hyperlife",
+        })
+        tags = _get_tags(str(f))
+        assert tags["title_english"] == "Hyperlife"
+
+    def test_artist_sort_defaults_to_empty(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+        tags = _get_tags(str(f))
+        assert tags.get("artist_sort", "") == ""
+
+    def test_title_english_defaults_to_empty(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+        tags = _get_tags(str(f))
+        assert tags.get("title_english", "") == ""
+
+
+# ── unit: English/sort fallback in _fetch_from_lrclib ────────────────────────
+
+
+class TestFetchFromLrclibEnglishFallback:
+
+    def _make_query_mock(self, hits: set):
+        """
+        Return a mock for _query_lrclib that returns synced lyrics only for
+        specific (artist, title) pairs listed in `hits`.  Album is ignored so
+        tests aren't sensitive to primary-vs-fallback album values.
+        """
+        def _query(artist, title, album, duration, delay):
+            key = (artist.lower(), title.lower())
+            if key in {(a.lower(), t.lower()) for a, t in hits}:
+                return "[00:01.00] Found", None
+            return None, None
+        return _query
+
+    def test_english_fallback_used_when_primary_fails(self, tmp_path):
+        """artist_sort + title_english fires when the Japanese title misses."""
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "ベック", "title": "ハイパーライフ", "album": "ハイパースペース",
+            "artistsort": "Beck", "title_english": "Hyperlife",
+        })
+
+        hits = {("Beck", "Hyperlife")}
+        with patch(
+            "spindlebot.pipeline.stages.fetch_lyrics._query_lrclib",
+            side_effect=self._make_query_mock(hits),
+        ):
+            result = fetch_lyrics(tmp_path, _cfg())
+
+        assert result.synced == 1
+
+    def test_primary_used_first_english_not_tried_on_hit(self, tmp_path):
+        """If the primary (Japanese) title hits, the English fallback is never tried."""
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "Beck", "title": "Chemical", "album": "Hyperspace",
+            "artistsort": "Beck", "title_english": "Chemical",
+        })
+
+        call_log: list[tuple] = []
+
+        def _query(artist, title, album, duration, delay):
+            call_log.append((artist, title))
+            if title == "Chemical":
+                return "[00:01.00] Primary hit", None
+            return None, None
+
+        with patch(
+            "spindlebot.pipeline.stages.fetch_lyrics._query_lrclib",
+            side_effect=_query,
+        ):
+            result = fetch_lyrics(tmp_path, _cfg())
+
+        assert result.synced == 1
+        # Should have stopped after the first hit — English combo never tried
+        assert all(t == "Chemical" for _, t in call_log)
+
+    def test_no_fallback_when_title_english_absent(self, tmp_path):
+        """When title_english is empty, only primary attempts are made."""
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "ベック", "title": "ハイパーライフ", "album": "ハイパースペース",
+            "artistsort": "Beck",
+            # No title_english
+        })
+
+        call_log: list[tuple] = []
+
+        def _query(artist, title, album, duration, delay):
+            call_log.append((artist, title))
+            return None, None
+
+        with patch(
+            "spindlebot.pipeline.stages.fetch_lyrics._query_lrclib",
+            side_effect=_query,
+        ):
+            result = fetch_lyrics(tmp_path, _cfg())
+
+        assert result.missing == 1
+        # All attempts used the original artist ("ベック"); sort artist still
+        # tried as a last-ditch variant, but never with a title_english we don't have
+        called_artists = {a for a, _ in call_log}
+        called_titles = {t for _, t in call_log}
+        # No title_english value means no English title queries
+        assert "Hyperlife" not in called_titles
