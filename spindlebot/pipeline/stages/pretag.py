@@ -56,6 +56,15 @@ BEETS_ALIAS_TAGS = {
 # Examples: "Band feat. Guest", "Band (feat. Guest)", "Band [feat. Guest]"
 _FEAT_RE = re.compile(r"\s*[\(\[]?feat\.?\s+([^\)\]\n]+?)[\)\]]?\s*$", re.IGNORECASE)
 
+# Matches trailing performer credit annotations that appear in the artist field
+# on some releases (especially Japanese pressings): "(Backing Vocals: Name)"
+# The colon distinguishes credits from legitimate parenthetical name fragments.
+# Examples: "Beck (Backing Vocals: Roger Manning)", "Artist (Chorus: Name)"
+_CREDIT_RE = re.compile(
+    r"\s*\([^)]*(?:Backing\s+Vocals?|Lead\s+Vocals?|Chorus|Additional\s+Vocals?)[^)]*:[^)]+\)\s*$",
+    re.IGNORECASE,
+)
+
 # Formats that use VorbisComment tags (lowercase string keys, list values).
 _VORBIS_EXTENSIONS = {"flac", "ogg", "opus", "oga", "spx"}
 
@@ -108,6 +117,22 @@ def _fix_bandcamp_album_encoding(tags, album_dir: str) -> bool:
 # ── Artist/feat. normalization (format-agnostic) ──────────────────────────────
 
 
+def _clean_artist_credits(value: str) -> str:
+    """Strip feat. and performer credit annotations from an artist string.
+
+    Returns the base artist name, e.g.:
+      "Beck feat. Chris Martin (Backing Vocals: ...)" → "Beck"
+      "Beck (Backing Vocals: Roger Manning)"         → "Beck"
+    """
+    m = _FEAT_RE.search(value)
+    if m:
+        return value[: m.start()].strip()
+    m = _CREDIT_RE.search(value)
+    if m:
+        return value[: m.start()].strip()
+    return value
+
+
 def _normalize_artists(tags, changed: bool) -> bool:
     """
     Apply feat. and albumartist normalization to a tag dict.
@@ -119,15 +144,25 @@ def _normalize_artists(tags, changed: bool) -> bool:
     title = (tags.get("title") or [""])[0]
 
     is_va = albumartist.lower() in ("various artists", "various", "va")
+
+    clean_aa = _clean_artist_credits(albumartist) if albumartist else ""
     m = _FEAT_RE.search(artist)
+
     if not is_va:
-        if m and albumartist:
+        if m:
             feat_str = m.group(1).strip()
             tags["title"] = [f"{title} (feat. {feat_str})"]
-            tags["artist"] = [albumartist]
+            # Use clean albumartist if available, else strip from artist itself
+            base = clean_aa if clean_aa else artist[: m.start()].strip()
+            tags["artist"] = [base]
             changed = True
-        elif albumartist and artist != albumartist:
-            tags["artist"] = [albumartist]
+        elif albumartist and artist != clean_aa:
+            tags["artist"] = [clean_aa]
+            changed = True
+
+        # Clean albumartist itself if it had credits embedded
+        if albumartist and clean_aa != albumartist:
+            tags["albumartist"] = [clean_aa]
             changed = True
 
     return changed

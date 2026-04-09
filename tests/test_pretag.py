@@ -14,6 +14,7 @@ import pytest
 from spindlebot.pipeline.stages.pretag import (
     BEETS_ALIAS_TAGS,
     XLD_JUNK_TAGS,
+    _clean_artist_credits,
     _fix_bandcamp_album_encoding,
     posttag,
     pretag,
@@ -81,6 +82,37 @@ def _mock_audio_file(tags: dict[str, str]) -> MagicMock:
     m.tags = {k: [v] for k, v in tags.items()}
     m.save = MagicMock()
     return m
+
+
+# ── _clean_artist_credits ────────────────────────────────────────────────────
+
+
+class TestCleanArtistCredits:
+
+    def test_strips_feat(self):
+        assert _clean_artist_credits("Beck feat. Chris Martin") == "Beck"
+
+    def test_strips_feat_with_parens(self):
+        assert _clean_artist_credits("Beck (feat. Chris Martin)") == "Beck"
+
+    def test_strips_feat_with_extra_parens(self):
+        result = _clean_artist_credits(
+            "ベック Feat. Chris Martin (Backing Vocals: Roger Manning)"
+        )
+        assert result == "ベック"
+
+    def test_strips_backing_vocals_credit(self):
+        assert _clean_artist_credits("ベック(Backing Vocals: Roger Manning)") == "ベック"
+
+    def test_strips_lead_vocals_credit(self):
+        assert _clean_artist_credits("Artist (Lead Vocals: Someone)") == "Artist"
+
+    def test_no_change_on_clean_name(self):
+        assert _clean_artist_credits("Beck") == "Beck"
+
+    def test_no_change_on_legitimate_parens(self):
+        # Parenthetical that is part of a name, not a credit annotation
+        assert _clean_artist_credits("Earth (Wind & Fire)") == "Earth (Wind & Fire)"
 
 
 # ── pretag: FLAC ──────────────────────────────────────────────────────────────
@@ -155,6 +187,31 @@ class TestPretagFLAC:
         })
         pretag(str(tmp_path))
         assert read_tag(f, "artist") == "Canonical Name"
+
+    def test_feat_in_albumartist_cleaned(self, tmp_path):
+        """When albumartist itself has feat. content, it should be stripped too."""
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "ベック Feat. Chris Martin (Backing Vocals: Roger Manning)",
+            "albumartist": "ベック Feat. Chris Martin (Backing Vocals: Roger Manning)",
+            "title": "ストラトスフィア",
+        })
+        pretag(str(tmp_path))
+        assert read_tag(f, "artist") == "ベック"
+        assert read_tag(f, "albumartist") == "ベック"
+        assert "feat. Chris Martin" in read_tag(f, "title")
+
+    def test_backing_vocals_credit_stripped_from_albumartist(self, tmp_path):
+        """(Backing Vocals: ...) annotations without feat. are stripped from albumartist."""
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {
+            "artist": "ベック(Backing Vocals: Roger Manning)",
+            "albumartist": "ベック(Backing Vocals: Roger Manning)",
+            "title": "ケミカル",
+        })
+        pretag(str(tmp_path))
+        assert read_tag(f, "albumartist") == "ベック"
+        assert read_tag(f, "artist") == "ベック"
 
     def test_various_artists_skips_normalization(self, tmp_path):
         f = tmp_path / "track.flac"
