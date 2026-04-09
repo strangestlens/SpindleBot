@@ -85,6 +85,14 @@ def _get_tags(audio_path: str) -> dict:
         album = _get("album") or _id3("TALB")
         duration = int(f.info.length) if f.info else 0
 
+        # Sort/romanised fields — written by beet after mbsync, or set manually.
+        # artist_sort is standard (VorbisComment: artistsort; ID3: TSOP).
+        # title_english is a SpindleBot flex field for non-Latin-script releases
+        # where the primary title is in e.g. Japanese but lrclib indexes by
+        # English title. Written via `beet modify title_english=...` + mutagen.
+        artist_sort = _get("artistsort") or _id3("TSOP") or ""
+        title_english = _get("title_english") or ""
+
         # Embedded lyrics: VorbisComment 'lyrics'/'unsyncedlyrics', or ID3 USLT
         lyrics = _get("lyrics") or _get("unsyncedlyrics")
         if not lyrics:
@@ -98,6 +106,8 @@ def _get_tags(audio_path: str) -> dict:
             "album": album or "",
             "duration": duration,
             "lyrics": lyrics,
+            "artist_sort": artist_sort,
+            "title_english": title_english,
         }
     except Exception as exc:
         return {"_error": str(exc)}
@@ -162,29 +172,60 @@ def _fetch_from_lrclib(
     duration: int,
     audio_path: str,
     request_delay: float,
+    *,
+    artist_sort: str = "",
+    title_english: str = "",
 ) -> tuple[str | None, str | None]:
     """
-    Try multiple title variants against lrclib to maximise match rate.
-    Variants: original title → CJK-stripped → filename-derived.
-    Each variant is tried with duration first, then without.
+    Try multiple (artist, title, album) combinations against lrclib to maximise
+    match rate.
+
+    Primary attempts use the canonical artist + title variants:
+      original title → CJK-stripped → filename-derived
+
+    If all primary attempts miss and sort/English fields are available, try the
+    romanised combo — useful for non-Latin releases where lrclib indexes by
+    English title (e.g. Beck - Hyperspace Japanese pressing).  The romanised
+    attempts use a CJK-stripped album name (typically "" for Japanese albums)
+    because lrclib stores English album names.
     """
-    attempts = [title]
+    primary_artist = artist
+    title_variants = [title]
 
     stripped = _strip_cjk(title)
     if stripped and stripped != title:
-        attempts.append(stripped)
+        title_variants.append(stripped)
 
     fn_title = _title_from_filename(audio_path)
-    if fn_title and fn_title not in attempts:
-        attempts.append(fn_title)
+    if fn_title and fn_title not in title_variants:
+        title_variants.append(fn_title)
+
+    # Collect (artist, title, album) triples — primary album for primary attempts
+    attempts: list[tuple[str, str, str]] = [
+        (primary_artist, t, album) for t in title_variants
+    ]
+
+    # English fallback: artist_sort + title_english.
+    # lrclib indexes by English names; non-Latin album names cause mismatches,
+    # so the fallback attempts use an empty album string.
+    fallback_artist = artist_sort if artist_sort and artist_sort != artist else ""
+    if title_english and title_english != title:
+        if fallback_artist:
+            attempts.append((fallback_artist, title_english, ""))
+        attempts.append((primary_artist, title_english, ""))
+    elif fallback_artist:
+        # Sort artist with CJK-stripped album (covers partial-CJK titles)
+        fallback_album = _strip_cjk(album)
+        for t in title_variants:
+            attempts.append((fallback_artist, t, fallback_album))
 
     last_exc = None
-    for i, t in enumerate(attempts):
+    for i, (a, t, alb) in enumerate(attempts):
         if i > 0:
             time.sleep(request_delay)
         for dur in [duration, None]:
             try:
-                synced, plain = _query_lrclib(artist, t, album, dur, request_delay)
+                synced, plain = _query_lrclib(a, t, alb, dur, request_delay)
                 if synced or plain:
                     return synced, plain
             except Exception as exc:
@@ -234,10 +275,14 @@ def _process_file(
 
     album = tags.get("album", "")
     duration = tags.get("duration", 0)
+    artist_sort = tags.get("artist_sort", "")
+    title_english = tags.get("title_english", "")
 
     try:
         synced, plain = _fetch_from_lrclib(
-            artist, title, album, duration, audio_path, request_delay
+            artist, title, album, duration, audio_path, request_delay,
+            artist_sort=artist_sort,
+            title_english=title_english,
         )
     except Exception:
         return "error"
