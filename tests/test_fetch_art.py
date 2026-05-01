@@ -16,6 +16,7 @@ from spindlebot.pipeline.stages.fetch_art import (
     ArtResult,
     _detect_mime,
     _embed_art_in_file,
+    _extract_embedded_art,
     _fetch_from_caa,
     _fetch_from_itunes,
     _get_album_tags,
@@ -109,6 +110,26 @@ class TestHasArt:
         bad = tmp_path / "bad.flac"
         bad.write_bytes(b"not a flac")
         assert _has_art(str(bad)) is False
+
+
+# ── unit: _extract_embedded_art ──────────────────────────────────────────────
+
+
+class TestExtractEmbeddedArt:
+
+    def test_extracts_from_flac_with_art(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song"})
+        _embed_art_in_file(str(f), _FAKE_JPEG, "image/jpeg")
+        assert _extract_embedded_art(str(f)) == _FAKE_JPEG
+
+    def test_returns_none_for_flac_without_art(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song"})
+        assert _extract_embedded_art(str(f)) is None
+
+    def test_returns_none_for_missing_file(self, tmp_path):
+        assert _extract_embedded_art(str(tmp_path / "missing.flac")) is None
 
 
 # ── unit: _fetch_from_caa ─────────────────────────────────────────────────────
@@ -246,6 +267,33 @@ class TestFetchArt:
         mock_caa.assert_not_called()
         mock_itunes.assert_not_called()
         assert result.skipped == 1
+
+    def test_skipped_writes_cover_jpg_sidecar_when_missing(self, tmp_path):
+        """beet import only moves audio files; sidecar must be written from embedded art."""
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Rec"})
+        _embed_art_in_file(str(f), _FAKE_JPEG, "image/jpeg")
+
+        with patch("spindlebot.pipeline.stages.fetch_art._fetch_from_caa") as mock_caa, \
+             patch("spindlebot.pipeline.stages.fetch_art._fetch_from_itunes") as mock_itunes:
+            result = fetch_art(tmp_path, _cfg())
+
+        mock_caa.assert_not_called()
+        mock_itunes.assert_not_called()
+        assert result.skipped == 1
+        assert (tmp_path / "cover.jpg").exists()
+        assert (tmp_path / "cover.jpg").read_bytes() == _FAKE_JPEG
+
+    def test_skipped_does_not_overwrite_existing_cover_jpg(self, tmp_path):
+        f = tmp_path / "track.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Rec"})
+        _embed_art_in_file(str(f), _FAKE_JPEG, "image/jpeg")
+        existing_sidecar = b"\xff\xd8" + b"\xAA" * 10
+        (tmp_path / "cover.jpg").write_bytes(existing_sidecar)
+
+        fetch_art(tmp_path, _cfg())
+
+        assert (tmp_path / "cover.jpg").read_bytes() == existing_sidecar
 
     def test_art_embedded_from_caa(self, tmp_path):
         f = tmp_path / "track.flac"
