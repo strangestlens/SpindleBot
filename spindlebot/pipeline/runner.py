@@ -25,7 +25,7 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -136,6 +136,9 @@ class ImportRunner:
             return result
 
         # Stage 5: beet import
+        # Capture timestamp immediately before beet runs so all subsequent queries
+        # scope to this import only — not every album imported today.
+        import_start = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         self._log("💿 importing with beet...")
         self._log(f"Starting beet import on: {album_dir}", echo=False)
         if self._echo is not None:
@@ -164,11 +167,9 @@ class ImportRunner:
         self._log(f"Import complete: {album_dir}", echo=False)
         result.stages.append(StageResult("beet_import", success=True))
 
-        today = date.today().isoformat()
-
         # Get artist/album name for notification
         ls_proc = subprocess.run(
-            [str(cfg.beet), "ls", "-f", "$albumartist - $album", f"added:{today}.."],
+            [str(cfg.beet), "ls", "-f", "$albumartist - $album", f"added:{import_start}.."],
             capture_output=True,
             text=True,
         )
@@ -190,12 +191,12 @@ class ImportRunner:
 
         # Stage 6: multidisc fix
         actual_discs = count_discs(str(album_dir))
-        self._fix_multidisc(actual_discs, today)
+        self._fix_multidisc(actual_discs, import_start)
         result.stages.append(StageResult("multidisc", success=True))
 
         # Stage 7: beet move
         subprocess.run(
-            [str(cfg.beet), "move", f"added:{today}..", f"path:{cfg.library}/"],
+            [str(cfg.beet), "move", f"added:{import_start}..", f"path:{cfg.library}/"],
             capture_output=True,
             text=True,
         )
@@ -203,7 +204,7 @@ class ImportRunner:
 
         # Get canonical paths of imported files (local library only)
         paths_proc = subprocess.run(
-            [str(cfg.beet), "ls", "-f", "$path", f"added:{today}.."],
+            [str(cfg.beet), "ls", "-f", "$path", f"added:{import_start}.."],
             capture_output=True,
             text=True,
         )
@@ -252,14 +253,14 @@ class ImportRunner:
         result.success = True
         return result
 
-    def _fix_multidisc(self, actual_discs: int, today: str) -> None:
+    def _fix_multidisc(self, actual_discs: int, import_start: str) -> None:
         cfg = self.cfg
         library_path = f"{cfg.library}/"
 
         if actual_discs > 1:
             subprocess.run(
                 [str(cfg.beet), "modify", "--yes",
-                 f"added:{today}..", f"path:{library_path}", f"disctotal={actual_discs}"],
+                 f"added:{import_start}..", f"path:{library_path}", f"disctotal={actual_discs}"],
                 capture_output=True,
             )
             with sqlite3.connect(str(cfg.db)) as conn:
@@ -273,13 +274,13 @@ class ImportRunner:
                           SELECT entity_id FROM item_attributes WHERE key='multidisc'
                       )
                     """,
-                    (today, f"{cfg.library}/%"),
+                    (import_start, f"{cfg.library}/%"),
                 )
             self._log(f"Multi-disc rip ({actual_discs} discs) — set disctotal={actual_discs}, multidisc=1")
         else:
             subprocess.run(
                 [str(cfg.beet), "modify", "--yes",
-                 f"added:{today}..", f"path:{library_path}", "disctotal=1", "disc=1"],
+                 f"added:{import_start}..", f"path:{library_path}", "disctotal=1", "disc=1"],
                 capture_output=True,
             )
             with sqlite3.connect(str(cfg.db)) as conn:
@@ -293,6 +294,6 @@ class ImportRunner:
                           SELECT entity_id FROM item_attributes WHERE key='multidisc'
                       )
                     """,
-                    (today, f"{cfg.library}/%"),
+                    (import_start, f"{cfg.library}/%"),
                 )
             self._log("Single-disc rip — patched disctotal=1, ensured multidisc row exists")

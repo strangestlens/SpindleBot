@@ -73,6 +73,26 @@ def _has_art(audio_path: str) -> bool:
         return False
 
 
+def _extract_embedded_art(audio_path: str) -> bytes | None:
+    """Extract embedded art bytes from an audio file, if any."""
+    try:
+        f = mutagen.File(audio_path)
+        if f is None:
+            return None
+        if hasattr(f, "pictures") and f.pictures:         # FLAC
+            return f.pictures[0].data
+        if f.tags is None:
+            return None
+        for key in f.tags:
+            if key.startswith("APIC"):                    # ID3
+                return f.tags[key].data
+        if "covr" in f.tags:                              # MP4
+            return bytes(f.tags["covr"][0])
+        return None
+    except Exception:
+        return None
+
+
 def _get_album_tags(audio_path: str) -> dict:
     """Read mbid, artist, album from an audio file."""
     try:
@@ -213,7 +233,15 @@ def _process_album(
     Fetch and embed art for one album directory.
     Returns one of: "embedded", "skipped", "missing", "error".
     """
+    cover_path = album_dir / "cover.jpg"
     if _has_art(str(files[0])) and not force:
+        # Art is already embedded. Write the cover.jpg sidecar if it's missing —
+        # beet import only moves audio files, so sidecars from the source dir are
+        # left behind.
+        if not cover_path.exists() and not dry_run:
+            img_data = _extract_embedded_art(str(files[0]))
+            if img_data:
+                cover_path.write_bytes(img_data)
         return "skipped"
 
     tags = _get_album_tags(str(files[0]))
