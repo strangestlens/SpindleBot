@@ -9,6 +9,7 @@ source "$HOME/.config/spindlebot/bootstrap.sh" 2>/dev/null || {
   echo "ERROR: SpindleBot not configured. Run setup.sh from the pipeline directory." >&2
   exit 1
 }
+export PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR"
 
 LOCAL="$SPINDLEBOT_LIBRARY_DIR"
 REMOTE="$SPINDLEBOT_DESTINATION_PATH"
