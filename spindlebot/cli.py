@@ -7,6 +7,7 @@ Usage:
     python -m spindlebot config get <key>              Print a single value (e.g. core.pending_dir)
     python -m spindlebot import <trigger> [--force]    Run import pipeline for an album
     python -m spindlebot import-staging [--dry-run]    Import everything currently in the Import area
+    python -m spindlebot inventory [--json]            Scan the Pending area into the SpindleBot DB (read-only re: audio)
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -194,6 +195,47 @@ def cmd_import_staging(cfg, args: list[str]) -> int:
     return 0
 
 
+# ── inventory ─────────────────────────────────────────────────────────────────
+
+def cmd_inventory(cfg, args: list[str]) -> int:
+    """
+    Scan the Pending (library) area and record content identity + presence in
+    the SpindleBot DB. Read-only with respect to the audio files — it never
+    moves or edits them, only writes to the DB.
+    """
+    import json as _json
+    import time
+    from dataclasses import asdict
+
+    from spindlebot.db.connection import open_db
+    from spindlebot.services.inventory import ensure_pending_location, inventory_location
+
+    want_json = "--json" in args
+    now = int(time.time())
+
+    conn = open_db(cfg.core.db_path)
+    try:
+        location = ensure_pending_location(conn, now)
+        result = inventory_location(
+            conn, location=location, root=cfg.core.pending_dir, now=now
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    if want_json:
+        print(_json.dumps(asdict(result)))
+    else:
+        print(
+            f"Inventoried {result.location} ({cfg.core.pending_dir}): "
+            f"{result.scanned} scanned, {result.new} new, "
+            f"{result.updated} updated, {result.errors} error(s)"
+        )
+        for ep in result.error_paths:
+            print(f"  ! {ep}", file=sys.stderr)
+    return 0 if result.errors == 0 else 1
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -249,6 +291,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "import-staging":
         return cmd_import_staging(cfg, args[1:])
+
+    if command == "inventory":
+        return cmd_inventory(cfg, args[1:])
 
     if command == "notify":
         if len(args) < 3:
