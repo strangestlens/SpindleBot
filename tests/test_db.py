@@ -21,14 +21,16 @@ def _tables(conn) -> set[str]:
 
 def test_open_db_creates_schema_at_latest_version(tmp_path):
     conn = open_db(tmp_path / "spindlebot.db")
-    assert current_version(conn) == LATEST_VERSION == 1
-    assert {"location", "audio_content", "audio_presence"} <= _tables(conn)
+    assert current_version(conn) == LATEST_VERSION == 2
+    assert {"location", "audio_content", "audio_presence", "location_scan"} <= _tables(conn)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(location)").fetchall()}
+    assert "root_path" in cols
 
 
 def test_open_db_creates_parent_dirs(tmp_path):
     conn = open_db(tmp_path / "nested" / "deeper" / "spindlebot.db")
     assert (tmp_path / "nested" / "deeper" / "spindlebot.db").exists()
-    assert current_version(conn) == 1
+    assert current_version(conn) == 2
 
 
 def test_pragmas_applied(tmp_path):
@@ -41,16 +43,16 @@ def test_migrate_is_idempotent(tmp_path):
     db = tmp_path / "spindlebot.db"
     open_db(db).close()
     conn = open_db(db)  # second open must not re-run or error
-    assert current_version(conn) == 1
+    assert current_version(conn) == 2
     # re-invoking migrate directly is also a no-op
-    assert migrate(conn) == 1
+    assert migrate(conn) == 2
 
 
 def test_migrate_from_fresh_connect(tmp_path):
     conn = connect(tmp_path / "spindlebot.db")
     assert current_version(conn) == 0       # not migrated yet
-    assert migrate(conn) == 1
-    assert {"location", "audio_content", "audio_presence"} <= _tables(conn)
+    assert migrate(conn) == 2
+    assert {"location", "audio_content", "audio_presence", "location_scan"} <= _tables(conn)
 
 
 def test_foreign_keys_enforced(tmp_path):

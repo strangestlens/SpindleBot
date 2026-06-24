@@ -11,7 +11,6 @@ this to any registered location (off-site drives, DAPs) and adds sidecars.
 from __future__ import annotations
 
 import time
-import uuid as _uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,12 +18,16 @@ import mutagen
 
 from spindlebot.core.identity import audio_content_id, file_sha256
 from spindlebot.core.models import Location
-from spindlebot.db.repositories import audio_repo, location_repo, presence_repo
+from spindlebot.db.repositories import audio_repo, presence_repo
 from spindlebot.disc import AUDIO_EXTENSIONS
+# Location registration lives in services.locations; re-exported here so existing
+# imports (from spindlebot.services.inventory import ensure_pending_location) hold.
+from spindlebot.services.locations import (  # noqa: F401
+    ensure_pending_location,
+    location_uuid,
+)
 
-# Stable, deterministic id for the one local location Phase 0 knows about.
-# Phase 1 replaces this with registered locations identified by marker files.
-PENDING_LOCATION_UUID = str(_uuid.uuid5(_uuid.NAMESPACE_URL, "spindlebot:location:pending"))
+PENDING_LOCATION_UUID = location_uuid("Pending")
 
 
 @dataclass
@@ -35,19 +38,6 @@ class InventoryResult:
     updated: int = 0
     errors: int = 0
     error_paths: list[str] = field(default_factory=list)
-
-
-def ensure_pending_location(conn, now: int) -> Location:
-    """Ensure the local Pending (authoring) location row exists; return it."""
-    return location_repo.upsert(
-        conn,
-        uuid=PENDING_LOCATION_UUID,
-        name="Pending",
-        kind="library",
-        is_authoritative_audio=True,
-        is_retention=False,
-        last_seen_utc=now,
-    )
 
 
 def _iter_audio_files(root: Path):

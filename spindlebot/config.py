@@ -84,6 +84,16 @@ class DestinationConfig:
 
 
 @dataclass
+class LocationConfig:
+    name: str
+    kind: str                       # "library" | "local_drive" | "rclone"
+    root_path: str = ""             # content root; for a library, defaults to core.pending_dir
+    is_authoritative_audio: bool = False
+    is_retention: bool = True
+    enabled: bool = True
+
+
+@dataclass
 class TelegramSecrets:
     bot_token: str = ""
     chat_id: str = ""
@@ -108,6 +118,7 @@ class SpindleBotConfig:
     lyrics: LyricsConfig
     art: ArtConfig
     destinations: list  # list[DestinationConfig]
+    locations: list     # list[LocationConfig]
     secrets: Secrets
     pipeline_dir: Path  # auto-detected from module location
 
@@ -200,6 +211,19 @@ def load() -> SpindleBotConfig:
         for d in raw.get("destinations", [])
     ]
 
+    # ── Locations (first-class; supersedes destinations over time) ────────────
+    locations = [
+        LocationConfig(
+            name=loc["name"],
+            kind=loc.get("kind", "local_drive"),
+            root_path=loc.get("root_path", loc.get("path", "")),
+            is_authoritative_audio=loc.get("is_authoritative_audio", False),
+            is_retention=loc.get("is_retention", True),
+            enabled=loc.get("enabled", True),
+        )
+        for loc in raw.get("locations", [])
+    ]
+
     # ── Secrets (config file < env var override) ──────────────────────────────
     st = sec.get("telegram", {})
     sg = sec.get("genius", {})
@@ -230,6 +254,7 @@ def load() -> SpindleBotConfig:
         lyrics=lyrics,
         art=art,
         destinations=destinations,
+        locations=locations,
         secrets=secrets,
         pipeline_dir=pipeline_dir,
     )

@@ -15,9 +15,11 @@ class Location:
     is_retention: bool
     enabled: bool
     last_seen_utc: int | None
+    root_path: str | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "Location":
+        keys = row.keys()
         return Location(
             id=row["id"],
             uuid=row["uuid"],
@@ -27,6 +29,7 @@ class Location:
             is_retention=bool(row["is_retention"]),
             enabled=bool(row["enabled"]),
             last_seen_utc=row["last_seen_utc"],
+            root_path=row["root_path"] if "root_path" in keys else None,
         )
 
 
