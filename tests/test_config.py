@@ -116,6 +116,12 @@ class TestConfigLoading(unittest.TestCase):
         self.assertIsNotNone(cfg.core.pending_dir)
         self.assertIsNotNone(cfg.core.import_dir)
 
+    def test_db_path_defaults_to_spindlebot_db(self):
+        _write(self.tmp, "config.toml", MINIMAL_CONFIG)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertTrue(str(cfg.core.db_path).endswith("spindlebot.db"))
+
     def test_legacy_staging_library_keys_still_honored(self):
         # Pre-rename config.toml files use staging_dir/library_dir — they must
         # still map to import_dir/pending_dir until users migrate.

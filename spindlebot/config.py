@@ -45,6 +45,7 @@ class CoreConfig:
     pending_dir: Path   # processed albums awaiting distribution; formerly "library"
     log_dir: Path
     archive_dir: Path
+    db_path: Path       # SpindleBot's own SQLite system-of-record DB
 
 
 @dataclass
@@ -152,6 +153,7 @@ def load() -> SpindleBotConfig:
         ),
         log_dir=_expand(c.get("log_dir", "~/.config/beets")),
         archive_dir=_expand(c.get("archive_dir", "~/Music/All Discs")),
+        db_path=_expand(c.get("db_path", "~/.config/spindlebot/spindlebot.db")),
     )
 
     # ── Tools ─────────────────────────────────────────────────────────────────
