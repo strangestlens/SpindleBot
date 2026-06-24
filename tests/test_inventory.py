@@ -7,9 +7,12 @@ from pathlib import Path
 import mutagen.flac
 import pytest
 
+import os
+import sqlite3
+
 from spindlebot.db.connection import open_db
-from spindlebot.db.repositories import audio_repo, presence_repo
-from spindlebot.services import inventory
+from spindlebot.db.repositories import audio_repo, presence_repo, scan_repo
+from spindlebot.services import inventory, volumes
 from spindlebot.services.inventory import (
     ensure_pending_location,
     inventory_location,
@@ -103,6 +106,49 @@ def test_inventory_ignores_non_audio_and_missing_root(conn, tmp_path):
 
     missing, _ = _run(conn, tmp_path / "nope")
     assert missing.scanned == 0
+
+
+def test_inventory_writes_marker_and_records_scan(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "01.flac", audio_md5_bytes=bytes(range(1, 17)))
+    result, loc = _run(conn, root, now=1234)
+
+    assert volumes.read_marker(root) == loc.uuid
+    scan = scan_repo.latest_scan(conn, loc.id)
+    assert scan["status"] == "ok"
+    assert scan["files_seen"] == result.scanned == 1
+    assert scan["finished_utc"] == 1234
+
+
+def test_inventory_links_beets_item_id(conn, tmp_path):
+    root = tmp_path / "Pending"
+    flac = root / "Artist" / "Album" / "01.flac"
+    _write_flac(flac, audio_md5_bytes=bytes(range(1, 17)))
+
+    beets_db = tmp_path / "beets.db"
+    bconn = sqlite3.connect(beets_db)
+    bconn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB)")
+    bconn.execute("INSERT INTO items (id, path) VALUES (?, ?)",
+                  (77, os.fsencode(str(flac))))
+    bconn.commit()
+    bconn.close()
+
+    loc = ensure_pending_location(conn, 1000)
+    inventory_location(conn, location=loc, root=root, now=1000, beets_db=beets_db)
+
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    assert audio.beets_item_id == 77
+
+
+def test_inventory_missing_beets_db_is_harmless(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "01.flac", audio_md5_bytes=bytes(range(1, 17)))
+    loc = ensure_pending_location(conn, 1000)
+    result = inventory_location(conn, location=loc, root=root, now=1000,
+                                beets_db=tmp_path / "nonexistent.db")
+    assert result.new == 1
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    assert audio.beets_item_id is None
 
 
 def test_inventory_isolates_per_file_errors(conn, tmp_path, monkeypatch):
