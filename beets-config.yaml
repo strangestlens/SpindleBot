@@ -1,4 +1,4 @@
-directory: ~/Music/Library
+directory: "~/Library/Application Support/SpindleBot/Pending"
 library: ~/.config/beets/library.db
 
 import:

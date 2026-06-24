@@ -5,10 +5,12 @@
 #   1. Creates ~/.config/spindlebot/
 #   2. Copies config/secrets example files if they don't already exist
 #   3. Writes ~/.config/spindlebot/bootstrap.sh (pipeline dir baked in)
-#   4. Installs tomli if Python < 3.11
-#   5. Installs music-watcher.sh to ~/.local/bin/
-#   6. Installs launchd plists to ~/Library/LaunchAgents/
-#   7. Runs `python -m spindlebot check` so you can see what needs filling in
+#   4. Migrates legacy ~/Music/Staging + ~/Music/Library into the new
+#      Import/Pending working areas (safe + idempotent; never deletes old dirs)
+#   5. Installs tomli if Python < 3.11
+#   6. Installs music-watcher.sh to ~/.local/bin/
+#   7. Installs launchd plists to ~/Library/LaunchAgents/
+#   8. Runs `python -m spindlebot check` so you can see what needs filling in
 
 set -euo pipefail
 
@@ -67,7 +69,23 @@ BOOTSTRAP
 chmod +x "$CONFIG_DIR/bootstrap.sh"
 echo "Wrote $CONFIG_DIR/bootstrap.sh"
 
-# ── 4. Install tomli if needed ────────────────────────────────────────────────
+# ── 4. Migrate legacy working dirs into the new Import/Pending areas ──────────
+# Safe + idempotent: creates the new dirs, relocates any contents out of the old
+# default locations, reconciles beets DB paths for the moved Pending area, and
+# never deletes the old top-level dirs. Logic lives in a sourceable lib so it is
+# unit-tested in tests/shell/test_migrate_work_dirs.bats.
+resolve_cfg() { PYTHONPATH="$PIPELINE_DIR" "$PYTHON" -m spindlebot config get "$1" 2>/dev/null || true; }
+
+# shellcheck source=migrate-work-dirs.sh
+source "$PIPELINE_DIR/migrate-work-dirs.sh"
+migrate_work_dirs \
+  "$(resolve_cfg core.import_dir)" \
+  "$(resolve_cfg core.pending_dir)" \
+  "$(resolve_cfg tools.beets_db)" \
+  "$HOME/Music/Staging" \
+  "$HOME/Music/Library"
+
+# ── 5. Install tomli if needed ────────────────────────────────────────────────
 # (done before watcher install so bootstrap.sh is ready when watcher starts)
 PY_VERSION=$("$PYTHON" -c "import sys; print(sys.version_info[:2])")
 if [[ "$PY_VERSION" < "(3, 11)" ]]; then
@@ -77,13 +95,13 @@ if [[ "$PY_VERSION" < "(3, 11)" ]]; then
   fi
 fi
 
-# ── 5. Install music-watcher.sh ───────────────────────────────────────────────
+# ── 6. Install music-watcher.sh ───────────────────────────────────────────────
 mkdir -p "$HOME/.local/bin"
 cp "$PIPELINE_DIR/music-watcher.sh" "$HOME/.local/bin/music-watcher.sh"
 chmod +x "$HOME/.local/bin/music-watcher.sh"
 echo "Installed music-watcher.sh → ~/.local/bin/music-watcher.sh"
 
-# ── 6. Install launchd plists ─────────────────────────────────────────────────
+# ── 7. Install launchd plists ─────────────────────────────────────────────────
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 mkdir -p "$LAUNCH_AGENTS"
 for plist in \
@@ -105,7 +123,7 @@ for label in \
   echo "Started $label"
 done
 
-# ── 7. Validate ────────────────────────────────────────────────────────────────
+# ── 8. Validate ────────────────────────────────────────────────────────────────
 echo ""
 echo "Running validation..."
 PYTHONPATH="$PIPELINE_DIR" "$PYTHON" -m spindlebot check

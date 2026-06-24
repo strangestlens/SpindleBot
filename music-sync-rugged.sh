@@ -1,6 +1,6 @@
 #!/bin/bash
 # music-sync-rugged.sh — fires when DWRugged mounts (or run manually)
-# Moves ~/Music/Library to /Volumes/DwRugged/Music/Library, updates beets DB paths.
+# Moves the Pending area to /Volumes/DwRugged/Music/Library, updates beets DB paths.
 # Lyrics are fetched on DwRugged after sync so there's no race with the import pipeline.
 
 # ── Load SpindleBot config ────────────────────────────────────────────────────
@@ -11,7 +11,7 @@ source "$HOME/.config/spindlebot/bootstrap.sh" 2>/dev/null || {
 }
 export PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR"
 
-LOCAL="$SPINDLEBOT_LIBRARY_DIR"
+LOCAL="$SPINDLEBOT_PENDING_DIR"
 REMOTE="$SPINDLEBOT_DESTINATION_PATH"
 LOGFILE="$SPINDLEBOT_LOG_DIR/rugged-sync.log"
 LOCKFILE="/tmp/music-sync-rugged.lock"
@@ -47,11 +47,11 @@ fi
 
 log "DWRugged mounted — syncing $LOCAL → $REMOTE"
 
-# Fetch missing album art before files leave local Library
+# Fetch missing album art before files leave the Pending area
 log "Fetching missing album art"
 $PYTHON "$FETCH_ART" "$LOCAL" >> "$LOGFILE" 2>&1
 
-# Final tag cleanup before files leave local Library
+# Final tag cleanup before files leave the Pending area
 log "Running posttag before sync"
 find "$LOCAL" -name "*.flac" | $PYTHON "$PRETAG" --post >> "$LOGFILE" 2>&1
 
@@ -93,6 +93,6 @@ if [ "$REMAINING" -eq 0 ]; then
 
   "$NOTIFY" "Sync complete" "All files moved to DwRugged ✓"
 else
-  log "rsync FAILED (exit $RSYNC_STATUS) — $REMAINING files still in Library."
-  "$NOTIFY" "Sync failed" "$REMAINING files still in Library — check rugged-sync.log"
+  log "rsync FAILED (exit $RSYNC_STATUS) — $REMAINING files still in the Pending area."
+  "$NOTIFY" "Sync failed" "$REMAINING files still pending — check rugged-sync.log"
 fi

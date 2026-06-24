@@ -41,8 +41,8 @@ CONFIG_DIR = Path(
 
 @dataclass
 class CoreConfig:
-    library_dir: Path
-    staging_dir: Path
+    import_dir: Path    # active import area (rips/downloads land here); formerly "staging"
+    pending_dir: Path   # processed albums awaiting distribution; formerly "library"
     log_dir: Path
     archive_dir: Path
 
@@ -138,10 +138,18 @@ def load() -> SpindleBotConfig:
     sec = _load_toml(CONFIG_DIR / "secrets.toml")
 
     # ── Core ─────────────────────────────────────────────────────────────────
+    # New keys take precedence; fall back to the old staging_dir/library_dir keys
+    # so an un-migrated config.toml keeps working, then to the relocated defaults.
     c = raw.get("core", {})
     core = CoreConfig(
-        library_dir=_expand(c.get("library_dir", "~/Music/Library")),
-        staging_dir=_expand(c.get("staging_dir", "~/Music/Staging")),
+        import_dir=_expand(
+            c.get("import_dir",
+                  c.get("staging_dir", "~/Library/Application Support/SpindleBot/Import"))
+        ),
+        pending_dir=_expand(
+            c.get("pending_dir",
+                  c.get("library_dir", "~/Library/Application Support/SpindleBot/Pending"))
+        ),
         log_dir=_expand(c.get("log_dir", "~/.config/beets")),
         archive_dir=_expand(c.get("archive_dir", "~/Music/All Discs")),
     )

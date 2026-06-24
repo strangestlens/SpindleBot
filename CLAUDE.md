@@ -4,9 +4,11 @@
 
 SpindleBot is an event-driven pipeline for ripping, tagging, and managing a lossless music library on macOS. It handles two primary flows:
 
-**Import:** XLD rips a CD → writes a `.log` to Staging → fswatch triggers `music-watcher.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → beet move → posttag → fetch-art → fetch-lyrics → archive log → notify
+**Import:** XLD rips a CD → writes a `.log` to the Import area → fswatch triggers `music-watcher.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → beet move → posttag → fetch-art → fetch-lyrics → archive log → notify
 
-Also triggered automatically when a directory is dropped into Staging (e.g. Amazon download).
+Also triggered automatically when a directory is dropped into the Import area (e.g. Amazon download).
+
+> **Working areas (renamed Apr 2026, Phase A):** "Staging" → **Import** (active import) and "Library" → **Pending** (processed albums awaiting distribution), both relocated under `~/Library/Application Support/SpindleBot/`. Config keys are `core.import_dir` / `core.pending_dir` (legacy `staging_dir`/`library_dir` still honored); env vars are `SPINDLEBOT_IMPORT_DIR` / `SPINDLEBOT_PENDING_DIR`.
 
 **Sync:** launchd detects DwRugged mount → `music-sync-rugged.sh` → fetch-art → posttag → rsync → beets DB path reconciliation → fetch-lyrics → notify
 
@@ -125,8 +127,8 @@ will be empty. Scripts should fail loudly, not silently.
 **6. PYTHONPATH in shell scripts**
 When calling spindlebot modules from shell scripts, always `export PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR"` on a separate line before `exec`. Using `exec VAR=val cmd` syntax doesn't work — the assignment gets prepended to the binary path.
 
-**7. `SPINDLEBOT_STAGING_DIR` not `SPINDLEBOT_STAGING`**
-The bootstrap env var for the staging directory is `SPINDLEBOT_STAGING_DIR`. Using `$SPINDLEBOT_STAGING` (without the `_DIR` suffix) silently resolves to empty — fswatch will then watch the wrong directory (the cwd at daemon launch) with no error. `music-watcher.sh` guards against this at startup with an explicit empty-check.
+**7. `SPINDLEBOT_IMPORT_DIR` not `SPINDLEBOT_IMPORT`**
+The bootstrap env var for the import area is `SPINDLEBOT_IMPORT_DIR` (and the Pending area is `SPINDLEBOT_PENDING_DIR`). Using a name without the `_DIR` suffix silently resolves to empty — fswatch will then watch the wrong directory (the cwd at daemon launch) with no error. `music-watcher.sh` guards against this at startup with an explicit empty-check.
 
 **8. fetch_art test fixtures**
 Tests that need controlled art-fetching behaviour must include `musicbrainz_albumid` in the
@@ -166,8 +168,8 @@ SpindleBot DB would track copies across devices.
 - Python: `/opt/homebrew/bin/python3` (3.11+, currently resolves to 3.14 — tests pass on both)
 - beet: `/opt/homebrew/bin/beet`
 - Config: `~/.config/spindlebot/config.toml` + `secrets.toml`
-- Library: `~/Music/Library` → `/Volumes/DwRugged/Music/Library`
-- Staging: `~/Music/Staging`
+- Import area: `~/Library/Application Support/SpindleBot/Import` (active import; formerly `~/Music/Staging`)
+- Pending area: `~/Library/Application Support/SpindleBot/Pending` → `/Volumes/DwRugged/Music/Library` (processed albums awaiting distribution; formerly `~/Music/Library`)
 - beets DB: `~/.config/beets/library.db`
 - launchd agents: `com.strangestlens.music-watcher`, `com.strangestlens.music-sync-rugged`
 
@@ -181,9 +183,9 @@ python3 -m spindlebot check                                  # validate environm
 python3 -m pytest tests/ -v                                  # run test suite
 bats tests/shell/                                            # run shell tests
 
-python3 -m spindlebot import-staging --dry-run               # preview what's in staging
-python3 -m spindlebot import ~/Music/Staging/Album/          # import a specific directory
-python3 -m spindlebot import ~/Music/Staging/Album.log --force   # skip disc check
+python3 -m spindlebot import-staging --dry-run               # preview what's in the Import area
+python3 -m spindlebot import "~/Library/Application Support/SpindleBot/Import/Album/"        # import a specific directory
+python3 -m spindlebot import "~/Library/Application Support/SpindleBot/Import/Album.log" --force   # skip disc check
 python3 -m spindlebot fetch-art <album_dir> [--dry-run] [--force]
 python3 -m spindlebot fetch-lyrics <album_dir> [--dry-run] [--force]
 python3 -m spindlebot restart                                # restart launchd agents

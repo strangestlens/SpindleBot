@@ -4,9 +4,9 @@ SpindleBot CLI.
 Usage:
     python -m spindlebot check                         Validate config and tool availability
     python -m spindlebot config shell                  Print config as shell-sourceable exports
-    python -m spindlebot config get <key>              Print a single value (e.g. core.library_dir)
-    python -m spindlebot import <trigger> [--force]    Run import pipeline for a staged album
-    python -m spindlebot import-staging [--dry-run]    Import everything currently in Staging
+    python -m spindlebot config get <key>              Print a single value (e.g. core.pending_dir)
+    python -m spindlebot import <trigger> [--force]    Run import pipeline for an album
+    python -m spindlebot import-staging [--dry-run]    Import everything currently in the Import area
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -35,12 +35,12 @@ def cmd_check(cfg) -> int:
                 print(f"       → {fix}")
 
     print("\nCore paths:")
-    check("library_dir exists",
-          cfg.core.library_dir.exists(),
-          f"mkdir -p '{cfg.core.library_dir}'")
-    check("staging_dir exists",
-          cfg.core.staging_dir.exists(),
-          f"mkdir -p '{cfg.core.staging_dir}'")
+    check("import_dir exists",
+          cfg.core.import_dir.exists(),
+          f"mkdir -p '{cfg.core.import_dir}'")
+    check("pending_dir exists",
+          cfg.core.pending_dir.exists(),
+          f"mkdir -p '{cfg.core.pending_dir}'")
     check("log_dir exists",
           cfg.core.log_dir.exists(),
           f"mkdir -p '{cfg.core.log_dir}'")
@@ -108,8 +108,8 @@ def cmd_config_shell(cfg) -> int:
     )
 
     exports = {
-        "SPINDLEBOT_LIBRARY_DIR":      str(cfg.core.library_dir),
-        "SPINDLEBOT_STAGING_DIR":      str(cfg.core.staging_dir),
+        "SPINDLEBOT_PENDING_DIR":      str(cfg.core.pending_dir),
+        "SPINDLEBOT_IMPORT_DIR":       str(cfg.core.import_dir),
         "SPINDLEBOT_LOG_DIR":          str(cfg.core.log_dir),
         "SPINDLEBOT_ARCHIVE_DIR":      str(cfg.core.archive_dir),
         "SPINDLEBOT_BEET":             str(cfg.tools.beet),
@@ -135,7 +135,7 @@ def cmd_config_shell(cfg) -> int:
 # ── config get ────────────────────────────────────────────────────────────────
 
 def cmd_config_get(cfg, key: str) -> int:
-    """Print a single dotted config value, e.g. core.library_dir."""
+    """Print a single dotted config value, e.g. core.pending_dir."""
     obj = cfg
     for part in key.split("."):
         try:
@@ -151,7 +151,7 @@ def cmd_config_get(cfg, key: str) -> int:
 
 def cmd_import_staging(cfg, args: list[str]) -> int:
     """
-    Scan the staging directory and dispatch each found album through the import
+    Scan the import area and dispatch each found album through the import
     pipeline sequentially.
 
     With --dry-run, prints what would be imported without actually running
@@ -161,15 +161,15 @@ def cmd_import_staging(cfg, args: list[str]) -> int:
     from spindlebot.staging import scan_staging
 
     dry_run = "--dry-run" in args
-    staging_dir = cfg.core.staging_dir
+    import_dir = cfg.core.import_dir
 
-    items = scan_staging(staging_dir)
+    items = scan_staging(import_dir)
 
     if not items:
-        print(f"Nothing to import in {staging_dir}")
+        print(f"Nothing to import in {import_dir}")
         return 0
 
-    print(f"Found {len(items)} item(s) in {staging_dir}:")
+    print(f"Found {len(items)} item(s) in {import_dir}:")
     for item in items:
         kind_label = "log" if item.kind == "log" else "dir"
         print(f"  [{kind_label}] {item.path.name}")
@@ -229,8 +229,8 @@ def main(argv: list[str] | None = None) -> int:
             beet=cfg.tools.beet,
             python=cfg.tools.python,
             db=cfg.tools.beets_db,
-            library=cfg.core.library_dir,
-            staging=cfg.core.staging_dir,
+            pending_dir=cfg.core.pending_dir,
+            import_dir=cfg.core.import_dir,
             archive=cfg.core.archive_dir,
             pipeline_dir=cfg.pipeline_dir,
             log_file=cfg.core.log_dir / "watcher.log",

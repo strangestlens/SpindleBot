@@ -40,8 +40,8 @@ def _make_config(tmp_path: Path, *, force: bool = False, trigger: Path | None = 
         beet=tmp_path / "bin" / "beet",
         python=tmp_path / "bin" / "python",
         db=db,
-        library=tmp_path / "Library",
-        staging=staging,
+        pending_dir=tmp_path / "Library",
+        import_dir=staging,
         archive=tmp_path / "AllDiscs",
         pipeline_dir=tmp_path / "pipeline",
         log_file=tmp_path / "logs" / "watcher.log",
@@ -128,14 +128,14 @@ def test_directory_trigger_skips_archive(tmp_path):
     cfg = _make_config(tmp_path, trigger=album_dir)
     _init_db(cfg)
     # Plant a .log in staging — it should NOT be archived for a dir-triggered run
-    stray_log = cfg.staging / "Album.log"
+    stray_log = cfg.import_dir / "Album.log"
     stray_log.touch()
 
     with patch(_CHECK_WAIT, return_value=None), \
          patch(_PRETAG, return_value=True), \
          patch(_POSTTAG, return_value=0), \
          patch(_COUNT_DISCS, return_value=1), \
-         patch(_SUBPROCESS, side_effect=_successful_subprocess_sequence(cfg.library)):
+         patch(_SUBPROCESS, side_effect=_successful_subprocess_sequence(cfg.pending_dir)):
         ImportRunner(cfg).run()
 
     assert stray_log.exists(), "Directory-triggered import must not archive .log files"
@@ -246,7 +246,7 @@ def test_successful_import_all_stages(tmp_path):
          patch(_PRETAG, return_value=True), \
          patch(_POSTTAG, return_value=2), \
          patch(_COUNT_DISCS, return_value=1), \
-         patch(_SUBPROCESS, side_effect=_successful_subprocess_sequence(cfg.library)):
+         patch(_SUBPROCESS, side_effect=_successful_subprocess_sequence(cfg.pending_dir)):
         result = ImportRunner(cfg).run()
 
     assert result.success
@@ -263,7 +263,7 @@ def test_successful_import_archives_log(tmp_path):
          patch(_PRETAG, return_value=True), \
          patch(_POSTTAG, return_value=0), \
          patch(_COUNT_DISCS, return_value=1), \
-         patch(_SUBPROCESS, side_effect=_successful_subprocess_sequence(cfg.library)):
+         patch(_SUBPROCESS, side_effect=_successful_subprocess_sequence(cfg.pending_dir)):
         ImportRunner(cfg).run()
 
     assert not cfg.trigger.exists(), "Log file should be archived"
@@ -279,7 +279,7 @@ def test_log_messages_written_to_watcher_log(tmp_path):
          patch(_PRETAG, return_value=True), \
          patch(_POSTTAG, return_value=0), \
          patch(_COUNT_DISCS, return_value=1), \
-         patch(_SUBPROCESS, side_effect=_successful_subprocess_sequence(cfg.library)):
+         patch(_SUBPROCESS, side_effect=_successful_subprocess_sequence(cfg.pending_dir)):
         ImportRunner(cfg).run()
 
     text = cfg.log_file.read_text()

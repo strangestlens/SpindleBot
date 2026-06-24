@@ -41,8 +41,8 @@ class ImportConfig:
     beet: Path
     python: Path
     db: Path
-    library: Path
-    staging: Path
+    pending_dir: Path   # processed albums awaiting distribution (beets canonical dir)
+    import_dir: Path    # active import area (rips/downloads land here)
     archive: Path
     pipeline_dir: Path
     log_file: Path
@@ -196,7 +196,7 @@ class ImportRunner:
 
         # Stage 7: beet move
         subprocess.run(
-            [str(cfg.beet), "move", f"added:{import_start}..", f"path:{cfg.library}/"],
+            [str(cfg.beet), "move", f"added:{import_start}..", f"path:{cfg.pending_dir}/"],
             capture_output=True,
             text=True,
         )
@@ -244,7 +244,7 @@ class ImportRunner:
         # Stage 10: archive XLD logs (.log-triggered runs only)
         if has_log:
             cfg.archive.mkdir(parents=True, exist_ok=True)
-            for logfile in sorted(cfg.staging.glob("*.log")):
+            for logfile in sorted(cfg.import_dir.glob("*.log")):
                 dest = cfg.archive / logfile.name
                 logfile.rename(dest)
                 self._log(f"Archived XLD log to: {dest}", echo=False)
@@ -255,12 +255,12 @@ class ImportRunner:
 
     def _fix_multidisc(self, actual_discs: int, import_start: str) -> None:
         cfg = self.cfg
-        library_path = f"{cfg.library}/"
+        pending_path = f"{cfg.pending_dir}/"
 
         if actual_discs > 1:
             subprocess.run(
                 [str(cfg.beet), "modify", "--yes",
-                 f"added:{import_start}..", f"path:{library_path}", f"disctotal={actual_discs}"],
+                 f"added:{import_start}..", f"path:{pending_path}", f"disctotal={actual_discs}"],
                 capture_output=True,
             )
             with sqlite3.connect(str(cfg.db)) as conn:
@@ -274,13 +274,13 @@ class ImportRunner:
                           SELECT entity_id FROM item_attributes WHERE key='multidisc'
                       )
                     """,
-                    (import_start, f"{cfg.library}/%"),
+                    (import_start, f"{cfg.pending_dir}/%"),
                 )
             self._log(f"Multi-disc rip ({actual_discs} discs) — set disctotal={actual_discs}, multidisc=1")
         else:
             subprocess.run(
                 [str(cfg.beet), "modify", "--yes",
-                 f"added:{import_start}..", f"path:{library_path}", "disctotal=1", "disc=1"],
+                 f"added:{import_start}..", f"path:{pending_path}", "disctotal=1", "disc=1"],
                 capture_output=True,
             )
             with sqlite3.connect(str(cfg.db)) as conn:
@@ -294,6 +294,6 @@ class ImportRunner:
                           SELECT entity_id FROM item_attributes WHERE key='multidisc'
                       )
                     """,
-                    (import_start, f"{cfg.library}/%"),
+                    (import_start, f"{cfg.pending_dir}/%"),
                 )
             self._log("Single-disc rip — patched disctotal=1, ensured multidisc row exists")
