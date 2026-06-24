@@ -72,46 +72,18 @@ echo "Wrote $CONFIG_DIR/bootstrap.sh"
 # ── 4. Migrate legacy working dirs into the new Import/Pending areas ──────────
 # Safe + idempotent: creates the new dirs, relocates any contents out of the old
 # default locations, reconciles beets DB paths for the moved Pending area, and
-# never deletes the old top-level dirs.
+# never deletes the old top-level dirs. Logic lives in a sourceable lib so it is
+# unit-tested in tests/shell/test_migrate_work_dirs.bats.
 resolve_cfg() { PYTHONPATH="$PIPELINE_DIR" "$PYTHON" -m spindlebot config get "$1" 2>/dev/null || true; }
 
-NEW_IMPORT="$(resolve_cfg core.import_dir)"
-NEW_PENDING="$(resolve_cfg core.pending_dir)"
-BEETS_DB="$(resolve_cfg tools.beets_db)"
-LEGACY_IMPORT="$HOME/Music/Staging"
-LEGACY_PENDING="$HOME/Music/Library"
-
-[ -n "$NEW_IMPORT" ] && mkdir -p "$NEW_IMPORT"
-[ -n "$NEW_PENDING" ] && mkdir -p "$NEW_PENDING"
-
-# move_contents FROM TO — relocates entries (incl. dotfiles) without clobbering TO.
-# Returns 0 only if it actually moved something.
-move_contents() {
-  local from="$1" to="$2"
-  [ -z "$to" ] && return 1
-  [ "$from" = "$to" ] && return 1
-  [ ! -d "$from" ] && return 1
-  [ -z "$(ls -A "$from" 2>/dev/null)" ] && return 1
-  echo "Migrating contents: $from → $to"
-  mkdir -p "$to"
-  ( shopt -s dotglob nullglob; mv "$from"/* "$to"/ 2>/dev/null ) \
-    || rsync -a --remove-source-files "$from"/ "$to"/
-  return 0
-}
-
-move_contents "$LEGACY_IMPORT" "$NEW_IMPORT" || true
-
-if move_contents "$LEGACY_PENDING" "$NEW_PENDING"; then
-  # Reconcile beets DB paths for items that lived under the old pending dir.
-  if [ -n "$BEETS_DB" ] && [ -f "$BEETS_DB" ] && command -v sqlite3 >/dev/null 2>&1; then
-    if sqlite3 "$BEETS_DB" \
-        "UPDATE items SET path = replace(path, '${LEGACY_PENDING}', '${NEW_PENDING}') WHERE path LIKE '${LEGACY_PENDING}/%';"; then
-      echo "Reconciled beets DB paths: $LEGACY_PENDING → $NEW_PENDING"
-    else
-      echo "WARNING: beets DB path reconciliation failed — check manually." >&2
-    fi
-  fi
-fi
+# shellcheck source=migrate-work-dirs.sh
+source "$PIPELINE_DIR/migrate-work-dirs.sh"
+migrate_work_dirs \
+  "$(resolve_cfg core.import_dir)" \
+  "$(resolve_cfg core.pending_dir)" \
+  "$(resolve_cfg tools.beets_db)" \
+  "$HOME/Music/Staging" \
+  "$HOME/Music/Library"
 
 # ── 5. Install tomli if needed ────────────────────────────────────────────────
 # (done before watcher install so bootstrap.sh is ready when watcher starts)
