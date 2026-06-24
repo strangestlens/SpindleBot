@@ -5,10 +5,12 @@
 #   1. Creates ~/.config/spindlebot/
 #   2. Copies config/secrets example files if they don't already exist
 #   3. Writes ~/.config/spindlebot/bootstrap.sh (pipeline dir baked in)
-#   4. Installs tomli if Python < 3.11
-#   5. Installs music-watcher.sh to ~/.local/bin/
-#   6. Installs launchd plists to ~/Library/LaunchAgents/
-#   7. Runs `python -m spindlebot check` so you can see what needs filling in
+#   4. Migrates legacy ~/Music/Staging + ~/Music/Library into the new
+#      Import/Pending working areas (safe + idempotent; never deletes old dirs)
+#   5. Installs tomli if Python < 3.11
+#   6. Installs music-watcher.sh to ~/.local/bin/
+#   7. Installs launchd plists to ~/Library/LaunchAgents/
+#   8. Runs `python -m spindlebot check` so you can see what needs filling in
 
 set -euo pipefail
 
@@ -67,7 +69,51 @@ BOOTSTRAP
 chmod +x "$CONFIG_DIR/bootstrap.sh"
 echo "Wrote $CONFIG_DIR/bootstrap.sh"
 
-# ── 4. Install tomli if needed ────────────────────────────────────────────────
+# ── 4. Migrate legacy working dirs into the new Import/Pending areas ──────────
+# Safe + idempotent: creates the new dirs, relocates any contents out of the old
+# default locations, reconciles beets DB paths for the moved Pending area, and
+# never deletes the old top-level dirs.
+resolve_cfg() { PYTHONPATH="$PIPELINE_DIR" "$PYTHON" -m spindlebot config get "$1" 2>/dev/null || true; }
+
+NEW_IMPORT="$(resolve_cfg core.import_dir)"
+NEW_PENDING="$(resolve_cfg core.pending_dir)"
+BEETS_DB="$(resolve_cfg tools.beets_db)"
+LEGACY_IMPORT="$HOME/Music/Staging"
+LEGACY_PENDING="$HOME/Music/Library"
+
+[ -n "$NEW_IMPORT" ] && mkdir -p "$NEW_IMPORT"
+[ -n "$NEW_PENDING" ] && mkdir -p "$NEW_PENDING"
+
+# move_contents FROM TO — relocates entries (incl. dotfiles) without clobbering TO.
+# Returns 0 only if it actually moved something.
+move_contents() {
+  local from="$1" to="$2"
+  [ -z "$to" ] && return 1
+  [ "$from" = "$to" ] && return 1
+  [ ! -d "$from" ] && return 1
+  [ -z "$(ls -A "$from" 2>/dev/null)" ] && return 1
+  echo "Migrating contents: $from → $to"
+  mkdir -p "$to"
+  ( shopt -s dotglob nullglob; mv "$from"/* "$to"/ 2>/dev/null ) \
+    || rsync -a --remove-source-files "$from"/ "$to"/
+  return 0
+}
+
+move_contents "$LEGACY_IMPORT" "$NEW_IMPORT" || true
+
+if move_contents "$LEGACY_PENDING" "$NEW_PENDING"; then
+  # Reconcile beets DB paths for items that lived under the old pending dir.
+  if [ -n "$BEETS_DB" ] && [ -f "$BEETS_DB" ] && command -v sqlite3 >/dev/null 2>&1; then
+    if sqlite3 "$BEETS_DB" \
+        "UPDATE items SET path = replace(path, '${LEGACY_PENDING}', '${NEW_PENDING}') WHERE path LIKE '${LEGACY_PENDING}/%';"; then
+      echo "Reconciled beets DB paths: $LEGACY_PENDING → $NEW_PENDING"
+    else
+      echo "WARNING: beets DB path reconciliation failed — check manually." >&2
+    fi
+  fi
+fi
+
+# ── 5. Install tomli if needed ────────────────────────────────────────────────
 # (done before watcher install so bootstrap.sh is ready when watcher starts)
 PY_VERSION=$("$PYTHON" -c "import sys; print(sys.version_info[:2])")
 if [[ "$PY_VERSION" < "(3, 11)" ]]; then
@@ -77,13 +123,13 @@ if [[ "$PY_VERSION" < "(3, 11)" ]]; then
   fi
 fi
 
-# ── 5. Install music-watcher.sh ───────────────────────────────────────────────
+# ── 6. Install music-watcher.sh ───────────────────────────────────────────────
 mkdir -p "$HOME/.local/bin"
 cp "$PIPELINE_DIR/music-watcher.sh" "$HOME/.local/bin/music-watcher.sh"
 chmod +x "$HOME/.local/bin/music-watcher.sh"
 echo "Installed music-watcher.sh → ~/.local/bin/music-watcher.sh"
 
-# ── 6. Install launchd plists ─────────────────────────────────────────────────
+# ── 7. Install launchd plists ─────────────────────────────────────────────────
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 mkdir -p "$LAUNCH_AGENTS"
 for plist in \
@@ -105,7 +151,7 @@ for label in \
   echo "Started $label"
 done
 
-# ── 7. Validate ────────────────────────────────────────────────────────────────
+# ── 8. Validate ────────────────────────────────────────────────────────────────
 echo ""
 echo "Running validation..."
 PYTHONPATH="$PIPELINE_DIR" "$PYTHON" -m spindlebot check

@@ -16,7 +16,7 @@ setup() {
   BATS_TMPDIR="$(mktemp -d)"
 
   mkdir -p \
-    "$BATS_TMPDIR/Staging" \
+    "$BATS_TMPDIR/Import" \
     "$BATS_TMPDIR/bin"
 
   cp "$FIXTURES/bin/python" "$BATS_TMPDIR/bin/python"
@@ -37,21 +37,21 @@ teardown() {
 }
 
 @test "script forwards trigger path to python -m spindlebot import" {
-  run bash "$SCRIPT" "$BATS_TMPDIR/Staging/Album.log"
+  run bash "$SCRIPT" "$BATS_TMPDIR/Import/Album.log"
   [ "$status" -eq 0 ]
   grep -qF "spindlebot import" "$MOCK_LOG"
   grep -qF "Album.log" "$MOCK_LOG"
 }
 
 @test "script forwards --force flag to python" {
-  run bash "$SCRIPT" --force "$BATS_TMPDIR/Staging/Album.log"
+  run bash "$SCRIPT" --force "$BATS_TMPDIR/Import/Album.log"
   [ "$status" -eq 0 ]
   grep -qF -- "--force" "$MOCK_LOG"
 }
 
 @test "script exits non-zero when bootstrap missing" {
   rm "$HOME/.config/spindlebot/bootstrap.sh"
-  run bash "$SCRIPT" "$BATS_TMPDIR/Staging/Album.log"
+  run bash "$SCRIPT" "$BATS_TMPDIR/Import/Album.log"
   [ "$status" -ne 0 ]
 }
 
@@ -59,6 +59,6 @@ teardown() {
   # The mock python exits 1 if PYTHONPATH is unset for -m spindlebot calls.
   # This guards against the shim omitting PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR",
   # which causes "No module named spindlebot" in the watcher's stripped environment.
-  run bash "$SCRIPT" "$BATS_TMPDIR/Staging/Album.log"
+  run bash "$SCRIPT" "$BATS_TMPDIR/Import/Album.log"
   [ "$status" -eq 0 ]
 }

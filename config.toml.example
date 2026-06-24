@@ -3,8 +3,11 @@
 # Run: python3 -m spindlebot check
 
 [core]
-library_dir = "~/Music/Library"
-staging_dir = "~/Music/Staging"
+# Import: active import area — XLD rips / downloads land here for processing.
+# Pending: processed albums waiting to be distributed to retention destinations.
+# (legacy keys staging_dir/library_dir are still honored if present.)
+import_dir  = "~/Library/Application Support/SpindleBot/Import"
+pending_dir = "~/Library/Application Support/SpindleBot/Pending"
 log_dir     = "~/.config/beets"    # watcher.log and rugged-sync.log land here
 archive_dir = "~/Music/All Discs"  # XLD .log files archived here after import
 

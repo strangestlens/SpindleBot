@@ -49,8 +49,8 @@ def _load_with_dir(tmp: Path) -> SpindleBotConfig:
 
 MINIMAL_CONFIG = """\
     [core]
-    library_dir = "/tmp/Library"
-    staging_dir = "/tmp/Staging"
+    pending_dir = "/tmp/Library"
+    import_dir  = "/tmp/Staging"
     log_dir     = "/tmp/logs"
     archive_dir = "/tmp/AllDiscs"
 
@@ -89,8 +89,8 @@ class TestConfigLoading(unittest.TestCase):
         _write(self.tmp, "config.toml", MINIMAL_CONFIG)
         _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
         cfg = _load_with_dir(self.tmp)
-        self.assertIsInstance(cfg.core.library_dir, Path)
-        self.assertIsInstance(cfg.core.staging_dir, Path)
+        self.assertIsInstance(cfg.core.pending_dir, Path)
+        self.assertIsInstance(cfg.core.import_dir, Path)
         self.assertIsInstance(cfg.core.log_dir, Path)
         self.assertIsInstance(cfg.core.archive_dir, Path)
 
@@ -106,14 +106,29 @@ class TestConfigLoading(unittest.TestCase):
         _write(self.tmp, "config.toml", config)
         _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
         cfg = _load_with_dir(self.tmp)
-        self.assertFalse(str(cfg.core.library_dir).startswith("~"))
-        self.assertTrue(str(cfg.core.library_dir).startswith(str(Path.home())))
+        self.assertFalse(str(cfg.core.pending_dir).startswith("~"))
+        self.assertTrue(str(cfg.core.pending_dir).startswith(str(Path.home())))
 
     def test_missing_config_file_uses_defaults(self):
         _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
         # No config.toml — should not raise, should use sensible defaults
         cfg = _load_with_dir(self.tmp)
-        self.assertIsNotNone(cfg.core.library_dir)
+        self.assertIsNotNone(cfg.core.pending_dir)
+        self.assertIsNotNone(cfg.core.import_dir)
+
+    def test_legacy_staging_library_keys_still_honored(self):
+        # Pre-rename config.toml files use staging_dir/library_dir — they must
+        # still map to import_dir/pending_dir until users migrate.
+        legacy = """\
+            [core]
+            library_dir = "/tmp/OldLibrary"
+            staging_dir = "/tmp/OldStaging"
+        """
+        _write(self.tmp, "config.toml", legacy)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertEqual(str(cfg.core.pending_dir), "/tmp/OldLibrary")
+        self.assertEqual(str(cfg.core.import_dir), "/tmp/OldStaging")
 
     def test_missing_secrets_file_uses_empty_defaults(self):
         _write(self.tmp, "config.toml", MINIMAL_CONFIG)
