@@ -1,6 +1,13 @@
 """
 Location <-> filesystem resolution via marker files.
 
+A location is a *specific path* (``location.root_path``), not a whole volume —
+it may be a subdirectory of a disk that also holds other things. For example
+``/Volumes/MyBusyDisk/Music/MyDap1`` is a perfectly valid location: the marker
+lives in that subfolder and inventory scans only that subtree, never the whole
+mounted disk. Two locations can even share one physical volume in different
+subfolders, each with its own marker.
+
 Each location carries a marker file ``.spindlebot-location-<uuid>`` at its root.
 We resolve a configured location to its current on-disk root by checking the
 marker, so a drive that mounts at an unexpected path — or a *different* drive

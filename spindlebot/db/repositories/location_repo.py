@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from spindlebot.core.enums import LocationKind
 from spindlebot.core.models import Location
 
 
@@ -11,7 +12,7 @@ def upsert(
     *,
     uuid: str,
     name: str,
-    kind: str,
+    kind: LocationKind | str,
     root_path: str | None = None,
     is_authoritative_audio: bool = False,
     is_retention: bool = False,
@@ -37,7 +38,7 @@ def upsert(
             enabled = excluded.enabled,
             last_seen_utc = COALESCE(excluded.last_seen_utc, location.last_seen_utc)
         """,
-        (uuid, name, kind, root_path, int(is_authoritative_audio),
+        (uuid, name, str(LocationKind(kind)), root_path, int(is_authoritative_audio),
          int(is_retention), int(enabled), last_seen_utc),
     )
     found = get_by_uuid(conn, uuid)

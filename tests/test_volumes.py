@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from spindlebot.core.enums import LocationKind
 from spindlebot.core.errors import MarkerMismatch
 from spindlebot.core.models import Location
 from spindlebot.services import volumes
@@ -15,7 +16,7 @@ from spindlebot.services import volumes
 
 def _loc(uuid="u-rugged", root_path=None, name="DwRugged"):
     return Location(
-        id=1, uuid=uuid, name=name, kind="local_drive",
+        id=1, uuid=uuid, name=name, kind=LocationKind.LOCAL_DRIVE,
         is_authoritative_audio=False, is_retention=True, enabled=True,
         last_seen_utc=None, root_path=str(root_path) if root_path else None,
     )

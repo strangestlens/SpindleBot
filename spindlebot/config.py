@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from spindlebot.core.enums import LocationKind
+
 # ── TOML parser — stdlib in 3.11+, tomli on 3.10 and below ──────────────────
 try:
     import tomllib  # type: ignore[import]
@@ -86,7 +88,7 @@ class DestinationConfig:
 @dataclass
 class LocationConfig:
     name: str
-    kind: str                       # "library" | "local_drive" | "rclone"
+    kind: LocationKind
     root_path: str = ""             # content root; for a library, defaults to core.pending_dir
     is_authoritative_audio: bool = False
     is_retention: bool = True
@@ -215,7 +217,7 @@ def load() -> SpindleBotConfig:
     locations = [
         LocationConfig(
             name=loc["name"],
-            kind=loc.get("kind", "local_drive"),
+            kind=LocationKind(loc.get("kind", "local_drive")),
             root_path=loc.get("root_path", loc.get("path", "")),
             is_authoritative_audio=loc.get("is_authoritative_audio", False),
             is_retention=loc.get("is_retention", True),

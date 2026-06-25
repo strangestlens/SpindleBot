@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from uuid import NAMESPACE_URL, uuid5
 
+from spindlebot.core.enums import LocationKind
 from spindlebot.core.models import Location
 from spindlebot.db.repositories import location_repo
 
@@ -27,7 +28,7 @@ def ensure_pending_location(conn, now: int, *, root_path=None) -> Location:
         conn,
         uuid=location_uuid(PENDING_LOCATION_NAME),
         name=PENDING_LOCATION_NAME,
-        kind="library",
+        kind=LocationKind.LIBRARY,
         root_path=(str(root_path) if root_path else None),
         is_authoritative_audio=True,
         is_retention=False,
@@ -67,7 +68,7 @@ def register_from_config(conn, cfg, now: int) -> list[Location]:
             conn,
             uuid=location_uuid(dest.name),
             name=dest.name,
-            kind="rclone" if dest.type == "rclone" else "local_drive",
+            kind=LocationKind.RCLONE if dest.type == "rclone" else LocationKind.LOCAL_DRIVE,
             root_path=dest.path or None,
             is_retention=True,
         ))

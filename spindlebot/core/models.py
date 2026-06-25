@@ -4,13 +4,15 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from spindlebot.core.enums import LocationKind
+
 
 @dataclass(frozen=True)
 class Location:
     id: int
     uuid: str
     name: str
-    kind: str
+    kind: LocationKind
     is_authoritative_audio: bool
     is_retention: bool
     enabled: bool
@@ -24,7 +26,7 @@ class Location:
             id=row["id"],
             uuid=row["uuid"],
             name=row["name"],
-            kind=row["kind"],
+            kind=LocationKind(row["kind"]),
             is_authoritative_audio=bool(row["is_authoritative_audio"]),
             is_retention=bool(row["is_retention"]),
             enabled=bool(row["enabled"]),
