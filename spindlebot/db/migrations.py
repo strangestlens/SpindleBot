@@ -16,6 +16,7 @@ _SCHEMA_DIR = Path(__file__).parent
 MIGRATIONS: list[tuple[int, str]] = [
     (1, "schema.sql"),
     (2, "schema_v2.sql"),
+    (3, "schema_v3.sql"),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]
