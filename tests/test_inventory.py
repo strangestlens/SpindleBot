@@ -10,8 +10,17 @@ import pytest
 import os
 import sqlite3
 
+from spindlebot.core.albums import album_key
+from spindlebot.core.enums import SidecarParentKind, SidecarRole
 from spindlebot.db.connection import open_db
-from spindlebot.db.repositories import audio_repo, presence_repo, scan_repo
+from spindlebot.db.repositories import (
+    album_repo,
+    audio_repo,
+    presence_repo,
+    scan_repo,
+    sidecar_presence_repo,
+    sidecar_repo,
+)
 from spindlebot.services import inventory, volumes
 from spindlebot.services.inventory import (
     ensure_pending_location,
@@ -195,3 +204,192 @@ def test_inventory_isolates_per_file_errors(conn, tmp_path, monkeypatch):
     assert result.errors == 1
     assert any("bad.flac" in e for e in result.error_paths)
     assert result.new == 1   # the good one still landed
+
+
+# ── albums + sidecars ─────────────────────────────────────────────────────────
+
+def _album_tags(title, track):
+    return {"albumartist": "AA", "artist": "AA", "album": "Album",
+            "title": title, "tracknumber": str(track), "discnumber": "1"}
+
+
+def test_inventory_groups_tracks_into_one_album(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    _write_flac(root / "AA" / "Album" / "02.flac",
+                audio_md5_bytes=bytes(range(17, 33)), tags=_album_tags("Two", 2))
+    result, _ = _run(conn, root)
+
+    assert result.albums == 1
+    assert album_repo.count(conn) == 1
+    al = album_repo.get_by_key(conn, album_key("AA", "Album"))
+    assert al is not None and len(album_repo.list_track_ids(conn, al.id)) == 2
+
+
+def test_inventory_skips_album_when_no_album_tag(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "01.flac", audio_md5_bytes=bytes(range(1, 17)),
+                tags={"artist": "AA", "title": "Loose"})
+    result, _ = _run(conn, root)
+    assert result.albums == 0 and album_repo.count(conn) == 0
+
+
+def test_inventory_records_lrc_paired_to_its_track(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    (root / "AA" / "Album" / "01.lrc").write_text("[00:01.00]hello\n")
+    result, loc = _run(conn, root)
+
+    assert result.sidecars == 1 and result.sidecars_new == 1
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    sc = sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
+                          parent_id=audio.id, role=SidecarRole.LRC)
+    assert sc is not None
+    pres = sidecar_presence_repo.get(conn, sc.id, loc.id)
+    assert pres.present is True
+    assert pres.rel_path == "AA/Album/01.lrc"
+    assert pres.file_sha256 == sc.sha256 and pres.byte_size > 0
+
+
+def test_inventory_partial_lrc_coverage(conn, tmp_path):
+    # An album where only some tracks have lyrics: each .lrc is its own track row,
+    # the others get nothing, and no album-level .nolrc is implied.
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    _write_flac(root / "AA" / "Album" / "02.flac",
+                audio_md5_bytes=bytes(range(17, 33)), tags=_album_tags("Two", 2))
+    _write_flac(root / "AA" / "Album" / "03.flac",
+                audio_md5_bytes=bytes(range(33, 49)), tags=_album_tags("Three", 3))
+    (root / "AA" / "Album" / "01.lrc").write_text("[00:01.00]a\n")
+    (root / "AA" / "Album" / "03.lrc").write_text("[00:01.00]c\n")
+    result, _ = _run(conn, root)
+
+    assert result.albums == 1
+    assert result.sidecars == 2          # only the two present .lrc files
+    track1 = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    track2 = audio_repo.get_by_identity(conn, bytes(range(17, 33)).hex())
+    track3 = audio_repo.get_by_identity(conn, bytes(range(33, 49)).hex())
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
+                            parent_id=track1.id, role=SidecarRole.LRC) is not None
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
+                            parent_id=track2.id, role=SidecarRole.LRC) is None
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
+                            parent_id=track3.id, role=SidecarRole.LRC) is not None
+    # no album-level nolrc was created
+    al = album_repo.get_by_key(conn, album_key("AA", "Album"))
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                            parent_id=al.id, role=SidecarRole.NOLRC) is None
+
+
+def test_inventory_orphan_lrc_is_skipped(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    (root / "AA" / "Album" / "99.lrc").write_text("no matching track\n")
+    result, _ = _run(conn, root)
+    assert result.sidecars == 0
+    assert sidecar_repo.count(conn) == 0
+
+
+def test_inventory_records_cover_and_nolrc_at_album_level(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    (root / "AA" / "Album" / "cover.jpg").write_bytes(b"\xff\xd8jpeg")
+    (root / "AA" / "Album" / ".nolrc").write_bytes(b"")
+    result, loc = _run(conn, root)
+
+    al = album_repo.get_by_key(conn, album_key("AA", "Album"))
+    roles = {s.role for s in sidecar_repo.list_for_parent(
+        conn, parent_kind=SidecarParentKind.ALBUM, parent_id=al.id)}
+    assert roles == {SidecarRole.COVER, SidecarRole.NOLRC}
+    assert result.sidecars == 2
+    cover = sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                             parent_id=al.id, role=SidecarRole.COVER)
+    assert sidecar_presence_repo.get(conn, cover.id, loc.id).rel_path == "AA/Album/cover.jpg"
+
+
+def test_inventory_cover_resolves_through_disc_subfolders(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "Disc 1" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    _write_flac(root / "AA" / "Album" / "Disc 2" / "01.flac",
+                audio_md5_bytes=bytes(range(17, 33)), tags=_album_tags("Two", 1))
+    (root / "AA" / "Album" / "cover.jpg").write_bytes(b"\xff\xd8jpeg")
+    result, _ = _run(conn, root)
+
+    assert result.albums == 1 and result.sidecars == 1
+    al = album_repo.get_by_key(conn, album_key("AA", "Album"))
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                            parent_id=al.id, role=SidecarRole.COVER) is not None
+
+
+def test_inventory_multidisc_sibling_folders_collapse_to_one_album(conn, tmp_path):
+    # Real DwRugged layout: multidisc = sibling album folders ("Album [Disc 1]",
+    # "Album [Disc 2]"), tracks + a cover directly inside each, sharing one album
+    # tag. They must collapse to a single album keyed on tags, not folder names.
+    root = tmp_path / "Pending"
+    d1 = root / "AA" / "Album [Disc 1]"
+    d2 = root / "AA" / "Album [Disc 2]"
+    _write_flac(d1 / "01.flac", audio_md5_bytes=bytes(range(1, 17)),
+                tags={"albumartist": "AA", "album": "Album", "title": "a",
+                      "tracknumber": "1", "discnumber": "1"})
+    _write_flac(d2 / "01.flac", audio_md5_bytes=bytes(range(17, 33)),
+                tags={"albumartist": "AA", "album": "Album", "title": "b",
+                      "tracknumber": "1", "discnumber": "2"})
+    (d1 / "cover.jpg").write_bytes(b"\xff\xd8jpeg")
+    (d2 / "cover.jpg").write_bytes(b"\xff\xd8jpeg")
+    result, loc = _run(conn, root)
+
+    assert result.albums == 1
+    al = album_repo.get_by_key(conn, album_key("AA", "Album"))
+    assert len(album_repo.list_track_ids(conn, al.id)) == 2
+    # both disc covers map to the single (album, cover) sidecar — one row
+    covers = [s for s in sidecar_repo.list_for_parent(
+        conn, parent_kind=SidecarParentKind.ALBUM, parent_id=al.id)
+        if s.role is SidecarRole.COVER]
+    assert len(covers) == 1
+    pres = sidecar_presence_repo.get(conn, covers[0].id, loc.id)
+    assert pres.present is True and pres.rel_path.endswith("cover.jpg")
+
+
+def test_inventory_ambiguous_cover_is_skipped(conn, tmp_path):
+    root = tmp_path / "Pending"
+    # two distinct albums sharing one directory → which album owns cover.jpg? skip.
+    _write_flac(root / "mix" / "01.flac", audio_md5_bytes=bytes(range(1, 17)),
+                tags={"albumartist": "AA", "album": "Alpha", "title": "x",
+                      "tracknumber": "1"})
+    _write_flac(root / "mix" / "02.flac", audio_md5_bytes=bytes(range(17, 33)),
+                tags={"albumartist": "BB", "album": "Beta", "title": "y",
+                      "tracknumber": "1"})
+    (root / "mix" / "cover.jpg").write_bytes(b"\xff\xd8jpeg")
+    result, _ = _run(conn, root)
+
+    assert result.albums == 2 and result.sidecars == 0
+    assert sidecar_repo.count(conn) == 0
+
+
+def test_inventory_sidecar_idempotent_then_tracks_content_change(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    cover = root / "AA" / "Album" / "cover.jpg"
+    cover.write_bytes(b"\xff\xd8original")
+    _run(conn, root, now=1000)
+
+    al = album_repo.get_by_key(conn, album_key("AA", "Album"))
+    sc1 = sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                           parent_id=al.id, role=SidecarRole.COVER)
+
+    cover.write_bytes(b"\xff\xd8edited-bytes")
+    result, _ = _run(conn, root, now=2000)
+
+    assert result.sidecars == 1 and result.sidecars_updated == 1 and result.sidecars_new == 0
+    sc2 = sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                           parent_id=al.id, role=SidecarRole.COVER)
+    assert sc2.id == sc1.id                 # same sidecar identity
+    assert sc2.sha256 != sc1.sha256         # content hash followed the edit
+    assert sidecar_repo.count(conn) == 1

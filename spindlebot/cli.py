@@ -260,7 +260,8 @@ def cmd_inventory(cfg, args: list[str]) -> int:
         print(
             f"Inventoried {result.location} ({root}): "
             f"{result.scanned} scanned, {result.new} new, "
-            f"{result.updated} updated, {result.errors} error(s)"
+            f"{result.updated} updated, {result.albums} album(s), "
+            f"{result.sidecars} sidecar(s), {result.errors} error(s)"
         )
         for ep in result.error_paths:
             print(f"  ! {ep}", file=sys.stderr)
