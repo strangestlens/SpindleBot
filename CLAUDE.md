@@ -21,6 +21,30 @@ Also triggered automatically when a directory is dropped into the Import area (e
 | 3 — Sync pipeline in Python | Not started | `music-sync-rugged.sh` still shell; next target for Pythonification |
 | 4–6 | Not started | |
 
+> The table above is the **original roadmap**. It is superseded by the active epic below, which uses its own phase labels (**A, 0, 1, 2, …**). Don't conflate the two numbering schemes.
+
+## Content-addressed library refactor (ACTIVE epic)
+
+Replacing "library = whatever is at known paths" with a **SpindleBot-owned SQLite DB** (`~/.config/spindlebot/spindlebot.db`) that is the system of record for content **identity**, every **location** a file lives, and (later) version history. Long-form design + locked decisions: `~/.claude/plans/immutable-shimmying-blanket.md` (user-local; not in the repo).
+
+**Status:** Phase A (working-dir rename, #26), Phase 0 (DB foundation + `inventory`, #27), Phase 1 (first-class locations + generalized inventory + enums, #28) — all merged. **Next: `feat/sidecars`** (album table + `sidecar_content`/`sidecar_presence`; `.lrc` stem-paired to its track, `cover.jpg`/`.nolrc` album-level). Later: 2 reconciler + pre-sync review, 3 sync executor (replaces `rsync --remove-source-files` with copy→verify→prune), 4 lyrics bidirectional sync, 5 plugins + AI re-timer, 6 DB snapshot, 7 daemon.
+
+**Layering (keep consistent):**
+- `spindlebot/core/` — pure, no DB/IO side effects, no `print`: `identity.py` (hashing), `enums.py`, `models.py` (frozen dataclasses + `from_row`), `errors.py`.
+- `spindlebot/db/` — `connection.py` (`open_db` = WAL + `foreign_keys=ON` + migrate); `schema.sql`=v1, `schema_v2.sql`=v2; `migrations.py` (append-only `[(version, file)]`, forward-only, `user_version`-keyed). `repositories/` is the **only** layer that issues SQL; the caller owns the transaction (repos don't commit).
+- `spindlebot/services/` — orchestration over repos+core; side-effect-free re `print`; returns typed results. `inventory.py`, `locations.py` (registry + deterministic `location_uuid`), `volumes.py` (marker files).
+- `cli.py` — thin client; `print` only here; every command supports `--json`.
+
+**Conventions:**
+- **Identity** = decoded-audio MD5 (FLAC STREAMINFO `md5_signature`), fallback to whole-file sha256, recorded via `IdentityKind`. File sha256 is per-copy *integrity*, never identity.
+- **Closed sets are `StrEnum`s** (`LocationKind`, `IdentityKind`, `ScanStatus`) — stored as TEXT, validated on read+write, fail loud on unknown. No bare string literals for these.
+- **Schema is minimal per phase** — add new tables in a *new* migration version; never edit a shipped schema file. v2 tables: `location`, `audio_content`, `audio_presence`, `location_scan`. No album/sidecar tables yet.
+- **Locations are first-class**, identified by a marker file `.spindlebot-location-<uuid>` at `root_path` (a path — may be a *subfolder* of a shared volume, not a whole volume). A *missing* marker is never treated as a wiped drive; a *foreign* marker refuses resolution.
+- **beets overlay**: `audio_content.beets_item_id` linked by path during inventory (read-only); advisory, nullable, never depended on.
+- **Tests**: use the controllable-STREAMINFO-md5 fake-FLAC fixture (`_write_flac` in `tests/test_identity.py` / `tests/test_inventory.py`). Tests are the contract.
+
+**Workflow:** one feature branch per phase off latest `main`; sub-tasks are ordered commits on that branch (each green); push + open a PR only when asked; PRs squash-merge to `main`; `git pull` main before the next branch.
+
 ## Current file map
 
 ```
@@ -42,6 +66,20 @@ spindlebot/
       fetch_lyrics.py            — fetch_lyrics(): lrclib .lrc sidecar fetching
       fetch_art.py               — fetch_art(): embed album art (CAA → iTunes fallback),
                                      writes cover.jpg sidecar
+  core/                          — pure, side-effect-free (see ACTIVE epic section)
+    identity.py                  — audio_md5 / file_sha256 / audio_content_id (ContentId)
+    enums.py                     — LocationKind / IdentityKind / ScanStatus (StrEnum)
+    models.py                    — frozen Location / AudioContent / AudioPresence (+ from_row)
+    errors.py                    — SpindleBotError, MarkerMismatch, UnknownLocation
+  db/                            — SpindleBot's own SQLite system-of-record
+    connection.py                — open_db(): WAL, foreign_keys, migrate
+    schema.sql / schema_v2.sql   — versioned DDL; migrations.py applies by user_version
+    repositories/                — ONLY SQL layer: audio_repo, location_repo,
+                                     presence_repo, scan_repo
+  services/                      — orchestration over repos+core (no print side effects)
+    inventory.py                 — scan a location → upsert content + presence (read-only re: audio)
+    locations.py                 — register_from_config; deterministic location_uuid
+    volumes.py                   — marker files (.spindlebot-location-<uuid>), resolve_root
 
 music-watcher.sh                 — fswatch daemon: fires spindlebot import on .log or dir drop
                                      installed to ~/.local/bin/ by setup.sh
@@ -66,6 +104,12 @@ tests/
   test_pretag.py
   test_runner.py
   test_staging.py
+  test_identity.py               — core/identity (controllable-md5 fake-FLAC fixture)
+  test_db.py                     — connection + schema migrations
+  test_repositories.py           — audio/location/presence repos
+  test_locations.py              — location registry + LocationKind
+  test_volumes.py                — marker files + root resolution
+  test_inventory.py              — inventory service (+ beets linkage, scan status)
   shell/                         — bats shell tests (shellcheck + integration)
 ```
 
