@@ -18,6 +18,7 @@ from pathlib import Path
 
 import mutagen
 
+from spindlebot.core.enums import ScanStatus
 from spindlebot.core.identity import audio_content_id, file_sha256
 from spindlebot.core.models import Location
 from spindlebot.db.repositories import audio_repo, presence_repo, scan_repo
@@ -135,7 +136,7 @@ def inventory_location(
 
     beets_index = _load_beets_index(beets_db)
     scan_id = scan_repo.start_scan(conn, location.id, now)
-    status = "ok"
+    status = ScanStatus.OK
     try:
         for path in _iter_audio_files(root):
             result.scanned += 1
@@ -162,7 +163,7 @@ def inventory_location(
                 result.errors += 1
                 result.error_paths.append(f"{path}: {exc}")
     except BaseException:
-        status = "interrupted"
+        status = ScanStatus.INTERRUPTED
         raise
     finally:
         scan_repo.finish_scan(conn, scan_id, files_seen=result.scanned, status=status, now=now)

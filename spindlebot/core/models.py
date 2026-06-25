@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from spindlebot.core.enums import LocationKind
+from spindlebot.core.enums import IdentityKind, LocationKind
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ class Location:
 class AudioContent:
     id: int
     identity: str
-    identity_kind: str
+    identity_kind: IdentityKind
     artist: str | None
     album: str | None
     title: str | None
@@ -55,7 +55,7 @@ class AudioContent:
         return AudioContent(
             id=row["id"],
             identity=row["identity"],
-            identity_kind=row["identity_kind"],
+            identity_kind=IdentityKind(row["identity_kind"]),
             artist=row["artist"],
             album=row["album"],
             title=row["title"],

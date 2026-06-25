@@ -108,6 +108,31 @@ def test_inventory_ignores_non_audio_and_missing_root(conn, tmp_path):
     assert missing.scanned == 0
 
 
+def test_scan_status_closed_set():
+    from spindlebot.core.enums import ScanStatus
+    assert set(ScanStatus) == {
+        ScanStatus.RUNNING, ScanStatus.OK, ScanStatus.INTERRUPTED, ScanStatus.ERROR
+    }
+    with pytest.raises(ValueError):
+        ScanStatus("done")
+
+
+def test_inventory_records_interrupted_on_unexpected_error(conn, tmp_path, monkeypatch):
+    root = tmp_path / "Pending"
+    _write_flac(root / "01.flac", audio_md5_bytes=bytes(range(1, 17)))
+    loc = ensure_pending_location(conn, 1000)
+
+    def boom(_path):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(inventory, "audio_content_id", boom)
+    with pytest.raises(RuntimeError):
+        inventory_location(conn, location=loc, root=root, now=1000)
+
+    scan = scan_repo.latest_scan(conn, loc.id)
+    assert scan["status"] == "interrupted"
+
+
 def test_inventory_writes_marker_and_records_scan(conn, tmp_path):
     root = tmp_path / "Pending"
     _write_flac(root / "01.flac", audio_md5_bytes=bytes(range(1, 17)))

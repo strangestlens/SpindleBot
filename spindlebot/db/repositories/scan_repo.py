@@ -3,23 +3,29 @@ from __future__ import annotations
 
 import sqlite3
 
+from spindlebot.core.enums import ScanStatus
+
 
 def start_scan(conn: sqlite3.Connection, location_id: int, now: int) -> int:
     """Open a running scan row for a location; return its id."""
     cur = conn.execute(
-        "INSERT INTO location_scan (location_id, started_utc, status) "
-        "VALUES (?, ?, 'running')",
-        (location_id, now),
+        "INSERT INTO location_scan (location_id, started_utc, status) VALUES (?, ?, ?)",
+        (location_id, now, str(ScanStatus.RUNNING)),
     )
     return int(cur.lastrowid)
 
 
 def finish_scan(
-    conn: sqlite3.Connection, scan_id: int, *, files_seen: int, status: str, now: int
+    conn: sqlite3.Connection,
+    scan_id: int,
+    *,
+    files_seen: int,
+    status: ScanStatus | str,
+    now: int,
 ) -> None:
     conn.execute(
         "UPDATE location_scan SET finished_utc = ?, files_seen = ?, status = ? WHERE id = ?",
-        (now, files_seen, status, scan_id),
+        (now, files_seen, str(ScanStatus(status)), scan_id),
     )
 
 

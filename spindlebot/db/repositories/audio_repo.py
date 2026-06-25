@@ -43,7 +43,7 @@ def upsert(
             beets_item_id = COALESCE(excluded.beets_item_id, audio_content.beets_item_id),
             last_seen_utc = excluded.last_seen_utc
         """,
-        (content_id.value, content_id.kind, artist, album, title,
+        (content_id.value, str(content_id.kind), artist, album, title,
          disc_no, track_no, duration_s, beets_item_id, now, now),
     )
     found = get_by_identity(conn, content_id.value)
