@@ -143,6 +143,34 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(cfg.secrets.telegram.bot_token, "")
         self.assertEqual(cfg.secrets.genius.api_key, "")
 
+    def test_locations_block_parsed(self):
+        config = """\
+            [core]
+            pending_dir = "/tmp/Pending"
+            import_dir  = "/tmp/Import"
+
+            [[locations]]
+            name = "DwRugged"
+            kind = "local_drive"
+            root_path = "/Volumes/DwRugged/Music/Library"
+            is_retention = true
+        """
+        _write(self.tmp, "config.toml", config)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertEqual(len(cfg.locations), 1)
+        loc = cfg.locations[0]
+        self.assertEqual(loc.name, "DwRugged")
+        self.assertEqual(loc.kind, "local_drive")
+        self.assertEqual(loc.root_path, "/Volumes/DwRugged/Music/Library")
+        self.assertTrue(loc.is_retention)
+
+    def test_locations_default_to_empty_list(self):
+        _write(self.tmp, "config.toml", MINIMAL_CONFIG)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertEqual(cfg.locations, [])
+
 
 class TestDefaults(unittest.TestCase):
     def setUp(self):

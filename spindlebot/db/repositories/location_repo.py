@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from spindlebot.core.enums import LocationKind
 from spindlebot.core.models import Location
 
 
@@ -11,7 +12,8 @@ def upsert(
     *,
     uuid: str,
     name: str,
-    kind: str,
+    kind: LocationKind | str,
+    root_path: str | None = None,
     is_authoritative_audio: bool = False,
     is_retention: bool = False,
     enabled: bool = True,
@@ -19,23 +21,25 @@ def upsert(
 ) -> Location:
     """Insert a location, or update it in place (matched on uuid). Returns the row.
 
-    last_seen_utc is only advanced, never cleared, on update.
+    last_seen_utc and root_path are only advanced/set, never cleared, on update.
     """
     conn.execute(
         """
         INSERT INTO location
-            (uuid, name, kind, is_authoritative_audio, is_retention, enabled, last_seen_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (uuid, name, kind, root_path, is_authoritative_audio,
+             is_retention, enabled, last_seen_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(uuid) DO UPDATE SET
             name = excluded.name,
             kind = excluded.kind,
+            root_path = COALESCE(excluded.root_path, location.root_path),
             is_authoritative_audio = excluded.is_authoritative_audio,
             is_retention = excluded.is_retention,
             enabled = excluded.enabled,
             last_seen_utc = COALESCE(excluded.last_seen_utc, location.last_seen_utc)
         """,
-        (uuid, name, kind, int(is_authoritative_audio), int(is_retention),
-         int(enabled), last_seen_utc),
+        (uuid, name, str(LocationKind(kind)), root_path, int(is_authoritative_audio),
+         int(is_retention), int(enabled), last_seen_utc),
     )
     found = get_by_uuid(conn, uuid)
     assert found is not None  # just inserted/updated

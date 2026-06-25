@@ -4,29 +4,34 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from spindlebot.core.enums import IdentityKind, LocationKind
+
 
 @dataclass(frozen=True)
 class Location:
     id: int
     uuid: str
     name: str
-    kind: str
+    kind: LocationKind
     is_authoritative_audio: bool
     is_retention: bool
     enabled: bool
     last_seen_utc: int | None
+    root_path: str | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "Location":
+        keys = row.keys()
         return Location(
             id=row["id"],
             uuid=row["uuid"],
             name=row["name"],
-            kind=row["kind"],
+            kind=LocationKind(row["kind"]),
             is_authoritative_audio=bool(row["is_authoritative_audio"]),
             is_retention=bool(row["is_retention"]),
             enabled=bool(row["enabled"]),
             last_seen_utc=row["last_seen_utc"],
+            root_path=row["root_path"] if "root_path" in keys else None,
         )
 
 
@@ -34,7 +39,7 @@ class Location:
 class AudioContent:
     id: int
     identity: str
-    identity_kind: str
+    identity_kind: IdentityKind
     artist: str | None
     album: str | None
     title: str | None
@@ -50,7 +55,7 @@ class AudioContent:
         return AudioContent(
             id=row["id"],
             identity=row["identity"],
-            identity_kind=row["identity_kind"],
+            identity_kind=IdentityKind(row["identity_kind"]),
             artist=row["artist"],
             album=row["album"],
             title=row["title"],

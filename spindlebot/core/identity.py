@@ -24,16 +24,18 @@ from pathlib import Path
 from mutagen import MutagenError
 from mutagen.flac import FLAC
 
+from spindlebot.core.enums import IdentityKind
+
 _CHUNK = 1 << 20  # 1 MiB streaming read
 
-# identity_kind values — mirrored by audio_content.identity_kind in the schema.
-KIND_AUDIO_MD5 = "audio_md5"
-KIND_FILE_SHA256 = "file_sha256"
+# Backward-compatible aliases for the enum members.
+KIND_AUDIO_MD5 = IdentityKind.AUDIO_MD5
+KIND_FILE_SHA256 = IdentityKind.FILE_SHA256
 
 
 @dataclass(frozen=True)
 class ContentId:
-    kind: str   # KIND_AUDIO_MD5 | KIND_FILE_SHA256
+    kind: IdentityKind
     value: str  # lowercase hex
 
 
@@ -77,5 +79,5 @@ def audio_content_id(path: str | Path) -> ContentId:
     """
     md5 = audio_md5(path)
     if md5 is not None:
-        return ContentId(KIND_AUDIO_MD5, md5)
-    return ContentId(KIND_FILE_SHA256, file_sha256(path))
+        return ContentId(IdentityKind.AUDIO_MD5, md5)
+    return ContentId(IdentityKind.FILE_SHA256, file_sha256(path))

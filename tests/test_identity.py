@@ -13,6 +13,7 @@ from pathlib import Path
 import mutagen.flac
 import pytest
 
+from spindlebot.core.enums import IdentityKind
 from spindlebot.core.identity import (
     KIND_AUDIO_MD5,
     KIND_FILE_SHA256,
@@ -21,6 +22,14 @@ from spindlebot.core.identity import (
     file_sha256,
     sha256_bytes,
 )
+
+
+def test_identity_kind_closed_set():
+    assert set(IdentityKind) == {IdentityKind.AUDIO_MD5, IdentityKind.FILE_SHA256}
+    assert KIND_AUDIO_MD5 is IdentityKind.AUDIO_MD5
+    assert KIND_FILE_SHA256 is IdentityKind.FILE_SHA256
+    with pytest.raises(ValueError):
+        IdentityKind("sha1")
 
 
 def _write_flac(path: Path, *, audio_md5_bytes: bytes = b"\x00" * 16,

@@ -12,9 +12,10 @@ from pathlib import Path
 
 _SCHEMA_DIR = Path(__file__).parent
 
-# Ordered, append-only. Later phases add (2, "..."), (3, "...") here.
+# Ordered, append-only. Later phases add (3, "..."), (4, "...") here.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, "schema.sql"),
+    (2, "schema_v2.sql"),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]
