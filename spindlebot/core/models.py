@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from spindlebot.core.enums import (
     ActionKind,
+    ConflictStatus,
     ContentKind,
     IdentityKind,
     LocationKind,
@@ -224,4 +225,71 @@ class PendingAction:
             acknowledged_utc=row["acknowledged_utc"],
             executed_utc=row["executed_utc"],
             created_utc=row["created_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class LyricDoc:
+    id: int
+    audio_id: int
+    head_version_id: int | None
+    created_utc: int
+    updated_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "LyricDoc":
+        return LyricDoc(
+            id=row["id"],
+            audio_id=row["audio_id"],
+            head_version_id=row["head_version_id"],
+            created_utc=row["created_utc"],
+            updated_utc=row["updated_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class LyricVersion:
+    id: int
+    doc_id: int
+    sha256: str
+    vclock_json: str
+    source: str | None
+    authored_utc: int | None
+    created_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "LyricVersion":
+        return LyricVersion(
+            id=row["id"],
+            doc_id=row["doc_id"],
+            sha256=row["sha256"],
+            vclock_json=row["vclock_json"],
+            source=row["source"],
+            authored_utc=row["authored_utc"],
+            created_utc=row["created_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class Conflict:
+    id: int
+    audio_id: int | None
+    winner_version: int | None
+    loser_version: int | None
+    loser_kept_path: str | None
+    status: ConflictStatus
+    detected_utc: int
+    resolved_utc: int | None
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "Conflict":
+        return Conflict(
+            id=row["id"],
+            audio_id=row["audio_id"],
+            winner_version=row["winner_version"],
+            loser_version=row["loser_version"],
+            loser_kept_path=row["loser_kept_path"],
+            status=ConflictStatus(row["status"]),
+            detected_utc=row["detected_utc"],
+            resolved_utc=row["resolved_utc"],
         )
