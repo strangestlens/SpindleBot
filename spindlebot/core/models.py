@@ -4,7 +4,12 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from spindlebot.core.enums import IdentityKind, LocationKind
+from spindlebot.core.enums import (
+    IdentityKind,
+    LocationKind,
+    SidecarParentKind,
+    SidecarRole,
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,75 @@ class AudioPresence:
     def from_row(row: sqlite3.Row) -> "AudioPresence":
         return AudioPresence(
             audio_id=row["audio_id"],
+            location_id=row["location_id"],
+            present=bool(row["present"]),
+            rel_path=row["rel_path"],
+            file_sha256=row["file_sha256"],
+            byte_size=row["byte_size"],
+            observed_utc=row["observed_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class Album:
+    id: int
+    album_key: str
+    albumartist: str | None
+    album: str | None
+    mb_albumid: str | None
+    first_seen_utc: int
+    last_seen_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "Album":
+        return Album(
+            id=row["id"],
+            album_key=row["album_key"],
+            albumartist=row["albumartist"],
+            album=row["album"],
+            mb_albumid=row["mb_albumid"],
+            first_seen_utc=row["first_seen_utc"],
+            last_seen_utc=row["last_seen_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class SidecarContent:
+    id: int
+    parent_kind: SidecarParentKind
+    parent_id: int
+    role: SidecarRole
+    sha256: str
+    first_seen_utc: int
+    last_seen_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "SidecarContent":
+        return SidecarContent(
+            id=row["id"],
+            parent_kind=SidecarParentKind(row["parent_kind"]),
+            parent_id=row["parent_id"],
+            role=SidecarRole(row["role"]),
+            sha256=row["sha256"],
+            first_seen_utc=row["first_seen_utc"],
+            last_seen_utc=row["last_seen_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class SidecarPresence:
+    sidecar_id: int
+    location_id: int
+    present: bool
+    rel_path: str | None
+    file_sha256: str | None
+    byte_size: int | None
+    observed_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "SidecarPresence":
+        return SidecarPresence(
+            sidecar_id=row["sidecar_id"],
             location_id=row["location_id"],
             present=bool(row["present"]),
             rel_path=row["rel_path"],

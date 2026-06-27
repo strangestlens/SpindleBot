@@ -24,3 +24,14 @@ class ScanStatus(StrEnum):
     OK = "ok"
     INTERRUPTED = "interrupted"
     ERROR = "error"
+
+
+class SidecarRole(StrEnum):
+    LRC = "lrc"      # synchronized lyrics (.lrc), paired to a single track
+    COVER = "cover"  # album cover art (cover.jpg)
+    NOLRC = "nolrc"  # marker: this album intentionally has no lyrics (.nolrc)
+
+
+class SidecarParentKind(StrEnum):
+    TRACK = "track"  # parent_id -> audio_content.id
+    ALBUM = "album"  # parent_id -> album.id
