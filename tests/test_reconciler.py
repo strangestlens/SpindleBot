@@ -3,16 +3,27 @@ from __future__ import annotations
 
 import pytest
 
-from spindlebot.core.enums import ActionKind, RunKind, ScanStatus
+from spindlebot.core import vclock
+from spindlebot.core.enums import (
+    ActionKind,
+    RunKind,
+    ScanStatus,
+    SidecarParentKind,
+    SidecarRole,
+)
 from spindlebot.core.identity import ContentId
 from spindlebot.db.connection import open_db
 from spindlebot.db.repositories import (
     action_repo,
     audio_repo,
+    conflict_repo,
     location_repo,
+    lyric_repo,
     presence_repo,
     run_repo,
     scan_repo,
+    sidecar_presence_repo,
+    sidecar_repo,
 )
 from spindlebot.services.reconciler import reconcile_location
 
@@ -156,6 +167,81 @@ def test_reconcile_records_a_finished_run(conn):
     assert run.status == ScanStatus.OK
     assert run.finished_utc == 1000
     assert run.location_id == rugged.id
+
+
+# ── lyric divergence detection ────────────────────────────────────────────────
+
+def _lrc(conn, audio_id, loc_id, file_sha):
+    """Attach the track's .lrc sidecar present at a location with a per-copy sha."""
+    sc = sidecar_repo.upsert(conn, parent_kind=SidecarParentKind.TRACK,
+                             parent_id=audio_id, role=SidecarRole.LRC,
+                             sha256="canon", now=0)
+    sidecar_presence_repo.set_presence(conn, sidecar_id=sc.id, location_id=loc_id,
+                                       present=True, observed_utc=0,
+                                       file_sha256=file_sha, rel_path=f"{audio_id}.lrc")
+    return sc
+
+
+def test_divergent_lyrics_across_locations_flag_a_conflict(conn):
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _present(conn, x.id, pending.id)
+    _present(conn, x.id, rugged.id)
+    _lrc(conn, x.id, pending.id, "sha-AAA")
+    _lrc(conn, x.id, rugged.id, "sha-BBB")   # same track, different lyric content
+
+    result = reconcile_location(conn, target=rugged,
+                               authoritative_locations=[pending], now=1000)
+
+    assert result.conflicts == 1
+    c = conflict_repo.find_open_for_audio(conn, x.id)
+    assert c is not None
+    actions = [a for a in action_repo.list_for_run(conn, result.run_id)
+               if a.action_kind == ActionKind.RESOLVE_CONFLICT]
+    assert len(actions) == 1 and actions[0].content_id == x.id
+    # the two sides were recorded as concurrent versions (no auto-winner)
+    doc = lyric_repo.get_doc(conn, x.id)
+    versions = lyric_repo.list_versions(conn, doc.id)
+    assert len(versions) == 2
+    assert vclock.concurrent(vclock.from_json(versions[0].vclock_json),
+                             vclock.from_json(versions[1].vclock_json))
+
+
+def test_identical_lyrics_are_not_a_conflict(conn):
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "same-sha")
+    _lrc(conn, x.id, rugged.id, "same-sha")
+    result = reconcile_location(conn, target=rugged,
+                               authoritative_locations=[pending], now=1000)
+    assert result.conflicts == 0
+    assert conflict_repo.list_open(conn) == []
+
+
+def test_lyric_on_one_side_only_is_not_a_conflict(conn):
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "sha-AAA")   # rugged has no .lrc for x
+    result = reconcile_location(conn, target=rugged,
+                               authoritative_locations=[pending], now=1000)
+    assert result.conflicts == 0
+
+
+def test_conflict_detection_is_idempotent(conn):
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "sha-AAA")
+    _lrc(conn, x.id, rugged.id, "sha-BBB")
+
+    first = reconcile_location(conn, target=rugged,
+                              authoritative_locations=[pending], now=1000)
+    second = reconcile_location(conn, target=rugged,
+                               authoritative_locations=[pending], now=2000)
+
+    assert first.conflicts == 1 and second.conflicts == 0   # not re-flagged
+    assert len(conflict_repo.list_open(conn)) == 1
+    doc = lyric_repo.get_doc(conn, x.id)
+    assert len(lyric_repo.list_versions(conn, doc.id)) == 2  # no duplicate versions
 
 
 def test_run_note_records_below_floor(conn):
