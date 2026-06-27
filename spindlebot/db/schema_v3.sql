@@ -33,7 +33,9 @@ CREATE INDEX idx_album_track_audio ON album_track(audio_id);
 -- sha256 is the current content hash of the sidecar bytes. The
 -- (parent_kind, parent_id, role) triple is unique — one cover / one lyric /
 -- one nolrc per parent. parent_id is polymorphic, so there is intentionally
--- no SQL foreign key on it.
+-- no SQL foreign key on it — which also means deleting an album/track does NOT
+-- cascade to its sidecar_content rows; a deleter (the future reconciler) must
+-- remove them explicitly.
 CREATE TABLE sidecar_content (
     id              INTEGER PRIMARY KEY,
     parent_kind     TEXT NOT NULL,            -- 'track' | 'album'

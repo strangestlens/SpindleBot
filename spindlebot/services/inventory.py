@@ -59,6 +59,10 @@ class InventoryResult:
     new: int = 0
     updated: int = 0
     albums: int = 0
+    # sidecars* count sidecar FILES observed, not distinct sidecar rows: when
+    # several files map to one (parent, role) at a location — e.g. a per-disc
+    # cover.jpg inside each multidisc folder — each file is counted, but they
+    # upsert a single row (mirrors how `scanned` counts audio files).
     sidecars: int = 0
     sidecars_new: int = 0
     sidecars_updated: int = 0
@@ -266,6 +270,10 @@ def inventory_location(
                     conn, parent_kind=parent_kind, parent_id=parent_id,
                     role=role, sha256=digest, now=now,
                 )
+                # presence PK is (sidecar_id, location_id): if several files at
+                # this location map to one sidecar (per-disc cover.jpg), the last
+                # one observed wins this row. Divergent per-copy paths are a
+                # reconciler concern (same property audio_presence already has).
                 sidecar_presence_repo.set_presence(
                     conn,
                     sidecar_id=sidecar.id,
