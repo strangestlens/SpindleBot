@@ -5,8 +5,12 @@ import sqlite3
 from dataclasses import dataclass
 
 from spindlebot.core.enums import (
+    ActionKind,
+    ContentKind,
     IdentityKind,
     LocationKind,
+    RunKind,
+    ScanStatus,
     SidecarParentKind,
     SidecarRole,
 )
@@ -162,4 +166,62 @@ class SidecarPresence:
             file_sha256=row["file_sha256"],
             byte_size=row["byte_size"],
             observed_utc=row["observed_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class Run:
+    id: int
+    kind: RunKind
+    location_id: int | None
+    started_utc: int
+    finished_utc: int | None
+    status: ScanStatus
+    note: str | None
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "Run":
+        return Run(
+            id=row["id"],
+            kind=RunKind(row["kind"]),
+            location_id=row["location_id"],
+            started_utc=row["started_utc"],
+            finished_utc=row["finished_utc"],
+            status=ScanStatus(row["status"]),
+            note=row["note"],
+        )
+
+
+@dataclass(frozen=True)
+class PendingAction:
+    id: int
+    run_id: int
+    action_kind: ActionKind
+    content_kind: ContentKind
+    content_id: int
+    source_location_id: int | None
+    dest_location_id: int | None
+    rel_path: str | None
+    reason: str | None
+    acknowledged: bool
+    acknowledged_utc: int | None
+    executed_utc: int | None
+    created_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "PendingAction":
+        return PendingAction(
+            id=row["id"],
+            run_id=row["run_id"],
+            action_kind=ActionKind(row["action_kind"]),
+            content_kind=ContentKind(row["content_kind"]),
+            content_id=row["content_id"],
+            source_location_id=row["source_location_id"],
+            dest_location_id=row["dest_location_id"],
+            rel_path=row["rel_path"],
+            reason=row["reason"],
+            acknowledged=bool(row["acknowledged"]),
+            acknowledged_utc=row["acknowledged_utc"],
+            executed_utc=row["executed_utc"],
+            created_utc=row["created_utc"],
         )

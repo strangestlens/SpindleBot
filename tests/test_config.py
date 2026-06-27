@@ -122,6 +122,28 @@ class TestConfigLoading(unittest.TestCase):
         cfg = _load_with_dir(self.tmp)
         self.assertTrue(str(cfg.core.db_path).endswith("spindlebot.db"))
 
+    def test_min_copies_defaults_to_one(self):
+        _write(self.tmp, "config.toml", MINIMAL_CONFIG)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertEqual(cfg.core.min_copies, 1)
+
+    def test_min_copies_override_and_floor(self):
+        config = """\
+            [core]
+            pending_dir = "/tmp/Pending"
+            import_dir  = "/tmp/Import"
+            min_copies = 2
+        """
+        _write(self.tmp, "config.toml", config)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        self.assertEqual(_load_with_dir(self.tmp).core.min_copies, 2)
+
+        floored = config.replace("min_copies = 2", "min_copies = 0")
+        _write(self.tmp, "config.toml", floored)
+        # min_copies can never drop below 1 — a 0 floor would defeat retention.
+        self.assertEqual(_load_with_dir(self.tmp).core.min_copies, 1)
+
     def test_legacy_staging_library_keys_still_honored(self):
         # Pre-rename config.toml files use staging_dir/library_dir — they must
         # still map to import_dir/pending_dir until users migrate.
