@@ -50,6 +50,11 @@ def _present(conn, audio_id, loc_id, *, observed_utc=100):
                                rel_path=f"a/{audio_id}.flac")
 
 
+def _scan(conn, loc_id, started_utc=1):
+    """Mark a location as having been inventoried (reconcile requires this)."""
+    return scan_repo.start_scan(conn, loc_id, started_utc)
+
+
 def _pending(conn):
     return _loc(conn, "pending", "Pending", kind="library",
                 is_authoritative_audio=True, is_retention=False)
@@ -67,6 +72,7 @@ def test_proposes_copy_for_authoritative_content_absent_on_target(conn):
     _present(conn, x.id, pending.id)
     _present(conn, y.id, pending.id)
     _present(conn, x.id, rugged.id)   # rugged already has x
+    _scan(conn, rugged.id)
 
     result = reconcile_location(conn, target=rugged,
                                 authoritative_locations=[pending], now=1000)
@@ -86,6 +92,7 @@ def test_no_copy_when_target_already_complete(conn):
     x = _audio(conn, "x" * 32)
     _present(conn, x.id, pending.id)
     _present(conn, x.id, rugged.id)
+    _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
                                authoritative_locations=[pending], now=1000)
     assert result.copies == 0
@@ -98,6 +105,7 @@ def test_copy_deduped_across_multiple_authoritative_locations(conn):
     x = _audio(conn, "x" * 32)
     _present(conn, x.id, pending.id)
     _present(conn, x.id, other.id)
+    _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
                                authoritative_locations=[pending, other], now=1000)
     assert result.copies == 1   # proposed once, not per source
@@ -147,19 +155,30 @@ def test_recently_confirmed_rows_are_not_missing(conn):
     assert result.missing == 0
 
 
-def test_missing_skipped_without_a_scan(conn):
+def test_unscanned_target_skips_all_planning(conn):
+    # Without an inventory of the target, propose nothing — a never-scanned drive
+    # full of audio must not yield a spurious whole-library copy plan.
     pending, rugged = _pending(conn), _rugged(conn)
-    x = _audio(conn, "x" * 32)
+    x, y = _audio(conn, "x" * 32), _audio(conn, "y" * 32)
+    _present(conn, x.id, pending.id)
+    _present(conn, y.id, pending.id)
     _present(conn, x.id, rugged.id, observed_utc=100)   # stale, but no scan exists
+
     result = reconcile_location(conn, target=rugged,
                                authoritative_locations=[pending], now=1000)
-    assert result.missing == 0
+
+    assert result.target_scanned is False
+    assert result.copies == 0 and result.missing == 0 and result.conflicts == 0
+    assert action_repo.list_for_run(conn, result.run_id) == []
+    run = run_repo.get(conn, result.run_id)
+    assert run.status == ScanStatus.OK and "never been inventoried" in (run.note or "")
 
 
 # ── run bookkeeping ───────────────────────────────────────────────────────────
 
 def test_reconcile_records_a_finished_run(conn):
     pending, rugged = _pending(conn), _rugged(conn)
+    _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
                                authoritative_locations=[pending], now=1000)
     run = run_repo.get(conn, result.run_id)
@@ -189,6 +208,7 @@ def test_divergent_lyrics_across_locations_flag_a_conflict(conn):
     _present(conn, x.id, rugged.id)
     _lrc(conn, x.id, pending.id, "sha-AAA")
     _lrc(conn, x.id, rugged.id, "sha-BBB")   # same track, different lyric content
+    _scan(conn, rugged.id)
 
     result = reconcile_location(conn, target=rugged,
                                authoritative_locations=[pending], now=1000)
@@ -212,6 +232,7 @@ def test_identical_lyrics_are_not_a_conflict(conn):
     x = _audio(conn, "x" * 32)
     _lrc(conn, x.id, pending.id, "same-sha")
     _lrc(conn, x.id, rugged.id, "same-sha")
+    _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
                                authoritative_locations=[pending], now=1000)
     assert result.conflicts == 0
@@ -222,26 +243,35 @@ def test_lyric_on_one_side_only_is_not_a_conflict(conn):
     pending, rugged = _pending(conn), _rugged(conn)
     x = _audio(conn, "x" * 32)
     _lrc(conn, x.id, pending.id, "sha-AAA")   # rugged has no .lrc for x
+    _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
                                authoritative_locations=[pending], now=1000)
     assert result.conflicts == 0
 
 
-def test_conflict_detection_is_idempotent(conn):
+def test_conflict_row_deduped_but_action_reproposed_each_run(conn):
+    # The conflict ROW is opened once, but the resolve_conflict ACTION is
+    # re-proposed every run (like COPY/MISSING) so acknowledging the LATEST run
+    # always covers it — otherwise the action would be stranded in run 1.
     pending, rugged = _pending(conn), _rugged(conn)
     x = _audio(conn, "x" * 32)
     _lrc(conn, x.id, pending.id, "sha-AAA")
     _lrc(conn, x.id, rugged.id, "sha-BBB")
+    _scan(conn, rugged.id)
 
     first = reconcile_location(conn, target=rugged,
                               authoritative_locations=[pending], now=1000)
     second = reconcile_location(conn, target=rugged,
                                authoritative_locations=[pending], now=2000)
 
-    assert first.conflicts == 1 and second.conflicts == 0   # not re-flagged
-    assert len(conflict_repo.list_open(conn)) == 1
+    assert first.conflicts == 1 and second.conflicts == 1   # re-proposed
+    assert len(conflict_repo.list_open(conn)) == 1          # one conflict row
     doc = lyric_repo.get_doc(conn, x.id)
     assert len(lyric_repo.list_versions(conn, doc.id)) == 2  # no duplicate versions
+    # the latest run carries its own acknowledgeable resolve_conflict action
+    latest = [a for a in action_repo.list_for_run(conn, second.run_id)
+              if a.action_kind == ActionKind.RESOLVE_CONFLICT]
+    assert len(latest) == 1 and latest[0].content_id == x.id
 
 
 def test_run_note_records_below_floor(conn):

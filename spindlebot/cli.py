@@ -359,9 +359,15 @@ def cmd_review(cfg, args: list[str]) -> int:
             }))
             return 0
 
+        if not result.target_scanned:
+            print(f"{result.location} has never been inventoried — run "
+                  f"`spindlebot inventory --location {result.location}` first.",
+                  file=sys.stderr)
+            return 1
         print(
             f"Reconciled {result.location} (run {result.run_id}): "
             f"{result.copies} to copy, {result.missing} missing, "
+            f"{result.conflicts} lyric conflict(s), "
             f"{result.below_floor} below min_copies={cfg.core.min_copies}"
         )
         for a in actions:

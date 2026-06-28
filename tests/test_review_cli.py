@@ -11,7 +11,13 @@ from spindlebot.config import LocationConfig
 from spindlebot.core.enums import LocationKind, RunKind
 from spindlebot.core.identity import ContentId
 from spindlebot.db.connection import open_db
-from spindlebot.db.repositories import action_repo, audio_repo, presence_repo, run_repo
+from spindlebot.db.repositories import (
+    action_repo,
+    audio_repo,
+    presence_repo,
+    run_repo,
+    scan_repo,
+)
 from spindlebot.services.locations import get_by_name, register_from_config
 
 
@@ -31,10 +37,12 @@ def _seed_copy_scenario(cfg):
     conn = open_db(cfg.core.db_path)
     register_from_config(conn, cfg, 0)
     pending = get_by_name(conn, "Pending")
+    rugged = get_by_name(conn, "DwRugged")
     audio = audio_repo.upsert(conn, ContentId("audio_md5", "x" * 32), now=0,
                               artist="Boards of Canada", title="Roygbiv")
     presence_repo.set_presence(conn, audio_id=audio.id, location_id=pending.id,
                                present=True, observed_utc=0, rel_path="BoC/Roygbiv.flac")
+    scan_repo.start_scan(conn, rugged.id, 1)   # target has been inventoried
     conn.commit()
     conn.close()
 
@@ -60,6 +68,18 @@ def test_review_json_shape(tmp_path, capsys):
     assert data["location"] == "DwRugged"
     assert data["actions"][0]["kind"] == "copy"
     assert data["actions"][0]["content_kind"] == "audio"
+
+
+def test_review_warns_when_target_never_inventoried(tmp_path, capsys):
+    cfg = _cfg(tmp_path)
+    # register DwRugged but never scan it
+    conn = open_db(cfg.core.db_path)
+    register_from_config(conn, cfg, 0)
+    conn.commit()
+    conn.close()
+    rc = cmd_review(cfg, ["--location", "DwRugged"])
+    assert rc == 1
+    assert "never been inventoried" in capsys.readouterr().err
 
 
 def test_review_unknown_location_fails(tmp_path, capsys):

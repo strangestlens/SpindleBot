@@ -53,6 +53,7 @@ class ReconcileResult:
     below_floor: int = 0      # contents that drop below min_copies if marked absent
     below_floor_ids: list[int] = field(default_factory=list)
     conflicts: int = 0        # cross-location lyric divergences flagged
+    target_scanned: bool = True  # False → target never inventoried; planning skipped
 
 
 def _present_lrc(conn, location_id: int) -> dict[int, tuple[str | None, int]]:
@@ -79,23 +80,31 @@ def _ensure_version(conn, doc_id: int, sha: str, origin: str, now: int):
 
 def _flag_lyric_divergence(conn, *, target, auth, audio_id, target_sha, auth_sha,
                            run_id, now, result) -> None:
-    """Record a cross-location lyric divergence as an open conflict (idempotent).
+    """Record a cross-location lyric divergence and propose a resolve action.
 
     At this phase the two versions have independent single-location vclocks, so
     they are concurrent — a genuine divergence for a human to adjudicate, never
     auto-resolved. winner/loser here just name the two diverging sides; real
     adjudication is Phase 4.
+
+    The conflict ROW is deduped (one open conflict per track), but the
+    resolve_conflict ACTION is proposed every run — exactly like COPY/MISSING,
+    so the latest run is always a complete, acknowledgeable plan.
+
+    Phase-4 note: the dedup checks only OPEN conflicts, so once resolution exists
+    a resolved conflict whose bytes still differ would re-open here. That's
+    moot until Phase 4 propagates the winning lyric (making the shas match); when
+    the conflicts CLI lands, key the dedup on the version pair, not just status.
     """
-    if conflict_repo.find_open_for_audio(conn, audio_id) is not None:
-        return
     doc = lyric_repo.ensure_doc(conn, audio_id, now)
     tv = _ensure_version(conn, doc.id, target_sha, target.name, now)
     av = _ensure_version(conn, doc.id, auth_sha, auth.name, now)
     if not vclock.concurrent(vclock.from_json(tv.vclock_json),
                              vclock.from_json(av.vclock_json)):
         return
-    conflict_repo.open_conflict(conn, audio_id=audio_id, winner_version=av.id,
-                                loser_version=tv.id, now=now)
+    if conflict_repo.find_open_for_audio(conn, audio_id) is None:
+        conflict_repo.open_conflict(conn, audio_id=audio_id, winner_version=av.id,
+                                    loser_version=tv.id, now=now)
     action_repo.add(
         conn, run_id=run_id, action_kind=ActionKind.RESOLVE_CONFLICT,
         content_kind=ContentKind.AUDIO, content_id=audio_id,
@@ -119,6 +128,15 @@ def reconcile_location(
     result = ReconcileResult(location=target.name, run_id=run_id)
     status = ScanStatus.OK
     try:
+        # A trustworthy plan needs to know what is ACTUALLY on the target now.
+        # Without a scan, target presence is empty/stale: COPY would propose the
+        # whole library (even if the files are already there), MISSING can't tell
+        # stale from gone. Require an inventory first — skip planning otherwise.
+        scan = scan_repo.latest_scan(conn, target.id)
+        if scan is None:
+            result.target_scanned = False
+            return result
+
         target_present = {
             p.audio_id: p
             for p in presence_repo.list_for_location(conn, target.id, present=True)
@@ -143,24 +161,22 @@ def reconcile_location(
                 result.copies += 1
 
         # MISSING: target rows not re-confirmed by the target's latest scan.
-        scan = scan_repo.latest_scan(conn, target.id)
-        if scan is not None:
-            cutoff = scan["started_utc"]
-            for audio_id, p in target_present.items():
-                if p.observed_utc >= cutoff:
-                    continue
-                action_repo.add(
-                    conn, run_id=run_id, action_kind=ActionKind.UPDATE_PRESENCE,
-                    content_kind=ContentKind.AUDIO, content_id=audio_id,
-                    dest_location_id=target.id, rel_path=p.rel_path, now=now,
-                    reason=f"present in DB but not seen in {target.name}'s latest scan",
-                )
-                result.missing += 1
-                if target.is_retention:
-                    projected = presence_repo.count_retention_copies(conn, audio_id) - 1
-                    if projected < min_copies:
-                        result.below_floor += 1
-                        result.below_floor_ids.append(audio_id)
+        cutoff = scan["started_utc"]
+        for audio_id, p in target_present.items():
+            if p.observed_utc >= cutoff:
+                continue
+            action_repo.add(
+                conn, run_id=run_id, action_kind=ActionKind.UPDATE_PRESENCE,
+                content_kind=ContentKind.AUDIO, content_id=audio_id,
+                dest_location_id=target.id, rel_path=p.rel_path, now=now,
+                reason=f"present in DB but not seen in {target.name}'s latest scan",
+            )
+            result.missing += 1
+            if target.is_retention:
+                projected = presence_repo.count_retention_copies(conn, audio_id) - 1
+                if projected < min_copies:
+                    result.below_floor += 1
+                    result.below_floor_ids.append(audio_id)
 
         # CONFLICT: same track's .lrc present on target and an authoritative
         # location with different per-copy content → flag a divergence.
@@ -186,9 +202,12 @@ def reconcile_location(
         status = ScanStatus.INTERRUPTED
         raise
     finally:
-        note = None
-        if result.below_floor:
+        if not result.target_scanned:
+            note = f"{target.name} has never been inventoried — run inventory first"
+        elif result.below_floor:
             note = f"{result.below_floor} content(s) below min_copies={min_copies}"
+        else:
+            note = None
         run_repo.finish_run(conn, run_id, status=status, now=now, note=note)
 
     return result
