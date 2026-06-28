@@ -35,3 +35,27 @@ class SidecarRole(StrEnum):
 class SidecarParentKind(StrEnum):
     TRACK = "track"  # parent_id -> audio_content.id
     ALBUM = "album"  # parent_id -> album.id
+
+
+class RunKind(StrEnum):
+    IMPORT = "import"
+    SYNC = "sync"
+    INVENTORY = "inventory"
+    RECONCILE = "reconcile"
+
+
+class ActionKind(StrEnum):
+    COPY = "copy"                        # copy content to a location that lacks it
+    DELETE = "delete"                    # remove a copy (never below min_copies)
+    UPDATE_PRESENCE = "update_presence"  # record an observed absence (non-destructive)
+    RESOLVE_CONFLICT = "resolve_conflict"  # a divergence a human must adjudicate
+
+
+class ContentKind(StrEnum):
+    AUDIO = "audio"      # references audio_content.id
+    SIDECAR = "sidecar"  # references sidecar_content.id
+
+
+class ConflictStatus(StrEnum):
+    OPEN = "open"
+    RESOLVED = "resolved"

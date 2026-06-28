@@ -48,6 +48,7 @@ class CoreConfig:
     log_dir: Path
     archive_dir: Path
     db_path: Path       # SpindleBot's own SQLite system-of-record DB
+    min_copies: int = 1  # retention floor: refuse to drop a content below this many retention copies
 
 
 @dataclass
@@ -167,6 +168,7 @@ def load() -> SpindleBotConfig:
         log_dir=_expand(c.get("log_dir", "~/.config/beets")),
         archive_dir=_expand(c.get("archive_dir", "~/Music/All Discs")),
         db_path=_expand(c.get("db_path", "~/.config/spindlebot/spindlebot.db")),
+        min_copies=max(1, int(c.get("min_copies", 1))),
     )
 
     # ── Tools ─────────────────────────────────────────────────────────────────

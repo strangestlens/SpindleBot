@@ -8,6 +8,9 @@ Usage:
     python -m spindlebot import <trigger> [--force]    Run import pipeline for an album
     python -m spindlebot import-staging [--dry-run]    Import everything currently in the Import area
     python -m spindlebot inventory [--location <name>] [--json]   Scan a location into the SpindleBot DB (read-only re: audio)
+    python -m spindlebot review --location <name> [--json]        Plan reconciliation (propose copies/missing); no bytes moved
+    python -m spindlebot review --acknowledge-run <run_id>        Acknowledge every proposed action in a run
+    python -m spindlebot review --acknowledge <id[,id...]>        Acknowledge specific proposed actions
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -268,6 +271,119 @@ def cmd_inventory(cfg, args: list[str]) -> int:
     return 0 if result.errors == 0 else 1
 
 
+# ── review ────────────────────────────────────────────────────────────────────
+
+def cmd_review(cfg, args: list[str]) -> int:
+    """
+    Pre-sync review: plan reconciliation for a location and/or acknowledge the
+    proposed actions. Planning is read-only and moves no bytes — it only writes
+    pending_action rows. Acknowledging just flags intent; the Phase-3 executor is
+    what eventually acts. Run `inventory --location <name>` first so the plan
+    reflects a fresh scan.
+    """
+    import json as _json
+    import time
+
+    from spindlebot.db.connection import open_db
+    from spindlebot.db.repositories import action_repo, audio_repo, location_repo
+    from spindlebot.services.locations import get_by_name, register_from_config
+    from spindlebot.services.reconciler import reconcile_location
+
+    want_json = "--json" in args
+
+    def _opt(flag: str) -> str | None:
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 < len(args):
+                return args[i + 1]
+        return None
+
+    def fail(msg: str) -> int:
+        if want_json:
+            print(_json.dumps({"error": msg}))
+        else:
+            print(msg, file=sys.stderr)
+        return 1
+
+    now = int(time.time())
+    conn = open_db(cfg.core.db_path)
+    try:
+        register_from_config(conn, cfg, now)
+
+        # ── acknowledge modes ──────────────────────────────────────────────
+        ack_run = _opt("--acknowledge-run")
+        ack_ids = _opt("--acknowledge")
+        if ack_run is not None:
+            n = action_repo.acknowledge_run(conn, int(ack_run), now)
+            conn.commit()
+            print(_json.dumps({"acknowledged": n, "run_id": int(ack_run)}) if want_json
+                  else f"Acknowledged {n} action(s) in run {ack_run}.")
+            return 0
+        if ack_ids is not None:
+            ids = [int(x) for x in ack_ids.split(",") if x.strip()]
+            n = action_repo.acknowledge(conn, ids, now)
+            conn.commit()
+            print(_json.dumps({"acknowledged": n, "ids": ids}) if want_json
+                  else f"Acknowledged {n} action(s).")
+            return 0
+
+        # ── plan mode ──────────────────────────────────────────────────────
+        location_name = _opt("--location")
+        if not location_name:
+            return fail("Usage: spindlebot review --location <name> [--json]")
+        target = get_by_name(conn, location_name)
+        if target is None:
+            return fail(f"Unknown location: {location_name}")
+        authoritative = [
+            loc for loc in location_repo.list_all(conn) if loc.is_authoritative_audio
+        ]
+        result = reconcile_location(
+            conn, target=target, authoritative_locations=authoritative,
+            min_copies=cfg.core.min_copies, now=now,
+        )
+        actions = action_repo.list_for_run(conn, result.run_id)
+        conn.commit()
+
+        if want_json:
+            from dataclasses import asdict
+            print(_json.dumps({
+                **asdict(result),
+                "actions": [
+                    {"id": a.id, "kind": str(a.action_kind),
+                     "content_kind": str(a.content_kind), "content_id": a.content_id,
+                     "source_location_id": a.source_location_id,
+                     "dest_location_id": a.dest_location_id,
+                     "rel_path": a.rel_path, "reason": a.reason}
+                    for a in actions
+                ],
+            }))
+            return 0
+
+        if not result.target_scanned:
+            print(f"{result.location} has never been inventoried — run "
+                  f"`spindlebot inventory --location {result.location}` first.",
+                  file=sys.stderr)
+            return 1
+        print(
+            f"Reconciled {result.location} (run {result.run_id}): "
+            f"{result.copies} to copy, {result.missing} missing, "
+            f"{result.conflicts} lyric conflict(s), "
+            f"{result.below_floor} below min_copies={cfg.core.min_copies}"
+        )
+        for a in actions:
+            if a.content_kind == "audio":
+                au = audio_repo.get_by_id(conn, a.content_id)
+                label = f"{au.artist or '?'} — {au.title or '?'}" if au else f"audio {a.content_id}"
+            else:
+                label = f"{a.content_kind} {a.content_id}"
+            print(f"  [{a.id}] {a.action_kind}: {label}  ({a.reason})")
+        if actions:
+            print(f"\nAcknowledge: spindlebot review --acknowledge-run {result.run_id}")
+        return 0
+    finally:
+        conn.close()
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -326,6 +442,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "inventory":
         return cmd_inventory(cfg, args[1:])
+
+    if command == "review":
+        return cmd_review(cfg, args[1:])
 
     if command == "notify":
         if len(args) < 3:

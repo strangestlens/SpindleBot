@@ -5,8 +5,13 @@ import sqlite3
 from dataclasses import dataclass
 
 from spindlebot.core.enums import (
+    ActionKind,
+    ConflictStatus,
+    ContentKind,
     IdentityKind,
     LocationKind,
+    RunKind,
+    ScanStatus,
     SidecarParentKind,
     SidecarRole,
 )
@@ -162,4 +167,129 @@ class SidecarPresence:
             file_sha256=row["file_sha256"],
             byte_size=row["byte_size"],
             observed_utc=row["observed_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class Run:
+    id: int
+    kind: RunKind
+    location_id: int | None
+    started_utc: int
+    finished_utc: int | None
+    status: ScanStatus
+    note: str | None
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "Run":
+        return Run(
+            id=row["id"],
+            kind=RunKind(row["kind"]),
+            location_id=row["location_id"],
+            started_utc=row["started_utc"],
+            finished_utc=row["finished_utc"],
+            status=ScanStatus(row["status"]),
+            note=row["note"],
+        )
+
+
+@dataclass(frozen=True)
+class PendingAction:
+    id: int
+    run_id: int
+    action_kind: ActionKind
+    content_kind: ContentKind
+    content_id: int
+    source_location_id: int | None
+    dest_location_id: int | None
+    rel_path: str | None
+    reason: str | None
+    acknowledged: bool
+    acknowledged_utc: int | None
+    executed_utc: int | None
+    created_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "PendingAction":
+        return PendingAction(
+            id=row["id"],
+            run_id=row["run_id"],
+            action_kind=ActionKind(row["action_kind"]),
+            content_kind=ContentKind(row["content_kind"]),
+            content_id=row["content_id"],
+            source_location_id=row["source_location_id"],
+            dest_location_id=row["dest_location_id"],
+            rel_path=row["rel_path"],
+            reason=row["reason"],
+            acknowledged=bool(row["acknowledged"]),
+            acknowledged_utc=row["acknowledged_utc"],
+            executed_utc=row["executed_utc"],
+            created_utc=row["created_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class LyricDoc:
+    id: int
+    audio_id: int
+    head_version_id: int | None
+    created_utc: int
+    updated_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "LyricDoc":
+        return LyricDoc(
+            id=row["id"],
+            audio_id=row["audio_id"],
+            head_version_id=row["head_version_id"],
+            created_utc=row["created_utc"],
+            updated_utc=row["updated_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class LyricVersion:
+    id: int
+    doc_id: int
+    sha256: str
+    vclock_json: str
+    source: str | None
+    authored_utc: int | None
+    created_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "LyricVersion":
+        return LyricVersion(
+            id=row["id"],
+            doc_id=row["doc_id"],
+            sha256=row["sha256"],
+            vclock_json=row["vclock_json"],
+            source=row["source"],
+            authored_utc=row["authored_utc"],
+            created_utc=row["created_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class Conflict:
+    id: int
+    audio_id: int | None
+    winner_version: int | None
+    loser_version: int | None
+    loser_kept_path: str | None
+    status: ConflictStatus
+    detected_utc: int
+    resolved_utc: int | None
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "Conflict":
+        return Conflict(
+            id=row["id"],
+            audio_id=row["audio_id"],
+            winner_version=row["winner_version"],
+            loser_version=row["loser_version"],
+            loser_kept_path=row["loser_kept_path"],
+            status=ConflictStatus(row["status"]),
+            detected_utc=row["detected_utc"],
+            resolved_utc=row["resolved_utc"],
         )
