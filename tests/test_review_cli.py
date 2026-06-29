@@ -116,6 +116,27 @@ def test_review_acknowledge_run(tmp_path, capsys):
     assert len(actions) == 1 and all(a.acknowledged for a in actions)
 
 
+def test_review_verbose_emits_progress_to_stderr_stdout_stays_json(tmp_path, capsys):
+    cfg = _cfg(tmp_path)
+    _seed_copy_scenario(cfg)
+    rc = cmd_review(cfg, ["--location", "DwRugged", "--verbose", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    # progress on stderr, results on stdout — stdout stays pure JSON
+    data = json.loads(captured.out)
+    assert data["copies"] == 1
+    assert "[1/" in captured.err          # the per-action verbose line
+
+
+def test_review_quiet_suppresses_progress(tmp_path, capsys):
+    cfg = _cfg(tmp_path)
+    _seed_copy_scenario(cfg)
+    rc = cmd_review(cfg, ["--location", "DwRugged", "--quiet", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "[1/" not in captured.err
+
+
 def test_review_acknowledge_specific_ids(tmp_path, capsys):
     cfg = _cfg(tmp_path)
     _seed_copy_scenario(cfg)
