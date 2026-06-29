@@ -7,8 +7,8 @@ Usage:
     python -m spindlebot config get <key>              Print a single value (e.g. core.pending_dir)
     python -m spindlebot import <trigger> [--force]    Run import pipeline for an album
     python -m spindlebot import-staging [--dry-run]    Import everything currently in the Import area
-    python -m spindlebot inventory [--location <name>] [--json]   Scan a location into the SpindleBot DB (read-only re: audio)
-    python -m spindlebot review --location <name> [--json]        Plan reconciliation (propose copies/missing); no bytes moved
+    python -m spindlebot inventory [--location <name>] [--json] [-v|--quiet]   Scan a location into the SpindleBot DB (read-only re: audio)
+    python -m spindlebot review --location <name> [--json] [-v|--quiet]        Plan reconciliation (propose copies/missing); no bytes moved
     python -m spindlebot review --acknowledge-run <run_id>        Acknowledge every proposed action in a run
     python -m spindlebot review --acknowledge <id[,id...]>        Acknowledge specific proposed actions
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
@@ -198,6 +198,26 @@ def cmd_import_staging(cfg, args: list[str]) -> int:
     return 0
 
 
+# ── progress ──────────────────────────────────────────────────────────────────
+
+def _make_progress(args: list[str], label: str):
+    """Build a progress callback from CLI flags → (callback, reporter|None).
+
+    Progress always goes to stderr so stdout stays clean (e.g. for --json).
+    --quiet/--no-progress silences it; --verbose/-v switches to a scrolling
+    per-file log; otherwise an in-place bar (TTY) / periodic lines (logs).
+    """
+    if "--quiet" in args or "--no-progress" in args:
+        return None, None
+    if "--verbose" in args or "-v" in args:
+        def cb(ev):
+            print(f"  [{ev.done}/{ev.total or '?'}] {ev.current}", file=sys.stderr)
+        return cb, None
+    from spindlebot.cli_progress import ProgressReporter
+    reporter = ProgressReporter(stream=sys.stderr, label=label)
+    return reporter.update, reporter
+
+
 # ── inventory ─────────────────────────────────────────────────────────────────
 
 def cmd_inventory(cfg, args: list[str]) -> int:
@@ -250,9 +270,13 @@ def cmd_inventory(cfg, args: list[str]) -> int:
             location = get_by_name(conn, "Pending")
             root = Path(cfg.core.pending_dir)
 
+        progress_cb, reporter = _make_progress(args, f"inventory {location.name}")
         result = inventory_location(
-            conn, location=location, root=root, now=now, beets_db=cfg.tools.beets_db
+            conn, location=location, root=root, now=now,
+            beets_db=cfg.tools.beets_db, progress=progress_cb,
         )
+        if reporter is not None:
+            reporter.close()
         conn.commit()
     finally:
         conn.close()
@@ -337,10 +361,13 @@ def cmd_review(cfg, args: list[str]) -> int:
         authoritative = [
             loc for loc in location_repo.list_all(conn) if loc.is_authoritative_audio
         ]
+        progress_cb, reporter = _make_progress(args, f"review {target.name}")
         result = reconcile_location(
             conn, target=target, authoritative_locations=authoritative,
-            min_copies=cfg.core.min_copies, now=now,
+            min_copies=cfg.core.min_copies, now=now, progress=progress_cb,
         )
+        if reporter is not None:
+            reporter.close()
         actions = action_repo.list_for_run(conn, result.run_id)
         conn.commit()
 

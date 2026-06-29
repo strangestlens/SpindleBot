@@ -32,6 +32,7 @@ from spindlebot.core.enums import (
     SidecarRole,
 )
 from spindlebot.core.models import Location
+from spindlebot.core.progress import ProgressCallback, emit
 from spindlebot.db.repositories import (
     action_repo,
     conflict_repo,
@@ -121,12 +122,22 @@ def reconcile_location(
     authoritative_locations: list[Location],
     min_copies: int = 1,
     now: int | None = None,
+    progress: ProgressCallback | None = None,
 ) -> ReconcileResult:
-    """Plan reconciliation for `target` against the authoritative source(s)."""
+    """Plan reconciliation for `target` against the authoritative source(s).
+
+    When `progress` is given, fires a ProgressEvent per proposed action (total is
+    unknown up front, so events are indeterminate).
+    """
     now = int(time.time()) if now is None else now
     run_id = run_repo.start_run(conn, RunKind.RECONCILE, location_id=target.id, now=now)
     result = ReconcileResult(location=target.name, run_id=run_id)
     status = ScanStatus.OK
+
+    def _tick(phase: str) -> None:
+        proposed_n = result.copies + result.missing + result.conflicts
+        emit(progress, phase=phase, done=proposed_n, total=0)
+
     try:
         # A trustworthy plan needs to know what is ACTUALLY on the target now.
         # Without a scan, target presence is empty/stale: COPY would propose the
@@ -159,6 +170,7 @@ def reconcile_location(
                 )
                 proposed.add(p.audio_id)
                 result.copies += 1
+                _tick("copy")
 
         # MISSING: target rows not re-confirmed by the target's latest scan.
         cutoff = scan["started_utc"]
@@ -177,6 +189,7 @@ def reconcile_location(
                 if projected < min_copies:
                     result.below_floor += 1
                     result.below_floor_ids.append(audio_id)
+            _tick("missing")
 
         # CONFLICT: same track's .lrc present on target and an authoritative
         # location with different per-copy content → flag a divergence.
@@ -198,6 +211,7 @@ def reconcile_location(
                         target_sha=t_sha, auth_sha=a_sha,
                         run_id=run_id, now=now, result=result,
                     )
+                    _tick("conflict")
     except BaseException:
         status = ScanStatus.INTERRUPTED
         raise
