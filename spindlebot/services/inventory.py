@@ -26,6 +26,7 @@ from spindlebot.core.albums import album_key
 from spindlebot.core.enums import ScanStatus, SidecarParentKind, SidecarRole
 from spindlebot.core.identity import audio_content_id, file_sha256
 from spindlebot.core.models import Location
+from spindlebot.core.progress import ProgressCallback, emit
 from spindlebot.db.repositories import (
     album_repo,
     audio_repo,
@@ -70,12 +71,6 @@ class InventoryResult:
     error_paths: list[str] = field(default_factory=list)
 
 
-def _iter_audio_files(root: Path):
-    for path in sorted(root.rglob("*")):
-        if path.is_file() and path.suffix.lower().lstrip(".") in AUDIO_EXTENSIONS:
-            yield path
-
-
 def _classify_sidecar(path: Path) -> SidecarRole | None:
     name = path.name.lower()
     if name == _NOLRC_NAME:
@@ -87,13 +82,30 @@ def _classify_sidecar(path: Path) -> SidecarRole | None:
     return None
 
 
-def _iter_sidecar_files(root: Path):
+def _walk_tree(root: Path) -> tuple[list[Path], list[tuple[Path, SidecarRole]], int]:
+    """One pass over the tree → (audio paths, (sidecar, role) pairs, total audio bytes).
+
+    A single walk (audio + sidecars together) so the tree is stat'd once and the
+    totals are known up front for progress reporting. Audio bytes dominate scan
+    time (hashing), so that's the byte total we surface; sidecars are negligible.
+    """
+    audio: list[Path] = []
+    sidecars: list[tuple[Path, SidecarRole]] = []
+    total_audio_bytes = 0
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
+        if path.suffix.lower().lstrip(".") in AUDIO_EXTENSIONS:
+            audio.append(path)
+            try:
+                total_audio_bytes += path.stat().st_size
+            except OSError:
+                pass
+            continue
         role = _classify_sidecar(path)
         if role is not None:
-            yield path, role
+            sidecars.append((path, role))
+    return audio, sidecars, total_audio_bytes
 
 
 def _resolve_album_for_dir(directory: Path, dir_albums: dict[Path, set[int]]) -> int | None:
@@ -184,13 +196,15 @@ def inventory_location(
     root: str | Path,
     now: int | None = None,
     beets_db: str | Path | None = None,
+    progress: ProgressCallback | None = None,
 ) -> InventoryResult:
     """Scan `root` for audio + sidecars, upsert content + observed-present facts.
 
     Writes the location's marker file at `root`, records a `location_scan` row,
     groups tracks into albums, records sidecars (.lrc per track, cover.jpg /
     .nolrc per album), and (when `beets_db` is given) links each track's beets
-    item id by path. Read-only with respect to the files themselves.
+    item id by path. Read-only with respect to the files themselves. When
+    `progress` is given, fires a ProgressEvent per file scanned.
     """
     now = int(time.time()) if now is None else now
     result = InventoryResult(location=location.name)
@@ -202,6 +216,13 @@ def inventory_location(
     ensure_marker(root, uuid=location.uuid, name=location.name, now=now)
 
     beets_index = _load_beets_index(beets_db)
+    audio_files, sidecar_files, total_bytes = _walk_tree(root)
+    total = len(audio_files) + len(sidecar_files)
+    done = 0
+    done_bytes = 0
+    emit(progress, phase="scan", done=0, total=total,
+         done_bytes=0, total_bytes=total_bytes)
+
     scan_id = scan_repo.start_scan(conn, location.id, now)
     status = ScanStatus.OK
     # Built during the audio pass, consumed by the sidecar pass.
@@ -209,7 +230,7 @@ def inventory_location(
     stem_audio: dict[tuple[Path, str], int] = {}         # (dir, stem) -> audio id
     seen_albums: set[int] = set()
     try:
-        for path in _iter_audio_files(root):
+        for path in audio_files:
             result.scanned += 1
             try:
                 tags = _read_tags(path)
@@ -222,6 +243,7 @@ def inventory_location(
                     disc_no=tags["disc_no"], track_no=tags["track_no"],
                     duration_s=tags["duration_s"],
                 )
+                byte_size = path.stat().st_size
                 presence_repo.set_presence(
                     conn,
                     audio_id=audio.id,
@@ -230,8 +252,9 @@ def inventory_location(
                     observed_utc=now,
                     rel_path=str(path.relative_to(root)),
                     file_sha256=file_sha256(path),
-                    byte_size=path.stat().st_size,
+                    byte_size=byte_size,
                 )
+                done_bytes += byte_size
                 stem_audio[(path.parent, path.stem.lower())] = audio.id
                 if tags["album"]:
                     album = album_repo.upsert(
@@ -248,8 +271,12 @@ def inventory_location(
             except OSError as exc:  # file vanished/unreadable mid-scan: isolate, keep going
                 result.errors += 1
                 result.error_paths.append(f"{path}: {exc}")
+            done += 1
+            emit(progress, phase="audio", done=done, total=total,
+                 done_bytes=done_bytes, total_bytes=total_bytes,
+                 current=str(path.relative_to(root)))
 
-        for path, role in _iter_sidecar_files(root):
+        for path, role in sidecar_files:
             try:
                 if role is SidecarRole.LRC:
                     audio_id = stem_audio.get((path.parent, path.stem.lower()))
@@ -290,6 +317,10 @@ def inventory_location(
             except OSError as exc:
                 result.errors += 1
                 result.error_paths.append(f"{path}: {exc}")
+            done += 1
+            emit(progress, phase="sidecar", done=done, total=total,
+                 done_bytes=done_bytes, total_bytes=total_bytes,
+                 current=str(path.relative_to(root)))
     except BaseException:
         status = ScanStatus.INTERRUPTED
         raise

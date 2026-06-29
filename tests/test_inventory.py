@@ -327,6 +327,48 @@ def test_inventory_cover_resolves_through_disc_subfolders(conn, tmp_path):
                             parent_id=al.id, role=SidecarRole.COVER) is not None
 
 
+def test_inventory_emits_progress_events(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    _write_flac(root / "AA" / "Album" / "02.flac",
+                audio_md5_bytes=bytes(range(17, 33)), tags=_album_tags("Two", 2))
+    (root / "AA" / "Album" / "01.lrc").write_text("[00:01.00]a\n")
+    (root / "AA" / "Album" / "cover.jpg").write_bytes(b"\xff\xd8jpeg")
+
+    events = []
+    loc = ensure_pending_location(conn, 1000)
+    inventory_location(conn, location=loc, root=root, now=1000,
+                       progress=events.append)
+
+    # one initial "scan" event + one per file (2 audio + 2 sidecars)
+    assert events[0].phase == "scan" and events[0].done == 0
+    assert events[0].total == 4
+    assert events[0].total_bytes > 0
+    # done climbs monotonically and ends at the total
+    dones = [e.done for e in events]
+    assert dones == sorted(dones)
+    assert events[-1].done == events[-1].total == 4
+    # audio phase precedes sidecar phase; bytes only advance during audio
+    phases = [e.phase for e in events[1:]]
+    assert phases == ["audio", "audio", "sidecar", "sidecar"]
+    assert events[-1].done_bytes == events[0].total_bytes  # all audio bytes counted
+    assert any(e.current.endswith(".flac") for e in events)
+
+
+def test_inventory_progress_optional_and_safe(conn, tmp_path):
+    # no callback → no error; a throwing callback never breaks the scan
+    root = tmp_path / "Pending"
+    _write_flac(root / "01.flac", audio_md5_bytes=bytes(range(1, 17)))
+
+    def boom(_ev):
+        raise RuntimeError("reporter blew up")
+
+    loc = ensure_pending_location(conn, 1000)
+    result = inventory_location(conn, location=loc, root=root, now=1000, progress=boom)
+    assert result.new == 1   # scan completed despite the callback raising
+
+
 def test_inventory_multidisc_sibling_folders_collapse_to_one_album(conn, tmp_path):
     # Real DwRugged layout: multidisc = sibling album folders ("Album [Disc 1]",
     # "Album [Disc 2]"), tracks + a cover directly inside each, sharing one album
