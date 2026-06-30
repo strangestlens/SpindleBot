@@ -25,6 +25,7 @@ from typing import Callable
 from spindlebot.core.enums import ActionKind, ContentKind, RunKind, ScanStatus
 from spindlebot.core.errors import IntegrityMismatch
 from spindlebot.core.identity import file_sha256
+from spindlebot.core.progress import ProgressCallback, emit
 from spindlebot.db.repositories import (
     action_repo,
     location_repo,
@@ -59,20 +60,24 @@ def execute_pending(
     *,
     copy_fn: CopyFn = _rsync_copy,
     now: int | None = None,
+    progress: ProgressCallback | None = None,
 ) -> SyncResult:
     """Execute acknowledged COPY actions (copy → verify → record presence).
 
     Reads only acknowledged, not-yet-executed rows. Touches bytes only via
-    copy_fn, and never deletes anything.
+    copy_fn, and never deletes anything. When `progress` is given, fires a
+    ProgressEvent per action.
     """
     now = int(time.time()) if now is None else now
     run_id = run_repo.start_run(conn, RunKind.SYNC, now=now)
     result = SyncResult(run_id=run_id)
     status = ScanStatus.OK
+    actions = action_repo.list_pending_execution(conn, action_kind=ActionKind.COPY)
+    total = len(actions)
+    done = 0
+    emit(progress, phase="sync", done=0, total=total)
     try:
-        for action in action_repo.list_pending_execution(
-            conn, action_kind=ActionKind.COPY
-        ):
+        for action in actions:
             try:
                 if action.content_kind != ContentKind.AUDIO:
                     result.skipped += 1  # sidecar copies land in a later commit
@@ -117,6 +122,9 @@ def execute_pending(
             except (OSError, IntegrityMismatch, subprocess.CalledProcessError) as exc:
                 result.failed += 1
                 result.errors.append(str(exc))
+            done += 1
+            emit(progress, phase="sync", done=done, total=total,
+                 current=action.rel_path or "")
     except BaseException:
         status = ScanStatus.INTERRUPTED
         raise

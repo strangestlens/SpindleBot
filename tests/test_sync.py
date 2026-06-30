@@ -148,3 +148,39 @@ def test_sync_records_a_finished_run(conn, tmp_path):
     run = run_repo.get(conn, result.run_id)
     assert run.kind == RunKind.SYNC
     assert run.status == ScanStatus.OK and run.finished_utc == 1000
+
+
+def test_sync_emits_progress(conn, tmp_path):
+    _setup(conn, tmp_path)
+    events = []
+    execute_pending(conn, copy_fn=_good_copy, now=1000, progress=events.append)
+    assert events[0].phase == "sync" and events[0].total == 1
+    assert events[-1].done == 1
+
+
+# ── default rsync copy + CLI wiring ───────────────────────────────────────────
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync not installed")
+def test_rsync_copy_is_byte_faithful(tmp_path):
+    from spindlebot.services.sync import _rsync_copy
+    src = tmp_path / "a" / "src.flac"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"lossless" * 1000)
+    dst = tmp_path / "b" / "c" / "dst.flac"
+    _rsync_copy(src, dst)
+    assert dst.is_file() and file_sha256(dst) == file_sha256(src)
+
+
+def _cli_cfg(tmp_path):
+    from types import SimpleNamespace
+    core = SimpleNamespace(db_path=tmp_path / "spindlebot.db", min_copies=2,
+                           pending_dir=tmp_path / "Pending")
+    return SimpleNamespace(core=core, locations=[], destinations=[])
+
+
+def test_cmd_sync_no_pending_is_a_clean_noop(tmp_path, capsys):
+    from spindlebot.cli import cmd_sync
+    rc = cmd_sync(_cli_cfg(tmp_path), ["--json"])
+    import json
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0 and data["copied"] == 0 and data["failed"] == 0

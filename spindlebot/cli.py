@@ -11,6 +11,7 @@ Usage:
     python -m spindlebot review --location <name> [--json] [-v|--quiet]        Plan reconciliation (propose copies/missing); no bytes moved
     python -m spindlebot review --acknowledge-run <run_id>        Acknowledge every proposed action in a run
     python -m spindlebot review --acknowledge <id[,id...]>        Acknowledge specific proposed actions
+    python -m spindlebot sync [--json] [-v|--quiet]              Execute acknowledged copies (copy→verify→presence); adds copies only
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -412,6 +413,45 @@ def cmd_review(cfg, args: list[str]) -> int:
         conn.close()
 
 
+# ── sync ──────────────────────────────────────────────────────────────────────
+
+def cmd_sync(cfg, args: list[str]) -> int:
+    """
+    Execute acknowledged copy actions: copy → verify destination hash → record
+    presence. NON-destructive — it only adds verified copies, never deletes or
+    prunes. Run `review` + acknowledge first to queue the work.
+    """
+    import json as _json
+    import time
+    from dataclasses import asdict
+
+    from spindlebot.db.connection import open_db
+    from spindlebot.services.locations import register_from_config
+    from spindlebot.services.sync import execute_pending
+
+    want_json = "--json" in args
+    now = int(time.time())
+    conn = open_db(cfg.core.db_path)
+    try:
+        register_from_config(conn, cfg, now)
+        progress_cb, reporter = _make_progress(args, "sync")
+        result = execute_pending(conn, now=now, progress=progress_cb)
+        if reporter is not None:
+            reporter.close()
+        conn.commit()
+    finally:
+        conn.close()
+
+    if want_json:
+        print(_json.dumps(asdict(result)))
+    else:
+        print(f"Synced (run {result.run_id}): {result.copied} copied, "
+              f"{result.failed} failed, {result.skipped} skipped")
+        for e in result.errors:
+            print(f"  ! {e}", file=sys.stderr)
+    return 0 if result.failed == 0 else 1
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -473,6 +513,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "review":
         return cmd_review(cfg, args[1:])
+
+    if command == "sync":
+        return cmd_sync(cfg, args[1:])
 
     if command == "notify":
         if len(args) < 3:
