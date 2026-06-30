@@ -82,3 +82,27 @@ def acknowledge_run(conn: sqlite3.Connection, run_id: int, now: int) -> int:
         (now, run_id),
     )
     return cur.rowcount
+
+
+def list_pending_execution(
+    conn: sqlite3.Connection,
+    *,
+    action_kind: ActionKind | str | None = None,
+) -> list[PendingAction]:
+    """Acknowledged-but-not-yet-executed actions, oldest first — the executor's
+    work queue. Optionally filtered to one action_kind."""
+    sql = ("SELECT * FROM pending_action "
+           "WHERE acknowledged = 1 AND executed_utc IS NULL")
+    params: list = []
+    if action_kind is not None:
+        sql += " AND action_kind = ?"
+        params.append(str(ActionKind(action_kind)))
+    rows = conn.execute(sql + " ORDER BY id", params).fetchall()
+    return [PendingAction.from_row(r) for r in rows]
+
+
+def mark_executed(conn: sqlite3.Connection, action_id: int, now: int) -> None:
+    conn.execute(
+        "UPDATE pending_action SET executed_utc = ? WHERE id = ?",
+        (now, action_id),
+    )
