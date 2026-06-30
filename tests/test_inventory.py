@@ -327,6 +327,50 @@ def test_inventory_cover_resolves_through_disc_subfolders(conn, tmp_path):
                             parent_id=al.id, role=SidecarRole.COVER) is not None
 
 
+def test_inventory_checkpoints_every_n_files(conn, tmp_path):
+    root = tmp_path / "Pending"
+    for i in range(1, 5):
+        _write_flac(root / f"{i:02d}.flac", audio_md5_bytes=bytes([i]) * 16)
+    calls = []
+    loc = ensure_pending_location(conn, 1000)
+    inventory_location(conn, location=loc, root=root, now=1000,
+                       checkpoint=lambda: calls.append(1), commit_every=2)
+    # 4 audio files, commit every 2 → checkpoints at done=2 and done=4
+    assert len(calls) == 2
+
+
+def test_inventory_partial_progress_survives_interrupt(tmp_path, monkeypatch):
+    # With batched commits, a scan killed mid-way keeps what it already wrote —
+    # the regression guard against the old commit-once-at-the-end behavior.
+    db = tmp_path / "spindlebot.db"
+    conn = open_db(db)
+    root = tmp_path / "Pending"
+    for i in range(1, 5):
+        _write_flac(root / f"{i:02d}.flac", audio_md5_bytes=bytes([i]) * 16)
+
+    calls = {"n": 0}
+    real = inventory.audio_content_id
+
+    def flaky(path):
+        calls["n"] += 1
+        if calls["n"] == 3:                 # blow up on the third file
+            raise RuntimeError("killed mid-scan")
+        return real(path)
+
+    monkeypatch.setattr(inventory, "audio_content_id", flaky)
+    loc = ensure_pending_location(conn, 1000)
+    conn.commit()
+    with pytest.raises(RuntimeError):
+        inventory_location(conn, location=loc, root=root, now=1000,
+                           checkpoint=conn.commit, commit_every=1)
+    conn.close()
+
+    # a fresh connection sees the two files committed before the crash
+    other = open_db(db)
+    assert other.execute("SELECT COUNT(*) FROM audio_presence").fetchone()[0] == 2
+    other.close()
+
+
 def test_inventory_emits_progress_events(conn, tmp_path):
     root = tmp_path / "Pending"
     _write_flac(root / "AA" / "Album" / "01.flac",

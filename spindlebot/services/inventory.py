@@ -19,6 +19,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import mutagen
 
@@ -197,6 +198,8 @@ def inventory_location(
     now: int | None = None,
     beets_db: str | Path | None = None,
     progress: ProgressCallback | None = None,
+    checkpoint: Callable[[], None] | None = None,
+    commit_every: int = 200,
 ) -> InventoryResult:
     """Scan `root` for audio + sidecars, upsert content + observed-present facts.
 
@@ -205,6 +208,10 @@ def inventory_location(
     .nolrc per album), and (when `beets_db` is given) links each track's beets
     item id by path. Read-only with respect to the files themselves. When
     `progress` is given, fires a ProgressEvent per file scanned.
+
+    `checkpoint` (the caller's commit — the caller still owns the transaction) is
+    invoked every `commit_every` files so a long scan keeps partial progress
+    durable and observable mid-run instead of vanishing on interrupt.
     """
     now = int(time.time()) if now is None else now
     result = InventoryResult(location=location.name)
@@ -225,6 +232,11 @@ def inventory_location(
 
     scan_id = scan_repo.start_scan(conn, location.id, now)
     status = ScanStatus.OK
+
+    def _maybe_checkpoint() -> None:
+        if checkpoint is not None and commit_every > 0 and done % commit_every == 0:
+            checkpoint()
+
     # Built during the audio pass, consumed by the sidecar pass.
     dir_albums: dict[Path, set[int]] = defaultdict(set)  # dir -> album ids of tracks in it
     stem_audio: dict[tuple[Path, str], int] = {}         # (dir, stem) -> audio id
@@ -275,6 +287,7 @@ def inventory_location(
             emit(progress, phase="audio", done=done, total=total,
                  done_bytes=done_bytes, total_bytes=total_bytes,
                  current=str(path.relative_to(root)))
+            _maybe_checkpoint()
 
         for path, role in sidecar_files:
             try:
@@ -321,6 +334,7 @@ def inventory_location(
             emit(progress, phase="sidecar", done=done, total=total,
                  done_bytes=done_bytes, total_bytes=total_bytes,
                  current=str(path.relative_to(root)))
+            _maybe_checkpoint()
     except BaseException:
         status = ScanStatus.INTERRUPTED
         raise
