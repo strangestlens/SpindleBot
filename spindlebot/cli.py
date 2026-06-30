@@ -274,6 +274,7 @@ def cmd_inventory(cfg, args: list[str]) -> int:
         result = inventory_location(
             conn, location=location, root=root, now=now,
             beets_db=cfg.tools.beets_db, progress=progress_cb,
+            checkpoint=conn.commit,  # keep partial progress durable mid-scan
         )
         if reporter is not None:
             reporter.close()

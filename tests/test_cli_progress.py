@@ -101,14 +101,15 @@ def test_tty_renders_bar_bytes_eta_and_current():
     assert "Artist/Album/05 Song.flac" in out
 
 
-def test_tty_truncates_to_width():
+def test_tty_truncates_within_width_reserving_the_margin():
     buf = io.StringIO()
     r = ProgressReporter(stream=buf, isatty=True, width=30,
                          clock=FakeClock())
     r.update(_ev(1, 10, current="some/really/long/path/that/cannot/fit.flac"))
     for line in buf.getvalue().split("\n"):
         visible = line.replace("\x1b[2F", "").replace("\x1b[K", "")
-        assert len(visible) <= 30
+        # stays strictly inside the terminal — never writes the last column
+        assert len(visible) <= 29
 
 
 def test_indeterminate_tty_shows_spinner():

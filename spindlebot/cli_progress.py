@@ -125,7 +125,11 @@ class ProgressReporter:
         return f"{prefix}{ch} {ev.done} processed"
 
     def _paint_tty(self, ev: ProgressEvent, now: float) -> None:
-        width = self._term_width()
+        # Reserve the last column: writing the full width lands the cursor on the
+        # right margin, where most terminals defer the wrap ("pending wrap"),
+        # which desyncs the \x1b[2F up-2-lines repaint and strands a frame in the
+        # scrollback. Truncating to width-1 keeps us off the margin entirely.
+        width = max(1, self._term_width() - 1)
         line1 = _truncate_middle(self._headline(ev, now), width)
         line2 = _truncate_middle(f"· {ev.current}" if ev.current else "", width)
         out = []
