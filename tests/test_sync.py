@@ -184,3 +184,86 @@ def test_cmd_sync_no_pending_is_a_clean_noop(tmp_path, capsys):
     import json
     data = json.loads(capsys.readouterr().out)
     assert rc == 0 and data["copied"] == 0 and data["failed"] == 0
+
+
+# ── audit #35: durability, progress completeness, exit code ───────────────────
+
+def test_each_copy_is_committed_so_a_crash_keeps_done_work(tmp_path):
+    # Per-action checkpoint: a crash mid-batch keeps the copies already verified,
+    # so the next run doesn't re-copy/re-hash the whole library.
+    db = tmp_path / "spindlebot.db"
+    conn = open_db(db)
+    pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
+    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    a1, a2 = _audio(conn, "a" * 32), _audio(conn, "b" * 32)
+    for a, rel in [(a1, "1.flac"), (a2, "2.flac")]:
+        (Path(pending.root_path) / rel).write_bytes(rel.encode() * 100)
+        _propose_copy(conn, audio=a, src_loc=pending, dst_loc=rugged, rel_path=rel)
+    conn.commit()
+
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("power loss mid-sync")
+        _good_copy(src, dst)
+
+    with pytest.raises(RuntimeError):
+        execute_pending(conn, copy_fn=flaky, now=1000, checkpoint=conn.commit)
+    conn.close()
+
+    other = open_db(db)
+    assert presence_repo.get(other, a1.id, rugged.id) is not None   # first copy durable
+    assert presence_repo.get(other, a2.id, rugged.id) is None       # second never recorded
+    assert len(action_repo.list_pending_execution(other)) == 1      # only the un-done one
+    other.close()
+
+
+def test_progress_reaches_total_even_with_a_skip(conn, tmp_path):
+    pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
+    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    good, orphan = _audio(conn, "a" * 32), _audio(conn, "b" * 32)
+    (Path(pending.root_path) / "good.flac").write_bytes(b"x" * 200)
+    _propose_copy(conn, audio=good, src_loc=pending, dst_loc=rugged, rel_path="good.flac")
+    _propose_copy(conn, audio=orphan, src_loc=pending, dst_loc=rugged,
+                  rel_path="missing.flac")   # no source file → skipped
+
+    events = []
+    result = execute_pending(conn, copy_fn=_good_copy, now=1000, progress=events.append)
+    assert result.copied == 1 and result.skipped == 1
+    assert events[-1].done == events[-1].total == 2   # bar completes despite the skip
+
+
+def test_cmd_sync_nonzero_when_acknowledged_copy_skipped_with_error(tmp_path, capsys):
+    import json
+    from types import SimpleNamespace
+
+    from spindlebot.cli import cmd_sync
+    from spindlebot.config import LocationConfig
+    from spindlebot.core.enums import LocationKind
+    from spindlebot.services.locations import get_by_name, register_from_config
+
+    db = tmp_path / "spindlebot.db"
+    pending_dir = tmp_path / "Pending"
+    core = SimpleNamespace(db_path=db, min_copies=2, pending_dir=pending_dir)
+    # dest configured but its root doesn't exist → "unmounted"
+    locs = [LocationConfig(name="DwRugged", kind=LocationKind.LOCAL_DRIVE,
+                           root_path=str(tmp_path / "GONE"), is_retention=True)]
+    cfg = SimpleNamespace(core=core, locations=locs, destinations=[])
+
+    conn = open_db(db)
+    register_from_config(conn, cfg, 0)
+    pending, rugged = get_by_name(conn, "Pending"), get_by_name(conn, "DwRugged")
+    audio = _audio(conn)
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    (pending_dir / "x.flac").write_bytes(b"data")
+    _propose_copy(conn, audio=audio, src_loc=pending, dst_loc=rugged, rel_path="x.flac")
+    conn.commit()
+    conn.close()
+
+    rc = cmd_sync(cfg, ["--json", "--quiet"])
+    data = json.loads(capsys.readouterr().out)
+    # an acknowledged copy we couldn't do (dest unmounted) is a failure signal
+    assert rc == 1
+    assert data["copied"] == 0 and data["skipped"] == 1 and data["errors"]

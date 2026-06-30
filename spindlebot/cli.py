@@ -435,7 +435,8 @@ def cmd_sync(cfg, args: list[str]) -> int:
     try:
         register_from_config(conn, cfg, now)
         progress_cb, reporter = _make_progress(args, "sync")
-        result = execute_pending(conn, now=now, progress=progress_cb)
+        result = execute_pending(conn, now=now, progress=progress_cb,
+                                 checkpoint=conn.commit)
         if reporter is not None:
             reporter.close()
         conn.commit()
@@ -449,7 +450,11 @@ def cmd_sync(cfg, args: list[str]) -> int:
               f"{result.failed} failed, {result.skipped} skipped")
         for e in result.errors:
             print(f"  ! {e}", file=sys.stderr)
-    return 0 if result.failed == 0 else 1
+    # Nonzero if anything went wrong — a failed copy OR an acknowledged copy we
+    # couldn't do (e.g. dest unmounted). result.errors holds only real problems
+    # (benign skips like a not-yet-supported sidecar copy don't append to it),
+    # so automation can tell "nothing to do" from "couldn't do the work".
+    return 0 if (result.failed == 0 and not result.errors) else 1
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

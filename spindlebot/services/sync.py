@@ -61,12 +61,18 @@ def execute_pending(
     copy_fn: CopyFn = _rsync_copy,
     now: int | None = None,
     progress: ProgressCallback | None = None,
+    checkpoint: Callable[[], None] | None = None,
+    commit_every: int = 1,
 ) -> SyncResult:
     """Execute acknowledged COPY actions (copy → verify → record presence).
 
     Reads only acknowledged, not-yet-executed rows. Touches bytes only via
     copy_fn, and never deletes anything. When `progress` is given, fires a
     ProgressEvent per action.
+
+    `checkpoint` (the caller's commit — the caller still owns the transaction) is
+    invoked every `commit_every` actions, default every one: each verified copy
+    is expensive, so a crash must not roll back and re-copy work already done.
     """
     now = int(time.time()) if now is None else now
     run_id = run_repo.start_run(conn, RunKind.SYNC, now=now)
@@ -122,9 +128,15 @@ def execute_pending(
             except (OSError, IntegrityMismatch, subprocess.CalledProcessError) as exc:
                 result.failed += 1
                 result.errors.append(str(exc))
-            done += 1
-            emit(progress, phase="sync", done=done, total=total,
-                 current=action.rel_path or "")
+            finally:
+                # finally so the count advances on every path — including the
+                # `continue` skips — so the bar always reaches 100%, and each
+                # completed action is committed (durable, no re-copy on crash).
+                done += 1
+                emit(progress, phase="sync", done=done, total=total,
+                     current=action.rel_path or "")
+                if checkpoint is not None and commit_every > 0 and done % commit_every == 0:
+                    checkpoint()
     except BaseException:
         status = ScanStatus.INTERRUPTED
         raise
