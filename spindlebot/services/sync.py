@@ -61,15 +61,18 @@ def execute_pending(
     *,
     copy_fn: CopyFn = _rsync_copy,
     now: int | None = None,
+    dest_location_id: int | None = None,
     progress: ProgressCallback | None = None,
     checkpoint: Callable[[], None] | None = None,
     commit_every: int = 1,
 ) -> SyncResult:
     """Execute acknowledged COPY actions (copy → verify → record presence).
 
-    Reads only acknowledged, not-yet-executed rows. Touches bytes only via
-    copy_fn, and never deletes anything. When `progress` is given, fires a
-    ProgressEvent per action.
+    Reads only acknowledged, not-yet-executed rows. `dest_location_id` scopes to
+    a single destination — so the DwRugged mount agent only executes the work
+    planned for DwRugged, not queued copies for an unmounted DAP. Touches bytes
+    only via copy_fn, and never deletes anything. When `progress` is given, fires
+    a ProgressEvent per action.
 
     `checkpoint` (the caller's commit — the caller still owns the transaction) is
     invoked every `commit_every` actions, default every one: each verified copy
@@ -79,7 +82,8 @@ def execute_pending(
     run_id = run_repo.start_run(conn, RunKind.SYNC, now=now)
     result = SyncResult(run_id=run_id)
     status = ScanStatus.OK
-    actions = action_repo.list_pending_execution(conn, action_kind=ActionKind.COPY)
+    actions = action_repo.list_pending_execution(
+        conn, action_kind=ActionKind.COPY, dest_location_id=dest_location_id)
     total = len(actions)
     done = 0
     emit(progress, phase="sync", done=0, total=total)

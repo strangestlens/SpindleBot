@@ -1,7 +1,13 @@
 #!/bin/bash
-# music-sync-rugged.sh — fires when DWRugged mounts (or run manually)
-# Moves the Pending area to /Volumes/DwRugged/Music/Library, updates beets DB paths.
-# Lyrics are fetched on DwRugged after sync so there's no race with the import pipeline.
+# music-sync-rugged.sh — fires when DwRugged mounts (or run manually).
+#
+# Content-addressed sync (replaces the old rsync --remove-source-files MOVE):
+#   inventory Pending → review + acknowledge → sync (copy → verify hash → record
+#   presence on DwRugged) → prune (release the Pending copy, but ONLY files that
+#   are hash-verified on DwRugged) → point beets at DwRugged → notify.
+#
+# Nothing leaves Pending until a verified copy exists on retention, and prune
+# only runs after a clean sync — so a copy can never be lost.
 
 # ── Load SpindleBot config ────────────────────────────────────────────────────
 # shellcheck source=/dev/null
@@ -11,20 +17,17 @@ source "$HOME/.config/spindlebot/bootstrap.sh" 2>/dev/null || {
 }
 export PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR"
 
-LOCAL="$SPINDLEBOT_PENDING_DIR"
+PENDING="$SPINDLEBOT_PENDING_DIR"
 REMOTE="$SPINDLEBOT_DESTINATION_PATH"
+DEST_NAME="DwRugged"                 # the [[destinations]] name; matches WatchPaths
 LOGFILE="$SPINDLEBOT_LOG_DIR/rugged-sync.log"
-LOCKFILE="/tmp/music-sync-rugged.lock"
+LOCKFILE="${SPINDLEBOT_RUGGED_LOCKFILE:-/tmp/music-sync-rugged.lock}"
 PYTHON="$SPINDLEBOT_PYTHON"
 NOTIFY="$SPINDLEBOT_PIPELINE_DIR/music-notify.sh"
-FETCH_ART="$SPINDLEBOT_PIPELINE_DIR/music-fetch-art.py"
-PRETAG="$SPINDLEBOT_PIPELINE_DIR/music-pretag.py"
-FETCH_LYRICS="$SPINDLEBOT_PIPELINE_DIR/music-fetch-lyrics.py"
 DB="$SPINDLEBOT_BEETS_DB"
 
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOGFILE"
-}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOGFILE"; }
+sb()  { "$PYTHON" -m spindlebot "$@" >> "$LOGFILE" 2>&1; }
 
 # Prevent concurrent runs
 if [ -f "$LOCKFILE" ]; then
@@ -34,65 +37,65 @@ fi
 touch "$LOCKFILE"
 trap 'rm -f "$LOCKFILE"' EXIT
 
-# Confirm drive is actually mounted (launchd can fire spuriously)
+# Confirm the drive is actually mounted (launchd can fire spuriously)
 if [ ! -d "$REMOTE" ]; then
-  mkdir -p "$REMOTE" 2>/dev/null || { log "Drive not ready, skipping."; exit 0; }
-fi
-
-# Check if there's anything to move
-if [ -z "$(find "$LOCAL" -type f 2>/dev/null)" ]; then
-  log "Nothing to sync."
+  log "DwRugged not mounted, skipping."
   exit 0
 fi
 
-log "DWRugged mounted — syncing $LOCAL → $REMOTE"
+# Anything to sync? Count only non-dotfiles — skips the location marker, a stray
+# .DS_Store, ._ AppleDouble files, and the .nolrc marker, so macOS junk alone
+# doesn't trigger a spurious no-op run.
+if [ -z "$(find "$PENDING" -type f ! -name '.*' 2>/dev/null)" ]; then
+  log "Nothing pending to sync."
+  exit 0
+fi
 
-# Fetch missing album art before files leave the Pending area
-log "Fetching missing album art"
-$PYTHON "$FETCH_ART" "$LOCAL" >> "$LOGFILE" 2>&1
+log "DwRugged mounted — running content-addressed sync"
 
-# Final tag cleanup before files leave the Pending area
-log "Running posttag before sync"
-find "$LOCAL" -name "*.flac" | $PYTHON "$PRETAG" --post >> "$LOGFILE" 2>&1
+# 1. Catalog new imports. Per-file errors (e.g. one unreadable FLAC) are NOT
+#    fatal: inventory isolates them and still catalogs everything else, so a
+#    single bad file must not wedge the whole pipeline. Press on.
+sb inventory --quiet || log "inventory reported per-file errors — continuing"
 
-# Move files (rsync preserves structure, removes source files after success)
-rsync -av --remove-source-files "$LOCAL/" "$REMOTE/" >> "$LOGFILE" 2>&1
-RSYNC_STATUS=$?
+# 2. Plan the copies to DwRugged and acknowledge them (--yes) in one shot.
+#    NOTE: requires DwRugged to have been inventoried once (the reconciler's
+#    target-scan gate); this script never inventories the target. A fresh install
+#    must run `spindlebot inventory --location DwRugged` once at setup.
+if ! sb review --location "$DEST_NAME" --yes --quiet; then
+  log "review failed — aborting (has DwRugged been inventoried once?)"
+  "$NOTIFY" "Sync failed" "review error — see rugged-sync.log"
+  exit 1
+fi
 
-# Clean up empty directories left behind
-find "$LOCAL" -mindepth 1 -type d -empty -delete 2>/dev/null
+# 3. Copy → verify → record presence, scoped to DwRugged so we don't try to
+#    execute copies queued for some other (possibly unmounted) destination.
+#    If this fails, leave Pending intact.
+if ! sb sync --location "$DEST_NAME" --quiet; then
+  log "sync failed — leaving Pending untouched, NOT pruning"
+  "$NOTIFY" "Sync failed" "copy/verify error — Pending untouched, see rugged-sync.log"
+  exit 1
+fi
 
-REMAINING=$(find "$LOCAL" -type f 2>/dev/null | wc -l | tr -d ' ')
-if [ "$REMAINING" -eq 0 ]; then
-  log "Sync complete."
+# 4. Release Pending files now verified on retention (safe: verify-before-delete).
+PRUNE_OK=1
+if ! sb prune --execute --quiet; then
+  log "prune reported issues — some files may remain in Pending — see rugged-sync.log"
+  PRUNE_OK=0
+fi
 
-  # Update beets DB paths: local Library → DwRugged
-  if sqlite3 "$DB" \
-      "UPDATE items SET path = replace(path, '${LOCAL}', '${REMOTE}') WHERE path LIKE '${LOCAL}/%';" 2>/dev/null; then
-    log "Beets DB paths updated to DwRugged"
-  else
-    log "WARNING: beets DB path update failed"
-  fi
-
-  # Fetch lyrics for any albums on DwRugged missing .lrc files.
-  # Runs here (not in import script) to avoid race condition with rsync.
-  LYRICS_DIRS=$(find "$REMOTE" -name "*.flac" | while IFS= read -r f; do
-    dir=$(dirname "$f")
-    lrc="${f%.flac}.lrc"
-    # Skip albums marked as having no available lyrics
-    [ -f "$dir/.nolrc" ] && continue
-    [ ! -f "$lrc" ] && echo "$dir"
-  done | sort -u)
-  if [ -n "$LYRICS_DIRS" ]; then
-    log "Fetching missing lyrics on DwRugged"
-    while IFS= read -r dir; do
-      log "Fetching lyrics for: $dir"
-      $PYTHON "$FETCH_LYRICS" "$dir" >> "$LOGFILE" 2>&1
-    done <<< "$LYRICS_DIRS"
-  fi
-
-  "$NOTIFY" "Sync complete" "All files moved to DwRugged ✓"
+# 5. Point beets at DwRugged for anything that left the Pending area.
+if sqlite3 "$DB" \
+    "UPDATE items SET path = replace(path, '${PENDING}', '${REMOTE}') WHERE path LIKE '${PENDING}/%';" 2>/dev/null; then
+  log "Beets DB paths updated to DwRugged"
 else
-  log "rsync FAILED (exit $RSYNC_STATUS) — $REMAINING files still in the Pending area."
-  "$NOTIFY" "Sync failed" "$REMAINING files still pending — check rugged-sync.log"
+  log "WARNING: beets DB path update failed"
+fi
+
+if [ "$PRUNE_OK" -eq 1 ]; then
+  log "Sync complete."
+  "$NOTIFY" "Sync complete" "New music copied to DwRugged and released from Pending ✓"
+else
+  log "Sync finished with warnings — see rugged-sync.log"
+  "$NOTIFY" "Sync finished with warnings" "Copied to DwRugged; some files not released from Pending"
 fi
