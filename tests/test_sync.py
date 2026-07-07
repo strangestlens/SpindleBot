@@ -79,6 +79,42 @@ def test_copy_verifies_and_records_presence(conn, tmp_path):
     assert pres.file_sha256 == file_sha256(src) and pres.rel_path == rel
 
 
+def test_copies_a_sidecar_and_records_sidecar_presence(conn, tmp_path):
+    from spindlebot.core.enums import ActionKind, ContentKind, SidecarParentKind, SidecarRole
+    from spindlebot.db.repositories import (
+        album_repo,
+        run_repo,
+        sidecar_presence_repo,
+        sidecar_repo,
+    )
+    pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
+    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    album = album_repo.upsert(conn, album_key="k", now=0)
+    sc = sidecar_repo.upsert(conn, parent_kind=SidecarParentKind.ALBUM,
+                             parent_id=album.id, role=SidecarRole.COVER,
+                             sha256="h", now=0)
+    rel = "Artist/Album/cover.jpg"
+    src = Path(pending.root_path) / rel
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"\xff\xd8jpeg-bytes" * 100)
+    sidecar_presence_repo.set_presence(conn, sidecar_id=sc.id, location_id=pending.id,
+                                       present=True, observed_utc=0, rel_path=rel,
+                                       file_sha256=file_sha256(src), byte_size=src.stat().st_size)
+    run_id = run_repo.start_run(conn, RunKind.RECONCILE, now=0)
+    a = action_repo.add(conn, run_id=run_id, action_kind=ActionKind.COPY,
+                        content_kind=ContentKind.SIDECAR, content_id=sc.id,
+                        source_location_id=pending.id, dest_location_id=rugged.id,
+                        rel_path=rel, now=0)
+    action_repo.acknowledge(conn, [a.id], now=0)
+
+    result = execute_pending(conn, copy_fn=_good_copy, now=1000)
+    assert result.copied == 1 and result.failed == 0
+    dst = Path(rugged.root_path) / rel
+    assert dst.is_file() and file_sha256(dst) == file_sha256(src)
+    pres = sidecar_presence_repo.get(conn, sc.id, rugged.id)
+    assert pres is not None and pres.present is True and pres.rel_path == rel
+
+
 def test_copy_marks_action_executed_and_is_idempotent(conn, tmp_path):
     pending, rugged, audio, rel, src = _setup(conn, tmp_path)
     execute_pending(conn, copy_fn=_good_copy, now=1000)

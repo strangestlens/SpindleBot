@@ -31,6 +31,7 @@ from spindlebot.db.repositories import (
     location_repo,
     presence_repo,
     run_repo,
+    sidecar_presence_repo,
 )
 from spindlebot.services.volumes import resolve_root
 
@@ -85,8 +86,8 @@ def execute_pending(
     try:
         for action in actions:
             try:
-                if action.content_kind != ContentKind.AUDIO:
-                    result.skipped += 1  # sidecar copies land in a later commit
+                if action.content_kind not in (ContentKind.AUDIO, ContentKind.SIDECAR):
+                    result.skipped += 1
                     continue
                 src_loc = location_repo.get_by_id(conn, action.source_location_id)
                 dst_loc = location_repo.get_by_id(conn, action.dest_location_id)
@@ -113,16 +114,18 @@ def execute_pending(
                         f"action {action.id}: {dst} hash {actual[:12]} != "
                         f"source {expected[:12]}")
 
-                presence_repo.set_presence(
-                    conn,
-                    audio_id=action.content_id,
-                    location_id=dst_loc.id,
-                    present=True,
-                    observed_utc=now,
-                    rel_path=action.rel_path,
-                    file_sha256=actual,
-                    byte_size=dst.stat().st_size,
-                )
+                if action.content_kind == ContentKind.AUDIO:
+                    presence_repo.set_presence(
+                        conn, audio_id=action.content_id, location_id=dst_loc.id,
+                        present=True, observed_utc=now, rel_path=action.rel_path,
+                        file_sha256=actual, byte_size=dst.stat().st_size,
+                    )
+                else:  # SIDECAR (the only other kind that reaches here)
+                    sidecar_presence_repo.set_presence(
+                        conn, sidecar_id=action.content_id, location_id=dst_loc.id,
+                        present=True, observed_utc=now, rel_path=action.rel_path,
+                        file_sha256=actual, byte_size=dst.stat().st_size,
+                    )
                 action_repo.mark_executed(conn, action.id, now)
                 result.copied += 1
             except (OSError, IntegrityMismatch, subprocess.CalledProcessError) as exc:
