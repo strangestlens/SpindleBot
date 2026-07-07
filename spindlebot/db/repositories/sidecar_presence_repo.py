@@ -55,3 +55,12 @@ def list_for_location(
         params.append(int(present))
     rows = conn.execute(sql + " ORDER BY sidecar_id", params).fetchall()
     return [SidecarPresence.from_row(r) for r in rows]
+
+
+def list_for_sidecar(conn: sqlite3.Connection, sidecar_id: int) -> list[SidecarPresence]:
+    """Every presence row for a sidecar across all locations."""
+    rows = conn.execute(
+        "SELECT * FROM sidecar_presence WHERE sidecar_id = ? ORDER BY location_id",
+        (sidecar_id,),
+    ).fetchall()
+    return [SidecarPresence.from_row(r) for r in rows]
