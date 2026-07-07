@@ -12,6 +12,7 @@ Usage:
     python -m spindlebot review --acknowledge-run <run_id>        Acknowledge every proposed action in a run
     python -m spindlebot review --acknowledge <id[,id...]>        Acknowledge specific proposed actions
     python -m spindlebot sync [--json] [-v|--quiet]              Execute acknowledged copies (copy→verify→presence); adds copies only
+    python -m spindlebot prune [--execute] [--json] [-v|--quiet]  Release Pending files verified on retention (DRY-RUN unless --execute)
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -457,6 +458,54 @@ def cmd_sync(cfg, args: list[str]) -> int:
     return 0 if (result.failed == 0 and not result.errors) else 1
 
 
+# ── prune ─────────────────────────────────────────────────────────────────────
+
+def cmd_prune(cfg, args: list[str]) -> int:
+    """
+    Release files from the authoring library (Pending) once they're verified on a
+    retention location. DESTRUCTIVE — but DRY-RUN by default: it only reports what
+    it would delete. Pass --execute to actually delete. Retention locations are
+    never touched; a file is only released when the exact path+hash is confirmed
+    (and re-hashed) on retention.
+    """
+    import json as _json
+    import time
+    from dataclasses import asdict
+
+    from spindlebot.db.connection import open_db
+    from spindlebot.services.locations import register_from_config
+    from spindlebot.services.sync import prune_released
+
+    want_json = "--json" in args
+    execute = "--execute" in args
+    verify = "--no-verify" not in args
+    now = int(time.time())
+    conn = open_db(cfg.core.db_path)
+    try:
+        register_from_config(conn, cfg, now)
+        progress_cb, reporter = _make_progress(args, "prune")
+        result = prune_released(conn, now=now, dry_run=not execute,
+                                verify=verify, progress=progress_cb)
+        if reporter is not None:
+            reporter.close()
+        conn.commit()
+    finally:
+        conn.close()
+
+    if want_json:
+        print(_json.dumps(asdict(result)))
+    else:
+        verb = "Would release" if result.dry_run else "Released"
+        print(f"{verb} {result.pruned} file(s) "
+              f"({result.bytes_freed / (1024 * 1024):.1f} MB), "
+              f"{result.skipped} kept (not yet safely retained).")
+        if result.dry_run and result.pruned:
+            print("Re-run with --execute to actually delete.")
+        for e in result.errors:
+            print(f"  ! {e}", file=sys.stderr)
+    return 0 if not result.errors else 1
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -521,6 +570,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "sync":
         return cmd_sync(cfg, args[1:])
+
+    if command == "prune":
+        return cmd_prune(cfg, args[1:])
 
     if command == "notify":
         if len(args) < 3:

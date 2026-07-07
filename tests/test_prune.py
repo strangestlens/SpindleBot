@@ -174,3 +174,62 @@ def test_prune_cleans_up_empty_dirs(conn, tmp_path):
     # Artist/Album/ was the only content → removed once empty; root + marker remain
     assert not (Path(pending.root_path) / "Artist").exists()
     assert volumes.read_marker(Path(pending.root_path)) is not None
+
+
+# ── CLI: dry-run default, --execute to delete ─────────────────────────────────
+
+def _put_at(root: Path, rel: str, data=b"lossless" * 64) -> Path:
+    f = root / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(data)
+    return f
+
+
+def _cli_cfg_and_seed(tmp_path):
+    from types import SimpleNamespace
+
+    from spindlebot.config import LocationConfig
+    from spindlebot.core.enums import LocationKind
+    from spindlebot.services.locations import get_by_name, register_from_config
+
+    core = SimpleNamespace(db_path=tmp_path / "spindlebot.db", min_copies=2,
+                           pending_dir=tmp_path / "Pending")
+    locs = [LocationConfig(name="DwRugged", kind=LocationKind.LOCAL_DRIVE,
+                           root_path=str(tmp_path / "DwRugged"), is_retention=True)]
+    cfg = SimpleNamespace(core=core, locations=locs, destinations=[])
+
+    conn = open_db(core.db_path)
+    register_from_config(conn, cfg, 0)
+    pending, rugged = get_by_name(conn, "Pending"), get_by_name(conn, "DwRugged")
+    a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
+    rel = "A/B/01.flac"
+    pf = _put_at(core.pending_dir, rel)
+    rf = _put_at(tmp_path / "DwRugged", rel)
+    sha = file_sha256(pf)
+    for loc in (pending, rugged):
+        presence_repo.set_presence(conn, audio_id=a.id, location_id=loc.id, present=True,
+                                   observed_utc=0, rel_path=rel, file_sha256=sha,
+                                   byte_size=pf.stat().st_size)
+    conn.commit()
+    conn.close()
+    return cfg, pf, rf
+
+
+def test_cmd_prune_is_dry_run_by_default(tmp_path, capsys):
+    import json
+    from spindlebot.cli import cmd_prune
+    cfg, pf, rf = _cli_cfg_and_seed(tmp_path)
+    rc = cmd_prune(cfg, ["--json"])                 # no --execute
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0 and data["dry_run"] is True and data["pruned"] == 1
+    assert pf.exists()                              # nothing deleted without --execute
+
+
+def test_cmd_prune_execute_deletes(tmp_path, capsys):
+    import json
+    from spindlebot.cli import cmd_prune
+    cfg, pf, rf = _cli_cfg_and_seed(tmp_path)
+    rc = cmd_prune(cfg, ["--execute", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0 and data["dry_run"] is False and data["pruned"] == 1
+    assert not pf.exists() and rf.exists()
