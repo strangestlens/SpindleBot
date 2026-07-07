@@ -16,21 +16,25 @@ def set_presence(
     rel_path: str | None = None,
     file_sha256: str | None = None,
     byte_size: int | None = None,
+    mtime: int | None = None,
 ) -> SidecarPresence:
     """Record an observed presence fact for (sidecar_id, location_id). Upsert on PK."""
     conn.execute(
         """
         INSERT INTO sidecar_presence
-            (sidecar_id, location_id, present, rel_path, file_sha256, byte_size, observed_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (sidecar_id, location_id, present, rel_path, file_sha256, byte_size,
+             observed_utc, mtime)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(sidecar_id, location_id) DO UPDATE SET
             present = excluded.present,
             rel_path = excluded.rel_path,
             file_sha256 = excluded.file_sha256,
             byte_size = excluded.byte_size,
-            observed_utc = excluded.observed_utc
+            observed_utc = excluded.observed_utc,
+            mtime = excluded.mtime
         """,
-        (sidecar_id, location_id, int(present), rel_path, file_sha256, byte_size, observed_utc),
+        (sidecar_id, location_id, int(present), rel_path, file_sha256, byte_size,
+         observed_utc, mtime),
     )
     found = get(conn, sidecar_id, location_id)
     assert found is not None
@@ -41,6 +45,21 @@ def get(conn: sqlite3.Connection, sidecar_id: int, location_id: int) -> SidecarP
     row = conn.execute(
         "SELECT * FROM sidecar_presence WHERE sidecar_id = ? AND location_id = ?",
         (sidecar_id, location_id),
+    ).fetchone()
+    return SidecarPresence.from_row(row) if row else None
+
+
+def get_by_rel_path(
+    conn: sqlite3.Connection, location_id: int, rel_path: str
+) -> SidecarPresence | None:
+    """The presence row for a given path at a location, if one is recorded.
+
+    Keyed by (location_id, rel_path) so a scanner can look a sidecar up *before*
+    hashing it (its parent sidecar_id isn't known yet).
+    """
+    row = conn.execute(
+        "SELECT * FROM sidecar_presence WHERE location_id = ? AND rel_path = ?",
+        (location_id, rel_path),
     ).fetchone()
     return SidecarPresence.from_row(row) if row else None
 

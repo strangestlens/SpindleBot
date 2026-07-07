@@ -7,7 +7,7 @@ Usage:
     python -m spindlebot config get <key>              Print a single value (e.g. core.pending_dir)
     python -m spindlebot import <trigger> [--force]    Run import pipeline for an album
     python -m spindlebot import-staging [--dry-run]    Import everything currently in the Import area
-    python -m spindlebot inventory [--location <name>] [--json] [-v|--quiet]   Scan a location into the SpindleBot DB (read-only re: audio)
+    python -m spindlebot inventory [--location <name>] [--rehash] [--json] [-v|--quiet]   Scan a location into the SpindleBot DB (read-only re: audio; --rehash re-hashes unchanged files)
     python -m spindlebot review --location <name> [--yes] [--json] [-v|--quiet]  Plan reconciliation (--yes also acknowledges); no bytes moved
     python -m spindlebot review --acknowledge-run <run_id>        Acknowledge every proposed action in a run
     python -m spindlebot review --acknowledge <id[,id...]>        Acknowledge specific proposed actions
@@ -241,6 +241,7 @@ def cmd_inventory(cfg, args: list[str]) -> int:
     from spindlebot.services.volumes import resolve_root
 
     want_json = "--json" in args
+    rehash = "--force" in args or "--rehash" in args
     location_name = None
     if "--location" in args:
         idx = args.index("--location")
@@ -277,6 +278,7 @@ def cmd_inventory(cfg, args: list[str]) -> int:
             conn, location=location, root=root, now=now,
             beets_db=cfg.tools.beets_db, progress=progress_cb,
             checkpoint=conn.commit,  # keep partial progress durable mid-scan
+            rehash=rehash,
         )
         if reporter is not None:
             reporter.close()

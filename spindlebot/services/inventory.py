@@ -24,8 +24,13 @@ from typing import Callable
 import mutagen
 
 from spindlebot.core.albums import album_key
-from spindlebot.core.enums import ScanStatus, SidecarParentKind, SidecarRole
-from spindlebot.core.identity import audio_content_id, file_sha256
+from spindlebot.core.enums import (
+    IdentityKind,
+    ScanStatus,
+    SidecarParentKind,
+    SidecarRole,
+)
+from spindlebot.core.identity import ContentId, audio_content_id, file_sha256
 from spindlebot.core.models import Location
 from spindlebot.core.progress import ProgressCallback, emit
 from spindlebot.db.repositories import (
@@ -190,6 +195,68 @@ def _load_beets_index(beets_db: str | Path | None) -> dict[bytes, int]:
     return index
 
 
+def _identify_or_reuse(
+    conn,
+    path: Path,
+    *,
+    location_id: int,
+    rel_path: str,
+    byte_size: int,
+    mtime: int,
+    rehash: bool,
+) -> tuple[ContentId, str]:
+    """Return (identity, file_sha256) for `path`, reusing the DB when unchanged.
+
+    On a repeat scan a file whose recorded presence matches on
+    (rel_path, byte_size, mtime) is treated as unchanged: its stored identity and
+    per-copy sha256 are reused, avoiding both hashes. Any mismatch — new file,
+    changed size/mtime, missing mtime (pre-v6 row), or `rehash=True` — falls back
+    to hashing the bytes.
+    """
+    if not rehash:
+        prior = presence_repo.get_by_rel_path(conn, location_id, rel_path)
+        if (
+            prior is not None
+            and prior.file_sha256 is not None
+            and prior.byte_size == byte_size
+            and prior.mtime is not None
+            and prior.mtime == mtime
+        ):
+            audio = audio_repo.get_by_id(conn, prior.audio_id)
+            if audio is not None:
+                cid = ContentId(IdentityKind(audio.identity_kind), audio.identity)
+                return cid, prior.file_sha256
+    return audio_content_id(path), file_sha256(path)
+
+
+def _sidecar_digest_or_reuse(
+    conn,
+    path: Path,
+    *,
+    location_id: int,
+    rel_path: str,
+    byte_size: int,
+    mtime: int,
+    rehash: bool,
+) -> str:
+    """Return file_sha256 for a sidecar, reusing the DB copy when unchanged.
+
+    Same (rel_path, byte_size, mtime) skip rule as audio; a sidecar has no
+    identity hash, only the per-copy integrity sha256.
+    """
+    if not rehash:
+        prior = sidecar_presence_repo.get_by_rel_path(conn, location_id, rel_path)
+        if (
+            prior is not None
+            and prior.file_sha256 is not None
+            and prior.byte_size == byte_size
+            and prior.mtime is not None
+            and prior.mtime == mtime
+        ):
+            return prior.file_sha256
+    return file_sha256(path)
+
+
 def inventory_location(
     conn,
     *,
@@ -200,6 +267,7 @@ def inventory_location(
     progress: ProgressCallback | None = None,
     checkpoint: Callable[[], None] | None = None,
     commit_every: int = 200,
+    rehash: bool = False,
 ) -> InventoryResult:
     """Scan `root` for audio + sidecars, upsert content + observed-present facts.
 
@@ -212,6 +280,12 @@ def inventory_location(
     `checkpoint` (the caller's commit — the caller still owns the transaction) is
     invoked every `commit_every` files so a long scan keeps partial progress
     durable and observable mid-run instead of vanishing on interrupt.
+
+    Incremental re-scan: a file whose recorded presence at this location matches
+    on (rel_path, byte_size, mtime) is assumed unchanged — its stored identity and
+    per-copy file_sha256 are reused and only observed_utc is refreshed, skipping
+    the expensive decoded-audio MD5 / sha256 hashing. `rehash=True` forces every
+    file to be re-hashed regardless (a full-integrity pass / escape hatch).
     """
     now = int(time.time()) if now is None else now
     result = InventoryResult(location=location.name)
@@ -246,7 +320,15 @@ def inventory_location(
             result.scanned += 1
             try:
                 tags = _read_tags(path)
-                cid = audio_content_id(path)
+                rel_path = str(path.relative_to(root))
+                st = path.stat()
+                byte_size = st.st_size
+                mtime = st.st_mtime_ns
+
+                cid, digest = _identify_or_reuse(
+                    conn, path, location_id=location.id, rel_path=rel_path,
+                    byte_size=byte_size, mtime=mtime, rehash=rehash,
+                )
                 existed = audio_repo.get_by_identity(conn, cid.value) is not None
                 beets_item_id = beets_index.get(os.fsencode(str(path))) if beets_index else None
                 audio = audio_repo.upsert(
@@ -255,16 +337,16 @@ def inventory_location(
                     disc_no=tags["disc_no"], track_no=tags["track_no"],
                     duration_s=tags["duration_s"],
                 )
-                byte_size = path.stat().st_size
                 presence_repo.set_presence(
                     conn,
                     audio_id=audio.id,
                     location_id=location.id,
                     present=True,
                     observed_utc=now,
-                    rel_path=str(path.relative_to(root)),
-                    file_sha256=file_sha256(path),
+                    rel_path=rel_path,
+                    file_sha256=digest,
                     byte_size=byte_size,
+                    mtime=mtime,
                 )
                 done_bytes += byte_size
                 stem_audio[(path.parent, path.stem.lower())] = audio.id
@@ -302,7 +384,14 @@ def inventory_location(
                         continue  # no album to attach this cover/.nolrc to
                     parent_kind, parent_id = SidecarParentKind.ALBUM, album_id
 
-                digest = file_sha256(path)
+                rel_path = str(path.relative_to(root))
+                st = path.stat()
+                byte_size = st.st_size
+                mtime = st.st_mtime_ns
+                digest = _sidecar_digest_or_reuse(
+                    conn, path, location_id=location.id, rel_path=rel_path,
+                    byte_size=byte_size, mtime=mtime, rehash=rehash,
+                )
                 existed = sidecar_repo.get(
                     conn, parent_kind=parent_kind, parent_id=parent_id, role=role
                 ) is not None
@@ -320,9 +409,10 @@ def inventory_location(
                     location_id=location.id,
                     present=True,
                     observed_utc=now,
-                    rel_path=str(path.relative_to(root)),
+                    rel_path=rel_path,
                     file_sha256=digest,
-                    byte_size=path.stat().st_size,
+                    byte_size=byte_size,
+                    mtime=mtime,
                 )
                 result.sidecars += 1
                 result.sidecars_updated += 1 if existed else 0
