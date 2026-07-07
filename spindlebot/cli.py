@@ -360,12 +360,12 @@ def cmd_review(cfg, args: list[str]) -> int:
         target = get_by_name(conn, location_name)
         if target is None:
             return fail(f"Unknown location: {location_name}")
-        authoritative = [
-            loc for loc in location_repo.list_all(conn) if loc.is_authoritative_audio
-        ]
+        # Any other location can source a copy — the authoring library or another
+        # retention location (so a DAP can be filled from DwRugged after prune).
+        sources = [loc for loc in location_repo.list_all(conn) if loc.id != target.id]
         progress_cb, reporter = _make_progress(args, f"review {target.name}")
         result = reconcile_location(
-            conn, target=target, authoritative_locations=authoritative,
+            conn, target=target, source_locations=sources,
             min_copies=cfg.core.min_copies, now=now, progress=progress_cb,
         )
         if reporter is not None:

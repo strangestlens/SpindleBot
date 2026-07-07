@@ -75,7 +75,7 @@ def test_proposes_copy_for_authoritative_content_absent_on_target(conn):
     _scan(conn, rugged.id)
 
     result = reconcile_location(conn, target=rugged,
-                                authoritative_locations=[pending], now=1000)
+                                source_locations=[pending], now=1000)
 
     assert result.copies == 1
     actions = action_repo.list_for_run(conn, result.run_id)
@@ -94,7 +94,7 @@ def test_no_copy_when_target_already_complete(conn):
     _present(conn, x.id, rugged.id)
     _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
     assert result.copies == 0
 
 
@@ -107,8 +107,40 @@ def test_copy_deduped_across_multiple_authoritative_locations(conn):
     _present(conn, x.id, other.id)
     _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending, other], now=1000)
+                               source_locations=[pending, other], now=1000)
     assert result.copies == 1   # proposed once, not per source
+
+
+# ── copy sources (any present location) ───────────────────────────────────────
+
+def test_sources_a_copy_from_a_retention_location(conn):
+    # After Pending is pruned, a DAP must still fill from DwRugged (retention→retention).
+    rugged = _rugged(conn)
+    dap = _loc(conn, "dap", "DAP", is_retention=True)
+    x = _audio(conn, "x" * 32)
+    _present(conn, x.id, rugged.id)
+    _scan(conn, dap.id)
+    result = reconcile_location(conn, target=dap, source_locations=[rugged], now=1000)
+    assert result.copies == 1
+    copy = [a for a in action_repo.list_for_run(conn, result.run_id)
+            if a.action_kind == ActionKind.COPY][0]
+    assert copy.source_location_id == rugged.id and copy.content_id == x.id
+
+
+def test_prefers_authoritative_source_when_content_on_both(conn):
+    pending, rugged = _pending(conn), _rugged(conn)
+    dap = _loc(conn, "dap", "DAP", is_retention=True)
+    x = _audio(conn, "x" * 32)
+    _present(conn, x.id, pending.id)   # authoring
+    _present(conn, x.id, rugged.id)    # and retention
+    _scan(conn, dap.id)
+    # retention listed first, but the authoring library must win the source
+    result = reconcile_location(conn, target=dap,
+                               source_locations=[rugged, pending], now=1000)
+    assert result.copies == 1
+    copy = [a for a in action_repo.list_for_run(conn, result.run_id)
+            if a.action_kind == ActionKind.COPY][0]
+    assert copy.source_location_id == pending.id
 
 
 # ── sidecar copies ────────────────────────────────────────────────────────────
@@ -124,7 +156,7 @@ def test_proposes_sidecar_copy_absent_on_target(conn):
     _scan(conn, rugged.id)
 
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
     actions = action_repo.list_for_run(conn, result.run_id)
     sidecar_copies = [a for a in actions
                       if a.action_kind == ActionKind.COPY and a.content_kind == "sidecar"]
@@ -142,7 +174,7 @@ def test_no_sidecar_copy_when_target_already_has_it(conn):
     _lrc(conn, x.id, rugged.id, "lrc-sha")   # target already has the sidecar
     _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
     assert result.copies == 0
 
 
@@ -156,7 +188,7 @@ def test_missing_detected_when_target_row_predates_latest_scan(conn):
     scan_repo.start_scan(conn, rugged.id, 500)          # newer scan at t=500
 
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
 
     assert result.missing == 1
     upd = [a for a in action_repo.list_for_run(conn, result.run_id)
@@ -175,7 +207,7 @@ def test_missing_not_flagged_below_floor_when_another_retention_copy_exists(conn
     scan_repo.start_scan(conn, rugged.id, 500)
 
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
     assert result.missing == 1
     assert result.below_floor == 0   # dap still holds a copy
 
@@ -186,7 +218,7 @@ def test_recently_confirmed_rows_are_not_missing(conn):
     _present(conn, x.id, rugged.id, observed_utc=500)  # seen at/after scan start
     scan_repo.start_scan(conn, rugged.id, 500)
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
     assert result.missing == 0
 
 
@@ -200,7 +232,7 @@ def test_unscanned_target_skips_all_planning(conn):
     _present(conn, x.id, rugged.id, observed_utc=100)   # stale, but no scan exists
 
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
 
     assert result.target_scanned is False
     assert result.copies == 0 and result.missing == 0 and result.conflicts == 0
@@ -215,7 +247,7 @@ def test_reconcile_records_a_finished_run(conn):
     pending, rugged = _pending(conn), _rugged(conn)
     _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
     run = run_repo.get(conn, result.run_id)
     assert run.kind == RunKind.RECONCILE
     assert run.status == ScanStatus.OK
@@ -246,7 +278,7 @@ def test_divergent_lyrics_across_locations_flag_a_conflict(conn):
     _scan(conn, rugged.id)
 
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
 
     assert result.conflicts == 1
     c = conflict_repo.find_open_for_audio(conn, x.id)
@@ -269,7 +301,7 @@ def test_identical_lyrics_are_not_a_conflict(conn):
     _lrc(conn, x.id, rugged.id, "same-sha")
     _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
     assert result.conflicts == 0
     assert conflict_repo.list_open(conn) == []
 
@@ -280,7 +312,7 @@ def test_lyric_on_one_side_only_is_not_a_conflict(conn):
     _lrc(conn, x.id, pending.id, "sha-AAA")   # rugged has no .lrc for x
     _scan(conn, rugged.id)
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
     assert result.conflicts == 0
 
 
@@ -295,9 +327,9 @@ def test_conflict_row_deduped_but_action_reproposed_each_run(conn):
     _scan(conn, rugged.id)
 
     first = reconcile_location(conn, target=rugged,
-                              authoritative_locations=[pending], now=1000)
+                              source_locations=[pending], now=1000)
     second = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=2000)
+                               source_locations=[pending], now=2000)
 
     assert first.conflicts == 1 and second.conflicts == 1   # re-proposed
     assert len(conflict_repo.list_open(conn)) == 1          # one conflict row
@@ -315,6 +347,6 @@ def test_run_note_records_below_floor(conn):
     _present(conn, x.id, rugged.id, observed_utc=100)
     scan_repo.start_scan(conn, rugged.id, 500)
     result = reconcile_location(conn, target=rugged,
-                               authoritative_locations=[pending], now=1000)
+                               source_locations=[pending], now=1000)
     run = run_repo.get(conn, result.run_id)
     assert "below min_copies" in (run.note or "")
