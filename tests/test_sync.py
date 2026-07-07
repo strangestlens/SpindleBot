@@ -245,6 +245,14 @@ def test_cmd_sync_no_pending_is_a_clean_noop(tmp_path, capsys):
     assert rc == 0 and data["copied"] == 0 and data["failed"] == 0
 
 
+def test_cmd_sync_bare_location_errors_not_unscoped(tmp_path, capsys):
+    # `sync --location` with no value must fail fast, not silently run unscoped.
+    from spindlebot.cli import cmd_sync
+    rc = cmd_sync(_cli_cfg(tmp_path), ["--location"])
+    assert rc == 1
+    assert "requires a destination" in capsys.readouterr().err
+
+
 # ── audit #35: durability, progress completeness, exit code ───────────────────
 
 def test_each_copy_is_committed_so_a_crash_keeps_done_work(tmp_path):

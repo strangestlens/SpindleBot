@@ -441,8 +441,14 @@ def cmd_sync(cfg, args: list[str]) -> int:
     location_name = None
     if "--location" in args:
         idx = args.index("--location")
-        if idx + 1 < len(args):
+        if idx + 1 < len(args) and not args[idx + 1].startswith("-"):
             location_name = args[idx + 1]
+        else:
+            # a bare --location must not silently fall back to an unscoped sync
+            msg = "--location requires a destination name"
+            print(_json.dumps({"error": msg}) if want_json else msg,
+                  file=sys.stdout if want_json else sys.stderr)
+            return 1
 
     now = int(time.time())
     conn = open_db(cfg.core.db_path)
