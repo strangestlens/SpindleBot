@@ -62,6 +62,52 @@ teardown() {
   [ "$sync_line" -lt "$prune_line" ]
 }
 
+@test "a stray .DS_Store alone does not trigger a run" {
+  touch "$BATS_TMPDIR/Pending/.DS_Store"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$MOCK_LOG" ]   # no spindlebot calls — treated as nothing pending
+}
+
+@test "a per-file inventory error is non-fatal — sync + prune still run" {
+  echo x > "$BATS_TMPDIR/Pending/track.flac"
+  cat > "$BATS_TMPDIR/bin/python" <<'MOCK'
+#!/bin/bash
+echo "python $*" >> "${MOCK_LOG:-/dev/null}"
+for a in "$@"; do [ "$a" = "inventory" ] && exit 1; done   # inventory exits nonzero
+exit 0
+MOCK
+  chmod +x "$BATS_TMPDIR/bin/python"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]                       # not wedged
+  grep -qF "spindlebot sync" "$MOCK_LOG"    # pressed on to sync
+  grep -qF "spindlebot prune" "$MOCK_LOG"
+}
+
+@test "prune failure yields a warning notification, not a false success" {
+  echo x > "$BATS_TMPDIR/Pending/track.flac"
+  # a notify mock that records its title argument
+  cat > "$BATS_TMPDIR/pipeline/music-notify.sh" <<'NOTIFY'
+#!/bin/bash
+echo "$1" >> "${NOTIFY_LOG}"
+exit 0
+NOTIFY
+  chmod +x "$BATS_TMPDIR/pipeline/music-notify.sh"
+  export NOTIFY_LOG="$BATS_TMPDIR/notify.log"
+  # python mock that fails only on prune
+  cat > "$BATS_TMPDIR/bin/python" <<'MOCK'
+#!/bin/bash
+echo "python $*" >> "${MOCK_LOG:-/dev/null}"
+for a in "$@"; do [ "$a" = "prune" ] && exit 1; done
+exit 0
+MOCK
+  chmod +x "$BATS_TMPDIR/bin/python"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]                                  # prune failure is non-fatal
+  grep -qF "warnings" "$NOTIFY_LOG"
+  ! grep -qF "Sync complete" "$NOTIFY_LOG"
+}
+
 @test "does NOT prune when sync fails" {
   echo x > "$BATS_TMPDIR/Pending/track.flac"
   cat > "$BATS_TMPDIR/bin/python" <<'MOCK'
