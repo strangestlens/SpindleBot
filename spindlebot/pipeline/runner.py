@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from spindlebot.disc import check_wait, count_discs
+from spindlebot.disc import check_wait, count_discs, group_by_album
 from spindlebot.pipeline.stages.notify import notify
 from spindlebot.pipeline.stages.pretag import posttag, pretag
 
@@ -49,6 +49,22 @@ class ImportConfig:
     # Full SpindleBotConfig — used by stages that need notifications/secrets.
     # Optional so existing tests that build ImportConfig directly don't break.
     spindlebot_cfg: Optional[object] = None
+
+
+@dataclass
+class _AlbumBatch:
+    """One album's worth of work resolved out of a (possibly mixed) Import dir.
+
+    label       — human-readable identifier for logs
+    beet_target — argv tail passed to `beet import`: a single directory string
+                  (single-album/untagged case) or an explicit file-path list
+                  (one album out of a flat mixed dir)
+    disc_source — what disc.check_wait/count_discs read: the directory string or
+                  this album's file list, mirroring beet_target
+    """
+    label: str
+    beet_target: list[str]
+    disc_source: str | Path | list[Path]
 
 
 @dataclass
@@ -108,23 +124,49 @@ class ImportRunner:
             result.success = True
             return result
 
-        # Stage 3: disc check
-        if not cfg.force:
-            wait = check_wait(str(album_dir))
-            if wait:
-                _, have, need = wait.split(":")
-                self._log(f"⏸  multi-disc: have {have} of {need} discs — waiting for the rest")
+        # Resolve the album batches present in album_dir. When only one album
+        # (or an untagged/empty dir) is present, the batch targets the whole
+        # directory — identical to the pre-album-aware behavior. When a flat
+        # Import holds several distinct albums, each becomes its own batch so
+        # disc logic and beet import never conflate them.
+        batches = self._resolve_album_batches(album_dir)
+
+        # Stage 3: disc check — evaluated PER album. A waiting multi-disc album
+        # must not block or contaminate a complete one, so waiting batches are
+        # dropped (logged) and the rest proceed.
+        ready: list[_AlbumBatch] = []
+        if cfg.force:
+            self._log("⏭  disc check skipped (--force)")
+            result.stages.append(StageResult("disc_check", success=True, skipped=True))
+            ready = list(batches)
+        else:
+            waited: list[tuple[str, str, str]] = []
+            for batch in batches:
+                wait = check_wait(batch.disc_source)
+                if wait:
+                    _, have, need = wait.split(":")
+                    waited.append((batch.label, have, need))
+                    self._log(
+                        f"⏸  multi-disc [{batch.label}]: have {have} of {need} discs "
+                        "— waiting for the rest"
+                    )
+                else:
+                    ready.append(batch)
+            if waited:
                 self._log("   (run with --force to import immediately)", echo=False)
+            if not ready:
+                # Everything present is still waiting — nothing to import yet.
                 result.success = True
-                result.stages.append(StageResult("disc_check", success=True, message=f"waiting:{have}:{need}"))
+                have, need = (waited[0][1], waited[0][2]) if waited else ("0", "0")
+                result.stages.append(
+                    StageResult("disc_check", success=True, message=f"waiting:{have}:{need}")
+                )
                 return result
             self._log("✓  disc check")
             result.stages.append(StageResult("disc_check", success=True))
-        else:
-            self._log("⏭  disc check skipped (--force)")
-            result.stages.append(StageResult("disc_check", success=True, skipped=True))
 
-        # Stage 4: pretag
+        # Stage 4: pretag — per-file normalization over the whole directory.
+        # Order-independent; running once matches prior behavior.
         self._log(f"🏷  pretagging")
         self._log(f"Running pretag on: {album_dir}", echo=False)
         try:
@@ -135,41 +177,17 @@ class ImportRunner:
             result.stages.append(StageResult("pretag", success=False, message=str(exc)))
             return result
 
-        # Stage 5: beet import
-        # Capture timestamp immediately before beet runs so all subsequent queries
-        # scope to this import only — not every album imported today.
-        import_start = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-        self._log("💿 importing with beet...")
-        self._log(f"Starting beet import on: {album_dir}", echo=False)
-        if self._echo is not None:
-            # Stream beet output live to the terminal — capture is skipped so
-            # the user sees progress in real time (beet can take a while).
-            beet_proc = subprocess.run(
-                [str(cfg.beet), "import", str(album_dir)],
-            )
-        else:
-            beet_proc = subprocess.run(
-                [str(cfg.beet), "import", str(album_dir)],
-                capture_output=True,
-                text=True,
-            )
-            if beet_proc.stdout.strip():
-                self._log(beet_proc.stdout.strip())
-            if beet_proc.stderr.strip():
-                self._log(beet_proc.stderr.strip())
+        # Stages 5 + 6: import each ready album on its own, then apply its
+        # per-album multidisc fix. run_start scopes the later move/posttag/fetch
+        # to everything imported in this run.
+        run_start = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        for batch in ready:
+            if not self._import_one_album(batch, result):
+                return result
 
-        if beet_proc.returncode != 0:
-            self._log(f"✗  beet import failed (exit {beet_proc.returncode})")
-            self._log(f"Import FAILED (exit {beet_proc.returncode}): {album_dir}", echo=False)
-            result.stages.append(StageResult("beet_import", success=False, message=f"exit {beet_proc.returncode}"))
-            return result
-
-        self._log(f"Import complete: {album_dir}", echo=False)
-        result.stages.append(StageResult("beet_import", success=True))
-
-        # Get artist/album name for notification
+        # Get artist/album name for notification (first album alphabetically).
         ls_proc = subprocess.run(
-            [str(cfg.beet), "ls", "-f", "$albumartist - $album", f"added:{import_start}.."],
+            [str(cfg.beet), "ls", "-f", "$albumartist - $album", f"added:{run_start}.."],
             capture_output=True,
             text=True,
         )
@@ -189,10 +207,7 @@ class ImportRunner:
             if notify_result.telegram_error:
                 self._log(f"Telegram notify failed: {notify_result.telegram_error}")
 
-        # Stage 6: multidisc fix
-        actual_discs = count_discs(str(album_dir))
-        self._fix_multidisc(actual_discs, import_start)
-        result.stages.append(StageResult("multidisc", success=True))
+        import_start = run_start
 
         # Stage 7: beet move
         subprocess.run(
@@ -252,6 +267,99 @@ class ImportRunner:
 
         result.success = True
         return result
+
+    def _resolve_album_batches(self, album_dir: Path) -> list[_AlbumBatch]:
+        """Split album_dir into per-album batches by album_key.
+
+        The common case — a directory holding exactly one album, or an
+        untagged/empty directory — collapses to a SINGLE batch whose target is
+        the directory itself, so behavior is byte-for-byte identical to the
+        pre-album-aware runner (whole-dir beet import + whole-dir disc logic).
+
+        Only when 2+ distinct albums are detected do we split into explicit
+        per-album file-list batches, so a mixed Import never feeds a mixed pile
+        to `beet import`.
+        """
+        groups = group_by_album(album_dir)
+        if len(groups) <= 1:
+            return [_AlbumBatch(
+                label=album_dir.name,
+                beet_target=[str(album_dir)],
+                disc_source=str(album_dir),
+            )]
+
+        self._log(
+            f"Import dir holds {len(groups)} distinct albums — importing each separately",
+            echo=False,
+        )
+        batches: list[_AlbumBatch] = []
+        for i, files in enumerate(groups.values(), start=1):
+            label = self._batch_label(files) or f"{album_dir.name} #{i}"
+            batches.append(_AlbumBatch(
+                label=label,
+                beet_target=[str(p) for p in files],
+                disc_source=files,
+            ))
+        return batches
+
+    @staticmethod
+    def _batch_label(files: list[Path]) -> str:
+        """Best-effort 'artist - album' label for a batch; '' if unreadable."""
+        import mutagen
+
+        for p in files:
+            try:
+                mf = mutagen.File(str(p), easy=True)
+            except Exception:
+                continue
+            if mf is None:
+                continue
+            aa = (mf.get("albumartist") or mf.get("artist") or [""])[0]
+            al = (mf.get("album") or [""])[0]
+            if aa or al:
+                return f"{aa} - {al}".strip(" -")
+        return ""
+
+    def _import_one_album(self, batch: _AlbumBatch, result: ImportResult) -> bool:
+        """Import a single album batch + apply its per-album multidisc fix.
+
+        Returns True on success, False on beet-import failure (caller aborts).
+        Each batch captures its own start timestamp so the multidisc fix scopes
+        to THIS album's rows only, never sibling albums imported in the run.
+        """
+        cfg = self.cfg
+        import_start = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        self._log("💿 importing with beet...")
+        self._log(f"Starting beet import [{batch.label}]", echo=False)
+
+        argv = [str(cfg.beet), "import", *batch.beet_target]
+        if self._echo is not None:
+            # Stream beet output live to the terminal — capture is skipped so
+            # the user sees progress in real time (beet can take a while).
+            beet_proc = subprocess.run(argv)
+        else:
+            beet_proc = subprocess.run(argv, capture_output=True, text=True)
+            if beet_proc.stdout.strip():
+                self._log(beet_proc.stdout.strip())
+            if beet_proc.stderr.strip():
+                self._log(beet_proc.stderr.strip())
+
+        if beet_proc.returncode != 0:
+            self._log(f"✗  beet import failed (exit {beet_proc.returncode})")
+            self._log(f"Import FAILED (exit {beet_proc.returncode}) [{batch.label}]", echo=False)
+            result.stages.append(
+                StageResult("beet_import", success=False, message=f"exit {beet_proc.returncode}")
+            )
+            return False
+
+        self._log(f"Import complete [{batch.label}]", echo=False)
+        result.stages.append(StageResult("beet_import", success=True))
+
+        # Stage 6: multidisc fix — disc count read from THIS album's files.
+        actual_discs = count_discs(batch.disc_source)
+        self._fix_multidisc(actual_discs, import_start)
+        result.stages.append(StageResult("multidisc", success=True))
+        return True
 
     def _fix_multidisc(self, actual_discs: int, import_start: str) -> None:
         cfg = self.cfg

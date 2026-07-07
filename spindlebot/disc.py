@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from spindlebot.core.albums import album_key
+
 # All audio file extensions that beets can import.
 # Used by disc.py, pretag.py, staging.py, and music-import.sh.
 AUDIO_EXTENSIONS: frozenset[str] = frozenset({
@@ -67,14 +69,29 @@ def _parse_disc_tags(f) -> tuple[int, int]:
     return 1, 1
 
 
-def _read_disc_tags(album_dir: str) -> tuple[set[int], set[int]]:
-    """Return (disc_totals, disc_numbers) sets read from all audio files in album_dir."""
+def _coerce_files(album_dir_or_files: str | Path | list[Path]) -> list[Path]:
+    """Accept a directory (path) or an explicit list of audio files.
+
+    A directory is expanded via find_audio_files; a list is used as-is. This
+    lets callers scope disc logic to ONE album's files even when the Import
+    directory is a flat mix of several albums' rips.
+    """
+    if isinstance(album_dir_or_files, (str, Path)):
+        return find_audio_files(album_dir_or_files)
+    return list(album_dir_or_files)
+
+
+def _read_disc_tags(album_dir_or_files: str | Path | list[Path]) -> tuple[set[int], set[int]]:
+    """Return (disc_totals, disc_numbers) sets read from the given audio files.
+
+    Accepts either a directory (all its audio files) or an explicit file list.
+    """
     import mutagen  # local import so the module loads without mutagen installed
 
     disc_totals: set[int] = set()
     disc_numbers: set[int] = set()
 
-    for path in find_audio_files(album_dir):
+    for path in _coerce_files(album_dir_or_files):
         try:
             f = mutagen.File(str(path))
             dn, dt = _parse_disc_tags(f)
@@ -86,15 +103,57 @@ def _read_disc_tags(album_dir: str) -> tuple[set[int], set[int]]:
     return disc_totals, disc_numbers
 
 
-def check_wait(album_dir: str) -> str | None:
+def _read_album_tags(path: Path) -> tuple[str | None, str | None, str | None]:
+    """Best-effort (albumartist, album, mb_albumid) for grouping. Never raises."""
+    import mutagen  # local import so the module loads without mutagen installed
+
+    try:
+        mf = mutagen.File(str(path), easy=True)
+    except Exception:
+        return None, None, None
+    if mf is None:
+        return None, None, None
+
+    def first(key):
+        val = mf.get(key)
+        return val[0] if val else None
+
+    albumartist = first("albumartist") or first("artist")
+    album = first("album")
+    mb_albumid = first("musicbrainz_albumid")
+    return albumartist, album, mb_albumid
+
+
+def group_by_album(album_dir: str | Path) -> dict[str, list[Path]]:
+    """Group a directory's audio files by deterministic album_key.
+
+    Uses the same album_key() grouping used across the DB layer (mb_albumid →
+    albumartist+album). Files whose tags are wholly unreadable/absent fall into
+    a single group keyed by the empty-tags album_key, so an untagged pile still
+    imports as one unit rather than being silently dropped. Preserves sorted
+    file order within each group.
+    """
+    groups: dict[str, list[Path]] = {}
+    for path in find_audio_files(album_dir):
+        albumartist, album, mb_albumid = _read_album_tags(path)
+        key = album_key(albumartist, album, mb_albumid)
+        groups.setdefault(key, []).append(path)
+    return groups
+
+
+def check_wait(album_dir_or_files: str | Path | list[Path]) -> str | None:
     """
     Return "WAIT:have:need" if discs are missing, None if import can proceed.
 
     Holds only when every audio file agrees on disctotal > 1 and we don't
-    have all discs yet.  If the directory is empty or tags are unreadable,
-    returns None (let beets attempt the import rather than blocking forever).
+    have all discs yet.  If empty or tags are unreadable, returns None (let
+    beets attempt the import rather than blocking forever).
+
+    Accepts a directory or an explicit file list; when a mixed Import holds
+    several albums, callers must pass ONE album's files so disc totals aren't
+    conflated across albums.
     """
-    disc_totals, disc_numbers = _read_disc_tags(album_dir)
+    disc_totals, disc_numbers = _read_disc_tags(album_dir_or_files)
     if not disc_totals:
         return None
     if len(disc_totals) == 1:
@@ -104,9 +163,13 @@ def check_wait(album_dir: str) -> str | None:
     return None
 
 
-def count_discs(album_dir: str) -> int:
-    """Return the number of unique disc numbers found across audio files in album_dir."""
-    _, disc_numbers = _read_disc_tags(album_dir)
+def count_discs(album_dir_or_files: str | Path | list[Path]) -> int:
+    """Return the number of unique disc numbers across the given audio files.
+
+    Accepts a directory or an explicit file list; pass ONE album's files so
+    the count reflects that album, not everything present in a mixed Import.
+    """
+    _, disc_numbers = _read_disc_tags(album_dir_or_files)
     return len(disc_numbers) if disc_numbers else 1
 
 
