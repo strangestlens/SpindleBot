@@ -80,7 +80,7 @@ def _ensure_version(conn, doc_id: int, sha: str, origin: str, now: int):
 
 
 def _flag_lyric_divergence(conn, *, target, auth, audio_id, target_sha, auth_sha,
-                           run_id, now, result) -> None:
+                           run_id, now, result) -> bool:
     """Record a cross-location lyric divergence and propose a resolve action.
 
     At this phase the two versions have independent single-location vclocks, so
@@ -102,7 +102,7 @@ def _flag_lyric_divergence(conn, *, target, auth, audio_id, target_sha, auth_sha
     av = _ensure_version(conn, doc.id, auth_sha, auth.name, now)
     if not vclock.concurrent(vclock.from_json(tv.vclock_json),
                              vclock.from_json(av.vclock_json)):
-        return
+        return False
     if conflict_repo.find_open_for_audio(conn, audio_id) is None:
         conflict_repo.open_conflict(conn, audio_id=audio_id, winner_version=av.id,
                                     loser_version=tv.id, now=now)
@@ -113,26 +113,32 @@ def _flag_lyric_divergence(conn, *, target, auth, audio_id, target_sha, auth_sha
         reason=f"lyrics differ between {auth.name} and {target.name}",
     )
     result.conflicts += 1
+    return True
 
 
 def reconcile_location(
     conn,
     *,
     target: Location,
-    authoritative_locations: list[Location],
+    source_locations: list[Location],
     min_copies: int = 1,
     now: int | None = None,
     progress: ProgressCallback | None = None,
 ) -> ReconcileResult:
-    """Plan reconciliation for `target` against the authoritative source(s).
+    """Plan reconciliation for `target` against every location that could source it.
 
-    When `progress` is given, fires a ProgressEvent per proposed action (total is
-    unknown up front, so events are indeterminate).
+    `source_locations` is any location content can be copied FROM — the authoring
+    library AND other retention locations (so once Pending is pruned, a retention
+    target like a DAP can still be filled from DwRugged). The authoritative source
+    is preferred when content lives on more than one. When `progress` is given,
+    fires a ProgressEvent per proposed action (indeterminate total).
     """
     now = int(time.time()) if now is None else now
     run_id = run_repo.start_run(conn, RunKind.RECONCILE, location_id=target.id, now=now)
     result = ReconcileResult(location=target.name, run_id=run_id)
     status = ScanStatus.OK
+    # Prefer the authoring library as the copy source; dedup then records it.
+    sources = sorted(source_locations, key=lambda loc: not loc.is_authoritative_audio)
 
     def _tick(phase: str) -> None:
         proposed_n = result.copies + result.missing + result.conflicts
@@ -153,20 +159,26 @@ def reconcile_location(
             for p in presence_repo.list_for_location(conn, target.id, present=True)
         }
 
-        # COPY: authoritative content the target doesn't have.
+        # Content flows OUT of the non-retention authoring library toward
+        # retention, never back in — so never propose copies INTO it (else a
+        # review of Pending after a prune would offer to re-fill it).
+        target_is_authoring = target.is_authoritative_audio and not target.is_retention
+        copy_sources = [] if target_is_authoring else sources
+
+        # COPY: content the (retention) target doesn't have, from any source.
         proposed: set[int] = set()
-        for auth in authoritative_locations:
-            if auth.id == target.id:
+        for src in copy_sources:
+            if src.id == target.id:
                 continue
-            for p in presence_repo.list_for_location(conn, auth.id, present=True):
+            for p in presence_repo.list_for_location(conn, src.id, present=True):
                 if p.audio_id in target_present or p.audio_id in proposed:
                     continue
                 action_repo.add(
                     conn, run_id=run_id, action_kind=ActionKind.COPY,
                     content_kind=ContentKind.AUDIO, content_id=p.audio_id,
-                    source_location_id=auth.id, dest_location_id=target.id,
+                    source_location_id=src.id, dest_location_id=target.id,
                     rel_path=p.rel_path, now=now,
-                    reason=f"present on {auth.name}, absent on {target.name}",
+                    reason=f"present on {src.name}, absent on {target.name}",
                 )
                 proposed.add(p.audio_id)
                 result.copies += 1
@@ -188,18 +200,18 @@ def reconcile_location(
             for sp in sidecar_presence_repo.list_for_location(conn, target.id, present=True)
         }
         proposed_sc: set[int] = set()
-        for auth in authoritative_locations:
-            if auth.id == target.id:
+        for src in copy_sources:
+            if src.id == target.id:
                 continue
-            for sp in sidecar_presence_repo.list_for_location(conn, auth.id, present=True):
+            for sp in sidecar_presence_repo.list_for_location(conn, src.id, present=True):
                 if sp.sidecar_id in target_sidecars or sp.sidecar_id in proposed_sc:
                     continue
                 action_repo.add(
                     conn, run_id=run_id, action_kind=ActionKind.COPY,
                     content_kind=ContentKind.SIDECAR, content_id=sp.sidecar_id,
-                    source_location_id=auth.id, dest_location_id=target.id,
+                    source_location_id=src.id, dest_location_id=target.id,
                     rel_path=sp.rel_path, now=now,
-                    reason=f"sidecar present on {auth.name}, absent on {target.name}",
+                    reason=f"sidecar present on {src.name}, absent on {target.name}",
                 )
                 proposed_sc.add(sp.sidecar_id)
                 result.copies += 1
@@ -228,22 +240,26 @@ def reconcile_location(
         # location with different per-copy content → flag a divergence.
         target_lrc = _present_lrc(conn, target.id)
         if target_lrc:
-            for auth in authoritative_locations:
-                if auth.id == target.id:
+            conflicted: set[int] = set()   # flag each track's divergence once per run
+            for src in sources:
+                if src.id == target.id:
                     continue
-                auth_lrc = _present_lrc(conn, auth.id)
+                src_lrc = _present_lrc(conn, src.id)
                 for sid, (t_sha, audio_id) in target_lrc.items():
-                    other = auth_lrc.get(sid)
+                    if audio_id in conflicted:
+                        continue
+                    other = src_lrc.get(sid)
                     if other is None:
                         continue
                     a_sha, _ = other
                     if not t_sha or not a_sha or t_sha == a_sha:
                         continue
-                    _flag_lyric_divergence(
-                        conn, target=target, auth=auth, audio_id=audio_id,
+                    if _flag_lyric_divergence(
+                        conn, target=target, auth=src, audio_id=audio_id,
                         target_sha=t_sha, auth_sha=a_sha,
                         run_id=run_id, now=now, result=result,
-                    )
+                    ):
+                        conflicted.add(audio_id)
                     _tick("conflict")
     except BaseException:
         status = ScanStatus.INTERRUPTED

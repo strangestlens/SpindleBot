@@ -57,6 +57,15 @@ def list_for_location(
     return [AudioPresence.from_row(r) for r in rows]
 
 
+def list_for_audio(conn: sqlite3.Connection, audio_id: int) -> list[AudioPresence]:
+    """Every presence row for a content across all locations."""
+    rows = conn.execute(
+        "SELECT * FROM audio_presence WHERE audio_id = ? ORDER BY location_id",
+        (audio_id,),
+    ).fetchall()
+    return [AudioPresence.from_row(r) for r in rows]
+
+
 def count_retention_copies(conn: sqlite3.Connection, audio_id: int) -> int:
     """How many retention locations currently hold this content (the numcopies floor)."""
     return conn.execute(

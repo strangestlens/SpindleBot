@@ -3,16 +3,16 @@ Sync executor: the ONLY code that moves bytes. It runs acknowledged
 `pending_action` rows and nothing else — the reconciler proposes, a human
 acknowledges, this executes.
 
-Phase 3.1 covers COPY, and only COPY, and is deliberately NON-destructive: it
-copies content to a location that lacks it, **verifies the destination hash
-matches the source**, then records presence. It never deletes or prunes — that
-is gated to later commits (delete execution, then the prune cutover). So the
-worst case here is a wasted copy, never lost bytes.
+`execute_pending` covers COPY and is NON-destructive: copy → verify destination
+hash matches source → record presence → mark executed. A hash mismatch fails
+loudly (no presence, retried); per-action errors are isolated.
 
-Each copy: copy_fn(src → dst) → file_sha256(dst) must equal file_sha256(src) →
-write audio_presence(present=1) at the destination → mark the action executed.
-A hash mismatch fails the action loudly (no presence, not executed) so a re-run
-retries it; per-action errors are isolated so one bad file can't stall the rest.
+`prune_released` is the destructive counterpart, and is safe by construction: it
+releases a file from the non-retention authoring library (Pending) ONLY once the
+exact same path+hash is verified present on a retention location — re-hashing the
+retained copy on disk before deleting the original. It never touches a retention
+location, and defaults to a dry run (the caller opts into deletion). So a copy is
+never pruned unless a proven-intact retained copy already exists.
 """
 from __future__ import annotations
 
@@ -140,6 +140,137 @@ def execute_pending(
                      current=action.rel_path or "")
                 if checkpoint is not None and commit_every > 0 and done % commit_every == 0:
                     checkpoint()
+    except BaseException:
+        status = ScanStatus.INTERRUPTED
+        raise
+    finally:
+        run_repo.finish_run(conn, run_id, status=status, now=now)
+
+    return result
+
+
+@dataclass
+class PruneResult:
+    run_id: int
+    dry_run: bool
+    pruned: int = 0        # files released (or would-be, under dry_run)
+    bytes_freed: int = 0
+    skipped: int = 0       # not safely retained → kept on the authoring library
+    below_floor: int = 0   # released audio now on < min_copies retention copies
+    errors: list[str] = field(default_factory=list)
+
+
+def _cleanup_empty_dirs(directory: Path, root: Path) -> None:
+    """Remove now-empty parent dirs up to (not including) root. Best-effort."""
+    while directory != root and root in directory.parents:
+        try:
+            directory.rmdir()   # only succeeds when empty
+        except OSError:
+            break
+        directory = directory.parent
+
+
+def prune_released(
+    conn,
+    *,
+    now: int | None = None,
+    dry_run: bool = True,
+    verify: bool = True,
+    min_copies: int = 1,
+    verify_fn: Callable[[Path], str] = file_sha256,
+    progress: ProgressCallback | None = None,
+) -> PruneResult:
+    """Release files from the non-retention authoring library once safely retained.
+
+    A file is pruned ONLY when the exact same rel_path + file_sha256 is present on
+    a retention location AND (when `verify`) that retained copy re-hashes correctly
+    on disk right now. Retention locations are never touched. Defaults to a dry run.
+
+    This is the "prune at first retention copy" model — it does NOT wait for
+    min_copies retention copies (releasing a non-retention copy never lowers the
+    retention count anyway). `min_copies` is used only to WARN via
+    result.below_floor when a released track is left on fewer than that many
+    retention copies (e.g. one drive, awaiting a DAP).
+    """
+    now = int(time.time()) if now is None else now
+    run_id = run_repo.start_run(conn, RunKind.SYNC, now=now,
+                                note="prune (dry-run)" if dry_run else "prune")
+    result = PruneResult(run_id=run_id, dry_run=dry_run)
+    status = ScanStatus.OK
+    locations = {loc.id: loc for loc in location_repo.list_all(conn)}
+    retention = {lid for lid, loc in locations.items() if loc.is_retention}
+    roots: dict[int, Path | None] = {}
+
+    def _root(loc):
+        if loc.id not in roots:
+            r = resolve_root(loc)
+            roots[loc.id] = Path(r) if r is not None else None
+        return roots[loc.id]
+
+    def _retained(rel_path, sha, presence_rows) -> bool:
+        for rp in presence_rows:
+            if (rp.location_id in retention and rp.present
+                    and rp.rel_path == rel_path and rp.file_sha256 == sha):
+                rroot = _root(locations[rp.location_id])
+                if rroot is None:
+                    continue
+                rfile = rroot / rp.rel_path
+                if not rfile.is_file():
+                    continue
+                if verify and verify_fn(rfile) != sha:
+                    continue
+                return True
+        return False
+
+    def _release(loc, root, rel_path, byte_size, mark_absent) -> None:
+        pfile = root / rel_path
+        try:
+            size = pfile.stat().st_size if pfile.exists() else (byte_size or 0)
+            if not dry_run:
+                pfile.unlink(missing_ok=True)
+                mark_absent()
+                _cleanup_empty_dirs(pfile.parent, root)
+            result.pruned += 1
+            result.bytes_freed += size
+            emit(progress, phase="prune", done=result.pruned, total=0, current=rel_path)
+        except OSError as exc:
+            result.errors.append(f"{pfile}: {exc}")
+
+    try:
+        for loc in locations.values():
+            # Only the non-retention authoring library is ever prunable.
+            if not (loc.is_authoritative_audio and not loc.is_retention and loc.enabled):
+                continue
+            root = _root(loc)
+            if root is None:
+                result.errors.append(f"{loc.name}: not mounted or identified")
+                continue
+
+            for p in presence_repo.list_for_location(conn, loc.id, present=True):
+                if not p.rel_path or not p.file_sha256 or not _retained(
+                        p.rel_path, p.file_sha256,
+                        presence_repo.list_for_audio(conn, p.audio_id)):
+                    result.skipped += 1
+                    continue
+                _release(loc, root, p.rel_path, p.byte_size, mark_absent=lambda p=p: (
+                    presence_repo.set_presence(
+                        conn, audio_id=p.audio_id, location_id=loc.id, present=False,
+                        observed_utc=now, rel_path=p.rel_path,
+                        file_sha256=p.file_sha256, byte_size=p.byte_size)))
+                if presence_repo.count_retention_copies(conn, p.audio_id) < min_copies:
+                    result.below_floor += 1
+
+            for sp in sidecar_presence_repo.list_for_location(conn, loc.id, present=True):
+                if not sp.rel_path or not sp.file_sha256 or not _retained(
+                        sp.rel_path, sp.file_sha256,
+                        sidecar_presence_repo.list_for_sidecar(conn, sp.sidecar_id)):
+                    result.skipped += 1
+                    continue
+                _release(loc, root, sp.rel_path, sp.byte_size, mark_absent=lambda sp=sp: (
+                    sidecar_presence_repo.set_presence(
+                        conn, sidecar_id=sp.sidecar_id, location_id=loc.id, present=False,
+                        observed_utc=now, rel_path=sp.rel_path,
+                        file_sha256=sp.file_sha256, byte_size=sp.byte_size)))
     except BaseException:
         status = ScanStatus.INTERRUPTED
         raise
