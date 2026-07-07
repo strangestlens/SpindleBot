@@ -174,6 +174,15 @@ def reconcile_location(
 
         # COPY sidecars: authoritative sidecars (.lrc / cover / .nolrc) the
         # target lacks — so everything, not just the audio, reaches retention.
+        #
+        # KNOWN LIMIT: sidecar_presence keeps one rel_path per (sidecar, location),
+        # so a multi-file sidecar (e.g. a per-disc cover.jpg duplicated across disc
+        # subfolders → one album COVER row) copies only the recorded path; the
+        # other identical files aren't tracked and don't get copied. .lrc is
+        # per-track so unaffected. Consequence for prune: it must verify the EXACT
+        # path on retention before removing a Pending file, never just the content
+        # — else an un-copied per-disc cover could be the only copy pruned away.
+        # Proper fix is the "track all paths per (content, location)" model.
         target_sidecars = {
             sp.sidecar_id
             for sp in sidecar_presence_repo.list_for_location(conn, target.id, present=True)
