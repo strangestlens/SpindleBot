@@ -143,6 +143,17 @@ def test_prefers_authoritative_source_when_content_on_both(conn):
     assert copy.source_location_id == pending.id
 
 
+def test_never_proposes_copies_into_the_authoring_library(conn):
+    # After a prune, reviewing Pending must NOT offer to re-fill it from retention.
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _present(conn, x.id, rugged.id)   # on retention; Pending doesn't have it (pruned)
+    _scan(conn, pending.id)
+    result = reconcile_location(conn, target=pending,
+                               source_locations=[rugged], now=1000)
+    assert result.copies == 0
+
+
 # ── sidecar copies ────────────────────────────────────────────────────────────
 
 def test_proposes_sidecar_copy_absent_on_target(conn):
@@ -292,6 +303,24 @@ def test_divergent_lyrics_across_locations_flag_a_conflict(conn):
     assert len(versions) == 2
     assert vclock.concurrent(vclock.from_json(versions[0].vclock_json),
                              vclock.from_json(versions[1].vclock_json))
+
+
+def test_conflict_flagged_once_across_multiple_diverging_sources(conn):
+    # With generalized sources, a track diverging from two sources must still be
+    # one conflict + one resolve action, not double-counted.
+    pending, rugged = _pending(conn), _rugged(conn)
+    dap = _loc(conn, "dap", "DAP", is_retention=True)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, dap.id, "sha-TTT")      # target
+    _lrc(conn, x.id, pending.id, "sha-AAA")  # source 1 diverges
+    _lrc(conn, x.id, rugged.id, "sha-BBB")   # source 2 diverges
+    _scan(conn, dap.id)
+    result = reconcile_location(conn, target=dap,
+                               source_locations=[pending, rugged], now=1000)
+    assert result.conflicts == 1
+    actions = [a for a in action_repo.list_for_run(conn, result.run_id)
+               if a.action_kind == ActionKind.RESOLVE_CONFLICT]
+    assert len(actions) == 1
 
 
 def test_identical_lyrics_are_not_a_conflict(conn):

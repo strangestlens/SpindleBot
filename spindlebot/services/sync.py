@@ -156,6 +156,7 @@ class PruneResult:
     pruned: int = 0        # files released (or would-be, under dry_run)
     bytes_freed: int = 0
     skipped: int = 0       # not safely retained → kept on the authoring library
+    below_floor: int = 0   # released audio now on < min_copies retention copies
     errors: list[str] = field(default_factory=list)
 
 
@@ -175,6 +176,7 @@ def prune_released(
     now: int | None = None,
     dry_run: bool = True,
     verify: bool = True,
+    min_copies: int = 1,
     verify_fn: Callable[[Path], str] = file_sha256,
     progress: ProgressCallback | None = None,
 ) -> PruneResult:
@@ -183,6 +185,12 @@ def prune_released(
     A file is pruned ONLY when the exact same rel_path + file_sha256 is present on
     a retention location AND (when `verify`) that retained copy re-hashes correctly
     on disk right now. Retention locations are never touched. Defaults to a dry run.
+
+    This is the "prune at first retention copy" model — it does NOT wait for
+    min_copies retention copies (releasing a non-retention copy never lowers the
+    retention count anyway). `min_copies` is used only to WARN via
+    result.below_floor when a released track is left on fewer than that many
+    retention copies (e.g. one drive, awaiting a DAP).
     """
     now = int(time.time()) if now is None else now
     run_id = run_repo.start_run(conn, RunKind.SYNC, now=now,
@@ -249,6 +257,8 @@ def prune_released(
                         conn, audio_id=p.audio_id, location_id=loc.id, present=False,
                         observed_utc=now, rel_path=p.rel_path,
                         file_sha256=p.file_sha256, byte_size=p.byte_size)))
+                if presence_repo.count_retention_copies(conn, p.audio_id) < min_copies:
+                    result.below_floor += 1
 
             for sp in sidecar_presence_repo.list_for_location(conn, loc.id, present=True):
                 if not sp.rel_path or not sp.file_sha256 or not _retained(

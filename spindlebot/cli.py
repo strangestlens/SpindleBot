@@ -484,8 +484,8 @@ def cmd_prune(cfg, args: list[str]) -> int:
     try:
         register_from_config(conn, cfg, now)
         progress_cb, reporter = _make_progress(args, "prune")
-        result = prune_released(conn, now=now, dry_run=not execute,
-                                verify=verify, progress=progress_cb)
+        result = prune_released(conn, now=now, dry_run=not execute, verify=verify,
+                                min_copies=cfg.core.min_copies, progress=progress_cb)
         if reporter is not None:
             reporter.close()
         conn.commit()
@@ -499,6 +499,11 @@ def cmd_prune(cfg, args: list[str]) -> int:
         print(f"{verb} {result.pruned} file(s) "
               f"({result.bytes_freed / (1024 * 1024):.1f} MB), "
               f"{result.skipped} kept (not yet safely retained).")
+        if result.below_floor:
+            print(f"  ⚠ {result.below_floor} released track(s) are now on fewer "
+                  f"than min_copies={cfg.core.min_copies} retention copies "
+                  f"(single-copy until another retention location is added).",
+                  file=sys.stderr)
         if result.dry_run and result.pruned:
             print("Re-run with --execute to actually delete.")
         for e in result.errors:

@@ -176,6 +176,29 @@ def test_prune_cleans_up_empty_dirs(conn, tmp_path):
     assert volumes.read_marker(Path(pending.root_path)) is not None
 
 
+def test_prune_warns_when_left_below_min_copies(conn, tmp_path):
+    # one retention copy, min_copies=2 → released but flagged single-copy
+    pending, rugged, a, rel, pf, rf = _retained_audio(conn, tmp_path)
+    result = prune_released(conn, now=1000, dry_run=False, min_copies=2)
+    assert result.pruned == 1 and result.below_floor == 1
+    assert not pf.exists()   # still released — at-first-copy, warning not a gate
+
+
+def test_prune_no_warning_when_at_min_copies(conn, tmp_path):
+    pending, rugged = _pending(conn, tmp_path), _rugged(conn, tmp_path)
+    dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", retention=True)
+    a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
+    rel = "A/01.flac"
+    pf, rf, df = _put(pending, rel), _put(rugged, rel), _put(dap, rel)
+    sha = file_sha256(pf)
+    for loc in (pending, rugged, dap):
+        presence_repo.set_presence(conn, audio_id=a.id, location_id=loc.id, present=True,
+                                   observed_utc=0, rel_path=rel, file_sha256=sha,
+                                   byte_size=pf.stat().st_size)
+    result = prune_released(conn, now=1000, dry_run=False, min_copies=2)
+    assert result.pruned == 1 and result.below_floor == 0   # two retention copies
+
+
 # ── CLI: dry-run default, --execute to delete ─────────────────────────────────
 
 def _put_at(root: Path, rel: str, data=b"lossless" * 64) -> Path:
