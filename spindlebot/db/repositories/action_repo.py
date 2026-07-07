@@ -88,15 +88,19 @@ def list_pending_execution(
     conn: sqlite3.Connection,
     *,
     action_kind: ActionKind | str | None = None,
+    dest_location_id: int | None = None,
 ) -> list[PendingAction]:
     """Acknowledged-but-not-yet-executed actions, oldest first — the executor's
-    work queue. Optionally filtered to one action_kind."""
+    work queue. Optionally filtered to one action_kind and/or destination."""
     sql = ("SELECT * FROM pending_action "
            "WHERE acknowledged = 1 AND executed_utc IS NULL")
     params: list = []
     if action_kind is not None:
         sql += " AND action_kind = ?"
         params.append(str(ActionKind(action_kind)))
+    if dest_location_id is not None:
+        sql += " AND dest_location_id = ?"
+        params.append(dest_location_id)
     rows = conn.execute(sql + " ORDER BY id", params).fetchall()
     return [PendingAction.from_row(r) for r in rows]
 

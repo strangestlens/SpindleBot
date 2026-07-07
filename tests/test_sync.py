@@ -124,6 +124,29 @@ def test_copy_marks_action_executed_and_is_idempotent(conn, tmp_path):
     assert action_repo.list_pending_execution(conn) == []
 
 
+def test_sync_scoped_to_a_destination_ignores_other_dests(conn, tmp_path):
+    # The DwRugged mount agent must only execute DwRugged's copies, not queued
+    # copies for another (possibly unmounted) destination like a DAP.
+    pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
+    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", is_retention=True)
+    x, y = _audio(conn, "x" * 32), _audio(conn, "y" * 32)
+    for a, rel in [(x, "x.flac"), (y, "y.flac")]:
+        src = Path(pending.root_path) / rel
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(rel.encode() * 50)
+    _propose_copy(conn, audio=x, src_loc=pending, dst_loc=rugged, rel_path="x.flac")
+    _propose_copy(conn, audio=y, src_loc=pending, dst_loc=dap, rel_path="y.flac")
+
+    result = execute_pending(conn, copy_fn=_good_copy, now=1000, dest_location_id=rugged.id)
+
+    assert result.copied == 1                                   # only the DwRugged copy ran
+    assert (Path(rugged.root_path) / "x.flac").is_file()
+    assert not (Path(dap.root_path) / "y.flac").exists()        # DAP copy untouched
+    # the DAP action is still queued (acknowledged, unexecuted)
+    assert len(action_repo.list_pending_execution(conn)) == 1
+
+
 def test_source_bytes_survive_the_copy(conn, tmp_path):
     # The COPY-not-MOVE regression guard vs the old rsync --remove-source-files.
     pending, rugged, audio, rel, src = _setup(conn, tmp_path)

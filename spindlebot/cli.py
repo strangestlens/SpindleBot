@@ -11,7 +11,7 @@ Usage:
     python -m spindlebot review --location <name> [--yes] [--json] [-v|--quiet]  Plan reconciliation (--yes also acknowledges); no bytes moved
     python -m spindlebot review --acknowledge-run <run_id>        Acknowledge every proposed action in a run
     python -m spindlebot review --acknowledge <id[,id...]>        Acknowledge specific proposed actions
-    python -m spindlebot sync [--json] [-v|--quiet]              Execute acknowledged copies (copy→verify→presence); adds copies only
+    python -m spindlebot sync [--location <name>] [--json] [-v|--quiet]   Execute acknowledged copies (copy→verify→presence); --location scopes to one dest
     python -m spindlebot prune [--execute] [--json] [-v|--quiet]  Release Pending files verified on retention (DRY-RUN unless --execute)
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
@@ -434,17 +434,34 @@ def cmd_sync(cfg, args: list[str]) -> int:
     from dataclasses import asdict
 
     from spindlebot.db.connection import open_db
-    from spindlebot.services.locations import register_from_config
+    from spindlebot.services.locations import get_by_name, register_from_config
     from spindlebot.services.sync import execute_pending
 
     want_json = "--json" in args
+    location_name = None
+    if "--location" in args:
+        idx = args.index("--location")
+        if idx + 1 < len(args):
+            location_name = args[idx + 1]
+
     now = int(time.time())
     conn = open_db(cfg.core.db_path)
     try:
         register_from_config(conn, cfg, now)
+        dest_id = None
+        if location_name:
+            dest = get_by_name(conn, location_name)
+            if dest is None:
+                msg = f"Unknown location: {location_name}"
+                if want_json:
+                    print(_json.dumps({"error": msg}))
+                else:
+                    print(msg, file=sys.stderr)
+                return 1
+            dest_id = dest.id
         progress_cb, reporter = _make_progress(args, "sync")
-        result = execute_pending(conn, now=now, progress=progress_cb,
-                                 checkpoint=conn.commit)
+        result = execute_pending(conn, now=now, dest_location_id=dest_id,
+                                 progress=progress_cb, checkpoint=conn.commit)
         if reporter is not None:
             reporter.close()
         conn.commit()

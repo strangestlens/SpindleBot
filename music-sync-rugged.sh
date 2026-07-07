@@ -21,7 +21,7 @@ PENDING="$SPINDLEBOT_PENDING_DIR"
 REMOTE="$SPINDLEBOT_DESTINATION_PATH"
 DEST_NAME="DwRugged"                 # the [[destinations]] name; matches WatchPaths
 LOGFILE="$SPINDLEBOT_LOG_DIR/rugged-sync.log"
-LOCKFILE="/tmp/music-sync-rugged.lock"
+LOCKFILE="${SPINDLEBOT_RUGGED_LOCKFILE:-/tmp/music-sync-rugged.lock}"
 PYTHON="$SPINDLEBOT_PYTHON"
 NOTIFY="$SPINDLEBOT_PIPELINE_DIR/music-notify.sh"
 DB="$SPINDLEBOT_BEETS_DB"
@@ -68,8 +68,10 @@ if ! sb review --location "$DEST_NAME" --yes --quiet; then
   exit 1
 fi
 
-# 3. Copy → verify → record presence. If this fails, leave Pending intact.
-if ! sb sync --quiet; then
+# 3. Copy → verify → record presence, scoped to DwRugged so we don't try to
+#    execute copies queued for some other (possibly unmounted) destination.
+#    If this fails, leave Pending intact.
+if ! sb sync --location "$DEST_NAME" --quiet; then
   log "sync failed — leaving Pending untouched, NOT pruning"
   "$NOTIFY" "Sync failed" "copy/verify error — Pending untouched, see rugged-sync.log"
   exit 1

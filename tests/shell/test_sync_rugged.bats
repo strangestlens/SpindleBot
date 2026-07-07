@@ -26,13 +26,13 @@ setup() {
 
   export PATH="$BATS_TMPDIR/bin:$PATH"
   export MOCK_LOG="$BATS_TMPDIR/mock.log"
-  rm -f /tmp/music-sync-rugged.lock
+  # isolate the lockfile to the temp dir — never touch /tmp / a real agent's lock
+  export SPINDLEBOT_RUGGED_LOCKFILE="$BATS_TMPDIR/rugged.lock"
 }
 
 teardown() {
   export HOME="$REAL_HOME"
   rm -rf "$BATS_TMPDIR"
-  rm -f /tmp/music-sync-rugged.lock
 }
 
 @test "skips (no spindlebot calls) when nothing is pending" {
@@ -55,7 +55,7 @@ teardown() {
   [ "$status" -eq 0 ]
   grep -qF "spindlebot inventory" "$MOCK_LOG"
   grep -qF "spindlebot review --location DwRugged --yes" "$MOCK_LOG"
-  grep -qF "spindlebot sync" "$MOCK_LOG"
+  grep -qF "spindlebot sync --location DwRugged" "$MOCK_LOG"
   grep -qF "spindlebot prune --execute" "$MOCK_LOG"
   sync_line=$(grep -n "spindlebot sync" "$MOCK_LOG" | head -1 | cut -d: -f1)
   prune_line=$(grep -n "spindlebot prune" "$MOCK_LOG" | head -1 | cut -d: -f1)
