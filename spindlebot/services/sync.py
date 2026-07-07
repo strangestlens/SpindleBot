@@ -13,6 +13,12 @@ exact same path+hash is verified present on a retention location — re-hashing 
 retained copy on disk before deleting the original. It never touches a retention
 location, and defaults to a dry run (the caller opts into deletion). So a copy is
 never pruned unless a proven-intact retained copy already exists.
+
+`execute_deletes` removes a RETENTION copy — the GATED destructive op, distinct
+from prune. It runs acknowledged DELETE `pending_action` rows, but only after
+proving that removing THIS copy still leaves at least `min_copies` retention
+copies of the content. A delete that would drop retention below the floor is
+REFUSED (never touched); it also defaults to a dry run.
 """
 from __future__ import annotations
 
@@ -275,6 +281,108 @@ def prune_released(
                         conn, sidecar_id=sp.sidecar_id, location_id=loc.id, present=False,
                         observed_utc=now, rel_path=sp.rel_path,
                         file_sha256=sp.file_sha256, byte_size=sp.byte_size)))
+    except BaseException:
+        status = ScanStatus.INTERRUPTED
+        raise
+    finally:
+        run_repo.finish_run(conn, run_id, status=status, now=now)
+
+    return result
+
+
+@dataclass
+class DeleteResult:
+    run_id: int
+    dry_run: bool
+    deleted: int = 0       # retention copies removed (or would-be, under dry_run)
+    bytes_freed: int = 0
+    refused: int = 0       # would drop retention below min_copies → not deleted
+    skipped: int = 0       # not a DELETE / unresolvable location / already gone
+    errors: list[str] = field(default_factory=list)
+
+
+def execute_deletes(
+    conn,
+    *,
+    now: int | None = None,
+    dry_run: bool = True,
+    min_copies: int = 1,
+    progress: ProgressCallback | None = None,
+) -> DeleteResult:
+    """Execute acknowledged DELETE actions — remove a RETENTION copy, GATED.
+
+    Reads only acknowledged, not-yet-executed DELETE rows (the acknowledge gate:
+    a proposed-but-unacknowledged delete never runs). For each, the copy being
+    removed lives at the action's `source_location_id`. Before deleting, it counts
+    how many retention copies would REMAIN if this one were dropped (present
+    retention copies of the content, minus this copy if it is itself a present
+    retention copy). If that would fall below `min_copies`, the delete is REFUSED
+    — the file is untouched, presence unchanged, the action left un-executed, and
+    a `refused` entry surfaced. This is the hard invariant: retention copies can
+    never be driven below the floor.
+
+    The non-retention Pending/authoring copy is never counted toward the floor
+    (that is `count_retention_copies`'s job) — so it can never make a delete look
+    safe. Defaults to a dry run (the caller opts into deletion).
+    """
+    now = int(time.time()) if now is None else now
+    run_id = run_repo.start_run(conn, RunKind.SYNC, now=now,
+                                note="delete (dry-run)" if dry_run else "delete")
+    result = DeleteResult(run_id=run_id, dry_run=dry_run)
+    status = ScanStatus.OK
+    actions = action_repo.list_pending_execution(conn, action_kind=ActionKind.DELETE)
+    total = len(actions)
+    done = 0
+    emit(progress, phase="delete", done=0, total=total)
+    try:
+        for action in actions:
+            try:
+                # DELETE is only defined for audio retention copies today.
+                if action.content_kind != ContentKind.AUDIO:
+                    result.skipped += 1
+                    continue
+                loc = (location_repo.get_by_id(conn, action.source_location_id)
+                       if action.source_location_id is not None else None)
+                root = resolve_root(loc) if loc else None
+                if root is None or not action.rel_path:
+                    result.skipped += 1
+                    result.errors.append(
+                        f"action {action.id}: location not mounted or identified")
+                    continue
+
+                pres = presence_repo.get(conn, action.content_id, loc.id)
+                self_counts = bool(
+                    loc.is_retention and pres is not None and pres.present)
+                would_remain = (
+                    presence_repo.count_retention_copies(conn, action.content_id)
+                    - (1 if self_counts else 0))
+                if would_remain < min_copies:
+                    result.refused += 1
+                    result.errors.append(
+                        f"action {action.id}: refused — deleting would leave "
+                        f"{would_remain} retention copies (< min_copies={min_copies})")
+                    continue
+
+                target = Path(root) / action.rel_path
+                size = target.stat().st_size if target.is_file() else (
+                    (pres.byte_size if pres else 0) or 0)
+                if not dry_run:
+                    target.unlink(missing_ok=True)
+                    presence_repo.set_presence(
+                        conn, audio_id=action.content_id, location_id=loc.id,
+                        present=False, observed_utc=now, rel_path=action.rel_path,
+                        file_sha256=pres.file_sha256 if pres else None,
+                        byte_size=pres.byte_size if pres else None)
+                    _cleanup_empty_dirs(target.parent, Path(root))
+                    action_repo.mark_executed(conn, action.id, now)
+                result.deleted += 1
+                result.bytes_freed += size
+            except OSError as exc:
+                result.errors.append(f"action {action.id}: {exc}")
+            finally:
+                done += 1
+                emit(progress, phase="delete", done=done, total=total,
+                     current=action.rel_path or "")
     except BaseException:
         status = ScanStatus.INTERRUPTED
         raise
