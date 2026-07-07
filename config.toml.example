@@ -10,6 +10,7 @@ import_dir  = "~/Library/Application Support/SpindleBot/Import"
 pending_dir = "~/Library/Application Support/SpindleBot/Pending"
 log_dir     = "~/.config/beets"    # watcher.log and rugged-sync.log land here
 archive_dir = "~/Music/All Discs"  # XLD .log files archived here after import
+duplicates_dir = "~/Library/Application Support/SpindleBot/Duplicates"  # rips already in the library are moved here (never stranded in Import)
 
 [tools]
 beet         = "/opt/homebrew/bin/beet"

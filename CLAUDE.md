@@ -137,6 +137,7 @@ tests/
 3. **disc check** — `check_wait()`: wait if multi-disc set incomplete (bypass with `--force`)
 4. **pretag** — normalize tags before beet sees them
 5. **beet import** — streams live to terminal when echo callback set
+   - **duplicate handling** (per album batch): a green `beet import` that adds NO new items is checked against the existing library (match by `musicbrainz_albumid`, else `albumartist`+`album`, on items added *before* the import). A match ⇒ already-in-library duplicate: log the `⏭` milestone, move the rip to `duplicates_dir/<artist>/<album>/`, notify, and skip the remaining stages for it. No match ⇒ a *different* no-op failure: warn and LEAVE the files in Import (never moved/discarded).
 6. **multidisc fix** — patch `disctotal` + `multidisc` flex attr in beets DB via `sqlite3`
 7. **beet move** — relocate to canonical library paths
 8. **posttag** — strip beet alias tags, truncate DATE to year
@@ -229,6 +230,7 @@ SpindleBot DB would track copies across devices.
 - Config: `~/.config/spindlebot/config.toml` + `secrets.toml`
 - Import area: `~/Library/Application Support/SpindleBot/Import` (active import; formerly `~/Music/Staging`)
 - Pending area: `~/Library/Application Support/SpindleBot/Pending` → `/Volumes/DwRugged/Music/Library` (processed albums awaiting distribution; formerly `~/Music/Library`)
+- Duplicates area: `~/Library/Application Support/SpindleBot/Duplicates` (already-in-library rips moved here by import instead of stranding in Import; `core.duplicates_dir`, env `SPINDLEBOT_DUPLICATES_DIR`)
 - beets DB: `~/.config/beets/library.db`
 - launchd agents: `com.strangestlens.music-watcher`, `com.strangestlens.music-sync-rugged`
 

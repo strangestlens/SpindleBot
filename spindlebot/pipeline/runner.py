@@ -13,7 +13,10 @@ Stages (in order):
   2. double-fire guard    — .log mode only: missing log = already archived, exit cleanly
   3. disc check           — wait if multi-disc set is incomplete (unless --force)
   4. pretag               — normalize tags before beet import
-  5. beet import          — beet import <album_dir>
+  5. beet import          — beet import <album_dir>; a green import that adds
+                            NOTHING and matches an existing album is an
+                            already-in-library duplicate → move it to
+                            duplicates_dir + notify + skip its later stages
   6. multidisc fix        — patch disctotal + multidisc flex attr in beets DB
   7. beet move            — relocate files to canonical library paths
   8. posttag              — strip beet alias tags, truncate DATE to year
@@ -29,9 +32,28 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from spindlebot.disc import check_wait, count_discs, group_by_album
+import shutil
+
+from spindlebot.disc import check_wait, count_discs, find_audio_files, group_by_album
 from spindlebot.pipeline.stages.notify import notify
 from spindlebot.pipeline.stages.pretag import posttag, pretag
+
+
+def _safe_name(name: str) -> str:
+    """Filesystem-safe single path component (no separators, never empty)."""
+    cleaned = name.replace("/", "_").replace("\x00", "").strip().strip(".")
+    return cleaned or "Unknown"
+
+
+def _unique_dest(dest: Path) -> Path:
+    """Return a non-colliding path by suffixing ' (2)', ' (3)', … before the ext."""
+    stem, suffix, parent = dest.stem, dest.suffix, dest.parent
+    n = 2
+    while True:
+        candidate = parent / f"{stem} ({n}){suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
 
 
 @dataclass
@@ -44,6 +66,7 @@ class ImportConfig:
     pending_dir: Path   # processed albums awaiting distribution (beets canonical dir)
     import_dir: Path    # active import area (rips/downloads land here)
     archive: Path
+    duplicates_dir: Path  # already-in-library rips moved here rather than stranded in Import
     pipeline_dir: Path
     log_file: Path
     # Full SpindleBotConfig — used by stages that need notifications/secrets.
@@ -61,10 +84,13 @@ class _AlbumBatch:
                   (one album out of a flat mixed dir)
     disc_source — what disc.check_wait/count_discs read: the directory string or
                   this album's file list, mirroring beet_target
+    source_files— the concrete audio files backing this batch, used when a
+                  duplicate is detected and the rip must be moved out of Import
     """
     label: str
     beet_target: list[str]
     disc_source: str | Path | list[Path]
+    source_files: list[Path]
 
 
 @dataclass
@@ -194,8 +220,10 @@ class ImportRunner:
         lines = sorted(set(ls_proc.stdout.strip().splitlines()))
         result.artist_album = lines[0] if lines else album_dir.name
 
-        # Notify (fire-and-forget, non-critical)
-        if cfg.spindlebot_cfg is not None:
+        # Notify (fire-and-forget, non-critical). Skip when nothing new was
+        # imported this run — an all-duplicate run already notified per album,
+        # and "reply sync" would be misleading with nothing to distribute.
+        if lines and cfg.spindlebot_cfg is not None:
             title = "Rip complete" if has_log else "Import complete"
             notify_result = notify(
                 title,
@@ -286,6 +314,7 @@ class ImportRunner:
                 label=album_dir.name,
                 beet_target=[str(album_dir)],
                 disc_source=str(album_dir),
+                source_files=find_audio_files(album_dir),
             )]
 
         self._log(
@@ -299,6 +328,7 @@ class ImportRunner:
                 label=label,
                 beet_target=[str(p) for p in files],
                 disc_source=files,
+                source_files=list(files),
             ))
         return batches
 
@@ -355,11 +385,128 @@ class ImportRunner:
         self._log(f"Import complete [{batch.label}]", echo=False)
         result.stages.append(StageResult("beet_import", success=True))
 
+        # Did this album actually produce new items? beet skips ("already in the
+        # library") without a nonzero exit, so a green import can still be a
+        # no-op. Anything added since import_start is genuinely new.
+        new_paths = self._items_added_since(import_start)
+        if not new_paths:
+            self._handle_no_new_items(batch, import_start, result)
+            # A duplicate (or an unmatched no-op) produced no rows to fix.
+            return True
+
         # Stage 6: multidisc fix — disc count read from THIS album's files.
         actual_discs = count_discs(batch.disc_source)
         self._fix_multidisc(actual_discs, import_start)
         result.stages.append(StageResult("multidisc", success=True))
         return True
+
+    def _items_added_since(self, since: str) -> list[str]:
+        """beets item paths added at/after `since` (this batch's window)."""
+        proc = subprocess.run(
+            [str(self.cfg.beet), "ls", "-f", "$path", f"added:{since}.."],
+            capture_output=True,
+            text=True,
+        )
+        return [p for p in proc.stdout.strip().splitlines() if p]
+
+    def _existing_album_dir(self, batch: _AlbumBatch, before: str) -> tuple[str, int] | None:
+        """Directory + track count of a pre-existing beets album matching this
+        batch, considering only items added BEFORE this import attempt.
+
+        Match by musicbrainz_albumid when the rip carries one, else by
+        albumartist+album. Returns None when beets has no such album — i.e. the
+        no-op was NOT a duplicate but some other import failure.
+        """
+        aa, al, mbid = self._batch_album_ids(batch)
+        cfg = self.cfg
+        if mbid:
+            query = [f"mb_albumid:{mbid}", f"added:..{before}"]
+        elif aa or al:
+            query = [f"albumartist:{aa}", f"album:{al}", f"added:..{before}"]
+        else:
+            return None
+
+        proc = subprocess.run(
+            [str(cfg.beet), "ls", "-f", "$path", *query],
+            capture_output=True,
+            text=True,
+        )
+        paths = [p for p in proc.stdout.strip().splitlines() if p]
+        if not paths:
+            return None
+        return str(Path(paths[0]).parent), len(paths)
+
+    @staticmethod
+    def _batch_album_ids(batch: _AlbumBatch) -> tuple[str, str, str]:
+        """Best-effort (albumartist, album, mb_albumid) for a batch's files."""
+        from spindlebot.disc import _read_album_tags
+
+        for p in batch.source_files:
+            aa, al, mbid = _read_album_tags(p)
+            if aa or al or mbid:
+                return aa or "", al or "", mbid or ""
+        return "", "", ""
+
+    def _handle_no_new_items(
+        self, batch: _AlbumBatch, import_start: str, result: ImportResult
+    ) -> None:
+        """A green import that added nothing. Either it's an already-in-library
+        duplicate (move it aside + notify) or an unexplained no-op (warn, leave
+        the files where they are — never silently strand or discard them)."""
+        existing = self._existing_album_dir(batch, import_start)
+        if existing is None:
+            self._log(
+                f"⚠  {batch.label} — nothing imported and no matching album in the "
+                "library; leaving files in Import for inspection"
+            )
+            result.stages.append(
+                StageResult("duplicate_check", success=True,
+                            message="no-op, no library match")
+            )
+            return
+
+        existing_dir, track_count = existing
+        aa, al, _ = self._batch_album_ids(batch)
+        artist = aa or "Unknown Artist"
+        album = al or "Unknown Album"
+        self._log(
+            f"⏭  {artist} – {album} — already in library "
+            f"({track_count} track{'s' if track_count != 1 else ''} on {existing_dir}); "
+            "moved to Duplicates"
+        )
+        self._move_to_duplicates(batch, artist, album)
+        result.stages.append(
+            StageResult("duplicate_check", success=True, skipped=True,
+                        message=f"duplicate of {existing_dir}")
+        )
+
+        if self.cfg.spindlebot_cfg is not None:
+            notify_result = notify(
+                "Duplicate rip",
+                f"{artist} – {album} already in library — moved to Duplicates",
+                self.cfg.spindlebot_cfg,
+            )
+            if notify_result.macos_error:
+                self._log(f"macOS notify failed: {notify_result.macos_error}")
+            if notify_result.telegram_error:
+                self._log(f"Telegram notify failed: {notify_result.telegram_error}")
+
+    def _move_to_duplicates(self, batch: _AlbumBatch, artist: str, album: str) -> None:
+        """Move a duplicate album's source files into duplicates_dir/<artist>/<album>/.
+
+        Creates parents; tolerates an already-present destination file by
+        de-duplicating the name rather than crashing.
+        """
+        dest_dir = self.cfg.duplicates_dir / _safe_name(artist) / _safe_name(album)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for src in batch.source_files:
+            if not src.exists():
+                continue
+            dest = dest_dir / src.name
+            if dest.exists():
+                dest = _unique_dest(dest)
+            shutil.move(str(src), str(dest))
+        self._log(f"Moved duplicate rip to: {dest_dir}", echo=False)
 
     def _fix_multidisc(self, actual_discs: int, import_start: str) -> None:
         cfg = self.cfg
