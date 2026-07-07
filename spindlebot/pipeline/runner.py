@@ -64,7 +64,7 @@ class _AlbumBatch:
     """
     label: str
     beet_target: list[str]
-    disc_source: object  # str (dir) | list[Path]
+    disc_source: str | Path | list[Path]
 
 
 @dataclass

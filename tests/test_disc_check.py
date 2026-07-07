@@ -119,21 +119,26 @@ def test_check_wait_accepts_explicit_file_list(tmp_path):
     assert check_wait([a, b]) == "WAIT:1:2"
 
 
-def test_count_discs_scoped_to_file_list_ignores_other_files(tmp_path):
-    # A 2-disc album's files plus an unrelated single-disc album in same dir.
-    d1 = tmp_path / "album1-d1.flac"
-    d2 = tmp_path / "album1-d2.flac"
-    other = tmp_path / "album2.flac"
-    _write_flac(d1, tags={"discnumber": 1, "disctotal": 2})
-    _write_flac(d2, tags={"discnumber": 2, "disctotal": 2})
-    _write_flac(other, tags={"discnumber": 1, "disctotal": 1})
+def test_count_discs_scoped_to_file_list_diverges_from_whole_dir(tmp_path):
+    # Target album: incomplete 2-disc set, only disc 1 present.
+    # Contaminant: an UNRELATED album whose track happens to carry discnumber=2.
+    # Reading the whole directory unions disc numbers → {1, 2} → looks like a
+    # complete 2-disc set. Reading only the target album's file sees just disc 1.
+    target = tmp_path / "album1-d1.flac"
+    contaminant = tmp_path / "album2.flac"
+    _write_flac(target, tags={"discnumber": 1, "disctotal": 2})
+    _write_flac(contaminant, tags={"discnumber": 2, "disctotal": 1})
 
-    # Scoped to just album1's files → 2 discs, regardless of `other` present.
-    assert count_discs([d1, d2]) == 2
-    # Scoped to just the other album → 1 disc.
-    assert count_discs([other]) == 1
-    # Reading the whole directory conflates them (the old, buggy view).
+    # Per-album scoping gives the correct answer for the target album.
+    assert count_discs([target]) == 1
+    # The whole-directory read genuinely diverges — it conflates the two albums
+    # into a bogus 2-disc count (this is exactly the pre-fix bug).
     assert count_discs(tmp_path) == 2
+
+    # Same divergence on the wait decision: scoped read correctly WAITs (only
+    # disc 1 of 2), whole-dir read wrongly sees discs {1,2} and would proceed.
+    assert check_wait([target]) == "WAIT:1:2"
+    assert check_wait(tmp_path) is None
 
 
 def test_group_by_album_separates_distinct_albums(tmp_path):
