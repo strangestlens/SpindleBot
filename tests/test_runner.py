@@ -7,9 +7,11 @@ subprocess.run (external tools). Assert on ImportResult stages and watcher.log.
 from __future__ import annotations
 
 import sqlite3
+import struct
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import mutagen.flac
 import pytest
 
 from spindlebot.pipeline.runner import ImportConfig, ImportRunner
@@ -289,3 +291,146 @@ def test_log_messages_written_to_watcher_log(tmp_path):
     assert "Running pretag" in text
     assert "Starting beet import" in text
     assert "Import complete" in text
+
+
+# ── album-aware isolation in a flat, mixed Import ─────────────────────────────
+
+
+def _write_flac(path: Path, *, tags: dict) -> None:
+    """Write a minimal valid FLAC carrying the given Vorbis tags."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    streaminfo = (
+        struct.pack(">HH", 4096, 4096)
+        + b"\x00\x00\x00\x00\x00\x00"
+        + struct.pack(">Q", (44100 << 44) | (0 << 41) | (15 << 36) | 0)
+        + b"\x00" * 16
+    )
+    path.write_bytes(b"fLaC" + bytes([0x80, 0x00, 0x00, 0x22]) + streaminfo)
+    f = mutagen.flac.FLAC(str(path))
+    f.add_tags()
+    for k, v in tags.items():
+        f[k] = [str(v)]
+    f.save()
+
+
+def _beet_import_calls(mock_sub) -> list[list[str]]:
+    """Return the argv of every `beet import ...` subprocess call."""
+    calls = []
+    for c in mock_sub.call_args_list:
+        argv = c.args[0]
+        if len(argv) >= 2 and argv[1] == "import":
+            calls.append(list(argv))
+    return calls
+
+
+def _stub_beet(argv, *args, **kwargs):
+    """side_effect for every beet subprocess call (import / ls / move).
+
+    Returns a benign success for all of them so the pipeline's post-import
+    ls/move/ls-paths queries don't blow up; the assertions inspect the recorded
+    `import` argvs.
+    """
+    return MagicMock(returncode=0, stdout="", stderr="")
+
+
+def test_mixed_import_imports_each_album_separately(tmp_path):
+    """Two complete albums in one flat Import → two isolated beet imports,
+    each fed only its own files (never the mixed pile)."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    _write_flac(imp / "rh1.flac", tags={"albumartist": "Radiohead", "album": "Kid A",
+                                        "discnumber": 1, "disctotal": 1})
+    _write_flac(imp / "dp1.flac", tags={"albumartist": "Daft Punk", "album": "Discovery",
+                                        "discnumber": 1, "disctotal": 1})
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_stub_beet) as mock_sub:
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    import_calls = _beet_import_calls(mock_sub)
+    assert len(import_calls) == 2, "each album must get its own beet import"
+
+    # No import call may mix files from both albums.
+    for argv in import_calls:
+        targets = argv[2:]
+        has_rh = any("rh1.flac" in t for t in targets)
+        has_dp = any("dp1.flac" in t for t in targets)
+        assert not (has_rh and has_dp), f"beet import mixed two albums: {targets}"
+        # And no call passed the whole Import directory.
+        assert str(imp) not in targets
+
+
+def test_waiting_multidisc_does_not_block_or_contaminate_complete_album(tmp_path):
+    """A stranded incomplete 2-disc set must be left intact while a complete
+    album imports — the Radiohead-stranded / Daft-Punk-flattened bug."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    # Incomplete 2-disc set: only disc 1 present → should WAIT, be skipped.
+    _write_flac(imp / "rh_d1.flac", tags={"albumartist": "Radiohead", "album": "OK Computer",
+                                          "discnumber": 1, "disctotal": 2})
+    # Complete single-disc album that must still import.
+    _write_flac(imp / "dp1.flac", tags={"albumartist": "Daft Punk", "album": "Discovery",
+                                        "discnumber": 1, "disctotal": 1})
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_stub_beet) as mock_sub:
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    import_calls = _beet_import_calls(mock_sub)
+    # Exactly one album imported — the complete one.
+    assert len(import_calls) == 1
+    targets = import_calls[0][2:]
+    assert any("dp1.flac" in t for t in targets)
+    assert not any("rh_d1.flac" in t for t in targets), \
+        "the waiting multi-disc album must not be imported"
+
+    # The waiting album's file is left untouched in Import.
+    assert (imp / "rh_d1.flac").exists()
+    assert log_contains(cfg, "waiting for the rest")
+
+
+def test_mixed_import_per_album_disctotal_is_correct(tmp_path):
+    """count_discs / multidisc fix must read the specific album's files, not
+    everything in Import. A 2-disc album alongside a 1-disc album must get
+    disctotal=2 while the single stays 1."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    # Complete 2-disc album.
+    _write_flac(imp / "md_d1.flac", tags={"albumartist": "Set", "album": "Two Disc",
+                                          "discnumber": 1, "disctotal": 2})
+    _write_flac(imp / "md_d2.flac", tags={"albumartist": "Set", "album": "Two Disc",
+                                          "discnumber": 2, "disctotal": 2})
+    # Single-disc album.
+    _write_flac(imp / "single.flac", tags={"albumartist": "Solo", "album": "One Disc",
+                                           "discnumber": 1, "disctotal": 1})
+
+    seen_disc_counts = []
+    real_fix = ImportRunner._fix_multidisc
+
+    def _capture_fix(self, actual_discs, import_start):
+        seen_disc_counts.append(actual_discs)
+        return real_fix(self, actual_discs, import_start)
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch.object(ImportRunner, "_fix_multidisc", _capture_fix), \
+         patch(_SUBPROCESS, side_effect=_stub_beet):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    # One fix call per album, with the correct per-album disc counts.
+    assert sorted(seen_disc_counts) == [1, 2], \
+        f"per-album disc counts wrong: {seen_disc_counts}"

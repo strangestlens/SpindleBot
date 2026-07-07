@@ -1,10 +1,15 @@
 """
 Tests for spindlebot.disc — disc-detection logic used by music-import.sh.
 """
+import struct
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from spindlebot.disc import check_wait, count_discs
+import mutagen.flac
+
+from spindlebot.core.albums import album_key
+from spindlebot.disc import check_wait, count_discs, group_by_album
 
 
 def _mock_flac(discnumber: int = 1, disctotal: int = 1) -> MagicMock:
@@ -83,6 +88,83 @@ class TestCountDiscs(unittest.TestCase):
         # 10 tracks all on disc 1 → count is 1
         with _patch_flacs([_mock_flac(discnumber=1, disctotal=1)] * 10):
             self.assertEqual(count_discs("/fake/dir"), 1)
+
+
+# ── album-aware, file-list-scoped tests (pytest style) ────────────────────────
+
+
+def _write_flac(path: Path, *, tags: dict | None = None) -> None:
+    """Write a minimal valid FLAC with the given Vorbis tags."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    streaminfo = (
+        struct.pack(">HH", 4096, 4096)
+        + b"\x00\x00\x00\x00\x00\x00"
+        + struct.pack(">Q", (44100 << 44) | (0 << 41) | (15 << 36) | 0)
+        + b"\x00" * 16
+    )
+    path.write_bytes(b"fLaC" + bytes([0x80, 0x00, 0x00, 0x22]) + streaminfo)
+    f = mutagen.flac.FLAC(str(path))
+    f.add_tags()
+    for k, v in (tags or {}).items():
+        f[k] = [str(v)]
+    f.save()
+
+
+def test_check_wait_accepts_explicit_file_list(tmp_path):
+    # Two files, one album, disctotal=2 but only disc 1 present → WAIT.
+    a = tmp_path / "a.flac"
+    b = tmp_path / "b.flac"
+    _write_flac(a, tags={"discnumber": 1, "disctotal": 2, "tracknumber": 1})
+    _write_flac(b, tags={"discnumber": 1, "disctotal": 2, "tracknumber": 2})
+    assert check_wait([a, b]) == "WAIT:1:2"
+
+
+def test_count_discs_scoped_to_file_list_ignores_other_files(tmp_path):
+    # A 2-disc album's files plus an unrelated single-disc album in same dir.
+    d1 = tmp_path / "album1-d1.flac"
+    d2 = tmp_path / "album1-d2.flac"
+    other = tmp_path / "album2.flac"
+    _write_flac(d1, tags={"discnumber": 1, "disctotal": 2})
+    _write_flac(d2, tags={"discnumber": 2, "disctotal": 2})
+    _write_flac(other, tags={"discnumber": 1, "disctotal": 1})
+
+    # Scoped to just album1's files → 2 discs, regardless of `other` present.
+    assert count_discs([d1, d2]) == 2
+    # Scoped to just the other album → 1 disc.
+    assert count_discs([other]) == 1
+    # Reading the whole directory conflates them (the old, buggy view).
+    assert count_discs(tmp_path) == 2
+
+
+def test_group_by_album_separates_distinct_albums(tmp_path):
+    _write_flac(tmp_path / "rh1.flac", tags={"albumartist": "Radiohead", "album": "Kid A"})
+    _write_flac(tmp_path / "rh2.flac", tags={"albumartist": "Radiohead", "album": "Kid A"})
+    _write_flac(tmp_path / "dp1.flac", tags={"albumartist": "Daft Punk", "album": "Discovery"})
+
+    groups = group_by_album(tmp_path)
+    assert len(groups) == 2
+    rh_key = album_key("Radiohead", "Kid A", None)
+    dp_key = album_key("Daft Punk", "Discovery", None)
+    assert {p.name for p in groups[rh_key]} == {"rh1.flac", "rh2.flac"}
+    assert {p.name for p in groups[dp_key]} == {"dp1.flac"}
+
+
+def test_group_by_album_prefers_mb_albumid(tmp_path):
+    # Same mb id, different album text → still one group.
+    _write_flac(tmp_path / "1.flac",
+                tags={"albumartist": "X", "album": "Deluxe", "musicbrainz_albumid": "mbid-1"})
+    _write_flac(tmp_path / "2.flac",
+                tags={"albumartist": "X", "album": "Standard", "musicbrainz_albumid": "mbid-1"})
+    groups = group_by_album(tmp_path)
+    assert len(groups) == 1
+
+
+def test_group_by_album_untagged_files_stay_together(tmp_path):
+    _write_flac(tmp_path / "a.flac")
+    _write_flac(tmp_path / "b.flac")
+    groups = group_by_album(tmp_path)
+    assert len(groups) == 1
+    assert sum(len(v) for v in groups.values()) == 2
 
 
 if __name__ == "__main__":
