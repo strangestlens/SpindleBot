@@ -8,7 +8,7 @@ Usage:
     python -m spindlebot import <trigger> [--force]    Run import pipeline for an album
     python -m spindlebot import-staging [--dry-run]    Import everything currently in the Import area
     python -m spindlebot inventory [--location <name>] [--json] [-v|--quiet]   Scan a location into the SpindleBot DB (read-only re: audio)
-    python -m spindlebot review --location <name> [--json] [-v|--quiet]        Plan reconciliation (propose copies/missing); no bytes moved
+    python -m spindlebot review --location <name> [--yes] [--json] [-v|--quiet]  Plan reconciliation (--yes also acknowledges); no bytes moved
     python -m spindlebot review --acknowledge-run <run_id>        Acknowledge every proposed action in a run
     python -m spindlebot review --acknowledge <id[,id...]>        Acknowledge specific proposed actions
     python -m spindlebot sync [--json] [-v|--quiet]              Execute acknowledged copies (copy→verify→presence); adds copies only
@@ -372,6 +372,10 @@ def cmd_review(cfg, args: list[str]) -> int:
         if reporter is not None:
             reporter.close()
         actions = action_repo.list_for_run(conn, result.run_id)
+        # --yes: plan + acknowledge in one shot (for the automatic mount flow).
+        acknowledged = 0
+        if "--yes" in args and result.target_scanned:
+            acknowledged = action_repo.acknowledge_run(conn, result.run_id, now)
         conn.commit()
 
         if want_json:
@@ -386,6 +390,7 @@ def cmd_review(cfg, args: list[str]) -> int:
                      "rel_path": a.rel_path, "reason": a.reason}
                     for a in actions
                 ],
+                "acknowledged": acknowledged,
             }))
             return 0
 
@@ -407,7 +412,9 @@ def cmd_review(cfg, args: list[str]) -> int:
             else:
                 label = f"{a.content_kind} {a.content_id}"
             print(f"  [{a.id}] {a.action_kind}: {label}  ({a.reason})")
-        if actions:
+        if acknowledged:
+            print(f"\nAcknowledged {acknowledged} action(s) — run `spindlebot sync`.")
+        elif actions:
             print(f"\nAcknowledge: spindlebot review --acknowledge-run {result.run_id}")
         return 0
     finally:

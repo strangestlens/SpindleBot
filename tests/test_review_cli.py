@@ -96,6 +96,20 @@ def test_review_requires_location_in_plan_mode(tmp_path, capsys):
     assert "Usage" in capsys.readouterr().err
 
 
+def test_review_yes_plans_and_acknowledges_in_one_shot(tmp_path, capsys):
+    cfg = _cfg(tmp_path)
+    _seed_copy_scenario(cfg)
+    rc = cmd_review(cfg, ["--location", "DwRugged", "--yes", "--json"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["copies"] == 1 and data["acknowledged"] == 1
+    # the action is now acknowledged → sync would execute it
+    conn = open_db(cfg.core.db_path)
+    run = run_repo.latest(conn, RunKind.RECONCILE)
+    assert all(a.acknowledged for a in action_repo.list_for_run(conn, run.id))
+    conn.close()
+
+
 def test_review_acknowledge_run(tmp_path, capsys):
     cfg = _cfg(tmp_path)
     _seed_copy_scenario(cfg)
