@@ -614,3 +614,33 @@ def test_reused_identity_survives_a_moved_mtime_when_size_matches(conn, tmp_path
     _run(conn, root, now=2000)
     assert id_spy.calls == 0 and sha_spy.calls == 0
     assert audio_repo.count(conn) == 1
+
+
+def test_noninventory_update_keeps_mtime_so_next_scan_still_skips(conn, tmp_path, monkeypatch):
+    """A sync/copy write (new file_sha256, no mtime) must not defeat the skip.
+
+    Simulates the copy executor updating a copy's integrity hash without an
+    mtime; the recorded mtime is preserved (COALESCE), so the next inventory
+    scan of the unchanged file still reuses everything and hashes nothing.
+    """
+    root = tmp_path / "Pending"
+    path = root / "01.flac"
+    _write_flac(path, audio_md5_bytes=bytes(range(1, 17)))
+    _run(conn, root, now=1000)
+
+    loc = ensure_pending_location(conn, 1000)
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    recorded_mtime = presence_repo.get(conn, audio.id, loc.id).mtime
+    assert recorded_mtime is not None
+
+    # Non-inventory writer: refresh file_sha256 + observed_utc, omit mtime.
+    presence_repo.set_presence(
+        conn, audio_id=audio.id, location_id=loc.id, present=True,
+        observed_utc=1500, rel_path="01.flac", file_sha256="rewritten",
+        byte_size=path.stat().st_size,
+    )
+    assert presence_repo.get(conn, audio.id, loc.id).mtime == recorded_mtime
+
+    id_spy, sha_spy = _install_hash_spies(monkeypatch)
+    _run(conn, root, now=2000)
+    assert id_spy.calls == 0 and sha_spy.calls == 0

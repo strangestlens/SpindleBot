@@ -12,3 +12,11 @@
 
 ALTER TABLE audio_presence ADD COLUMN mtime INTEGER;
 ALTER TABLE sidecar_presence ADD COLUMN mtime INTEGER;
+
+-- Inventory looks a file up by (location_id, rel_path) before it knows the
+-- content id — once per scanned file. Without an index that's a table scan per
+-- file, and with ~2000 tracks that overhead undoes the very cost this phase
+-- removes. Not unique: (location_id, rel_path) can hold a stale present=0 row
+-- alongside the live one, so lookups filter present and take the newest.
+CREATE INDEX idx_audio_presence_relpath ON audio_presence(location_id, rel_path);
+CREATE INDEX idx_sidecar_presence_relpath ON sidecar_presence(location_id, rel_path);
