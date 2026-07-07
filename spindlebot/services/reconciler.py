@@ -172,6 +172,30 @@ def reconcile_location(
                 result.copies += 1
                 _tick("copy")
 
+        # COPY sidecars: authoritative sidecars (.lrc / cover / .nolrc) the
+        # target lacks — so everything, not just the audio, reaches retention.
+        target_sidecars = {
+            sp.sidecar_id
+            for sp in sidecar_presence_repo.list_for_location(conn, target.id, present=True)
+        }
+        proposed_sc: set[int] = set()
+        for auth in authoritative_locations:
+            if auth.id == target.id:
+                continue
+            for sp in sidecar_presence_repo.list_for_location(conn, auth.id, present=True):
+                if sp.sidecar_id in target_sidecars or sp.sidecar_id in proposed_sc:
+                    continue
+                action_repo.add(
+                    conn, run_id=run_id, action_kind=ActionKind.COPY,
+                    content_kind=ContentKind.SIDECAR, content_id=sp.sidecar_id,
+                    source_location_id=auth.id, dest_location_id=target.id,
+                    rel_path=sp.rel_path, now=now,
+                    reason=f"sidecar present on {auth.name}, absent on {target.name}",
+                )
+                proposed_sc.add(sp.sidecar_id)
+                result.copies += 1
+                _tick("copy")
+
         # MISSING: target rows not re-confirmed by the target's latest scan.
         cutoff = scan["started_utc"]
         for audio_id, p in target_present.items():

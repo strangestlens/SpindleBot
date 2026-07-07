@@ -111,6 +111,41 @@ def test_copy_deduped_across_multiple_authoritative_locations(conn):
     assert result.copies == 1   # proposed once, not per source
 
 
+# ── sidecar copies ────────────────────────────────────────────────────────────
+
+def test_proposes_sidecar_copy_absent_on_target(conn):
+    from spindlebot.core.enums import SidecarParentKind, SidecarRole
+    from spindlebot.db.repositories import sidecar_repo
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _present(conn, x.id, pending.id)
+    _present(conn, x.id, rugged.id)          # audio already on the target
+    _lrc(conn, x.id, pending.id, "lrc-sha")  # but its .lrc only on pending
+    _scan(conn, rugged.id)
+
+    result = reconcile_location(conn, target=rugged,
+                               authoritative_locations=[pending], now=1000)
+    actions = action_repo.list_for_run(conn, result.run_id)
+    sidecar_copies = [a for a in actions
+                      if a.action_kind == ActionKind.COPY and a.content_kind == "sidecar"]
+    assert result.copies == 1 and len(sidecar_copies) == 1
+    lrc = sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
+                           parent_id=x.id, role=SidecarRole.LRC)
+    assert sidecar_copies[0].content_id == lrc.id
+    assert sidecar_copies[0].dest_location_id == rugged.id
+
+
+def test_no_sidecar_copy_when_target_already_has_it(conn):
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "lrc-sha")
+    _lrc(conn, x.id, rugged.id, "lrc-sha")   # target already has the sidecar
+    _scan(conn, rugged.id)
+    result = reconcile_location(conn, target=rugged,
+                               authoritative_locations=[pending], now=1000)
+    assert result.copies == 0
+
+
 # ── MISSING detection + min_copies ────────────────────────────────────────────
 
 def test_missing_detected_when_target_row_predates_latest_scan(conn):
