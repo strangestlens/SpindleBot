@@ -296,9 +296,10 @@ class DeleteResult:
     dry_run: bool
     deleted: int = 0       # retention copies removed (or would-be, under dry_run)
     bytes_freed: int = 0
-    refused: int = 0       # would drop retention below min_copies → not deleted
-    skipped: int = 0       # not a DELETE / unresolvable location / already gone
-    errors: list[str] = field(default_factory=list)
+    refused: int = 0       # safely declined: non-retention source or below-floor
+    skipped: int = 0       # non-audio content (DELETE is audio-only today)
+    refused_reasons: list[str] = field(default_factory=list)  # why each refusal (warnings, not errors)
+    errors: list[str] = field(default_factory=list)  # genuine failures (unmounted, OSError)
 
 
 def execute_deletes(
@@ -313,13 +314,22 @@ def execute_deletes(
 
     Reads only acknowledged, not-yet-executed DELETE rows (the acknowledge gate:
     a proposed-but-unacknowledged delete never runs). For each, the copy being
-    removed lives at the action's `source_location_id`. Before deleting, it counts
-    how many retention copies would REMAIN if this one were dropped (present
-    retention copies of the content, minus this copy if it is itself a present
-    retention copy). If that would fall below `min_copies`, the delete is REFUSED
-    — the file is untouched, presence unchanged, the action left un-executed, and
-    a `refused` entry surfaced. This is the hard invariant: retention copies can
-    never be driven below the floor.
+    removed lives at the action's `source_location_id`.
+
+    DELETE is only ever for RETENTION copies. A DELETE whose source is NOT a
+    retention location is REFUSED outright — deleting a non-retention (Pending/
+    authoring) copy is prune's job, and only once verified-on-retention; letting
+    delete unlink authoring bytes would bypass that safety, so it is declined.
+
+    For a retention source, it counts how many retention copies would REMAIN if
+    this one were dropped (present retention copies of the content, minus this
+    copy if it is itself a present retention copy). If that would fall below
+    `min_copies`, the delete is REFUSED. This is the hard invariant: retention
+    copies can never be driven below the floor.
+
+    Both refusals are safe, expected outcomes (not failures): they go in
+    `refused` / `refused_reasons` as warnings, never in `errors`. `errors` is
+    reserved for genuine failures (unmounted/unidentified location, OSError).
 
     The non-retention Pending/authoring copy is never counted toward the floor
     (that is `count_retention_copies`'s job) — so it can never make a delete look
@@ -350,15 +360,23 @@ def execute_deletes(
                         f"action {action.id}: location not mounted or identified")
                     continue
 
+                # DELETE is only for retention copies — never unlink an authoring
+                # (Pending) copy here; that's prune's verified-on-retention path.
+                if not loc.is_retention:
+                    result.refused += 1
+                    result.refused_reasons.append(
+                        f"action {action.id}: refused — source {loc.name!r} is not a "
+                        f"retention location (delete is retention-only)")
+                    continue
+
                 pres = presence_repo.get(conn, action.content_id, loc.id)
-                self_counts = bool(
-                    loc.is_retention and pres is not None and pres.present)
+                self_counts = bool(pres is not None and pres.present)
                 would_remain = (
                     presence_repo.count_retention_copies(conn, action.content_id)
                     - (1 if self_counts else 0))
                 if would_remain < min_copies:
                     result.refused += 1
-                    result.errors.append(
+                    result.refused_reasons.append(
                         f"action {action.id}: refused — deleting would leave "
                         f"{would_remain} retention copies (< min_copies={min_copies})")
                     continue

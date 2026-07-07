@@ -90,10 +90,34 @@ def test_refuses_when_delete_would_drop_below_min_copies(conn, tmp_path):
 
     result = execute_deletes(conn, now=1000, dry_run=False, min_copies=1)
 
-    assert result.deleted == 0 and result.refused == 1 and result.errors
+    # refusal is a safe, expected outcome — a warning (refused_reasons), NOT an error
+    assert result.deleted == 0 and result.refused == 1
+    assert result.refused_reasons and not result.errors
     assert rf.exists()                                   # file untouched
     assert presence_repo.get(conn, a.id, rugged.id).present is True   # unchanged
     assert action_repo.get(conn, action.id).executed_utc is None     # not executed
+
+
+def test_refuses_when_source_is_not_a_retention_location(conn, tmp_path):
+    # A DELETE queued against the non-retention Pending (authoring) library must be
+    # refused outright — delete never unlinks authoring bytes (that's prune's job).
+    # Even with a retention copy elsewhere (so the floor would pass), it's refused.
+    pending = _loc(conn, "pending", "Pending", tmp_path / "Pending", authoritative=True)
+    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
+    rel = "Artist/Album/01.flac"
+    pf, rf = _put(pending, rel), _put(rugged, rel)
+    _present(conn, a, pending, rel, pf)
+    _present(conn, a, rugged, rel, rf)
+    action = _propose_delete(conn, audio=a, loc=pending, rel=rel)
+
+    result = execute_deletes(conn, now=1000, dry_run=False, min_copies=1)
+
+    assert result.deleted == 0 and result.refused == 1
+    assert result.refused_reasons and not result.errors  # a warning, not an error
+    assert pf.exists() and rf.exists()                   # authoring bytes untouched
+    assert presence_repo.get(conn, a.id, pending.id).present is True
+    assert action_repo.get(conn, action.id).executed_utc is None
 
 
 def test_unacknowledged_delete_never_runs(conn, tmp_path):
@@ -165,7 +189,26 @@ def test_refuses_at_higher_min_copies(conn, tmp_path):
     result = execute_deletes(conn, now=1000, dry_run=False, min_copies=2)
 
     assert result.deleted == 0 and result.refused == 1
+    assert result.refused_reasons and not result.errors
     assert rf.exists() and df.exists()
+
+
+def test_unmounted_source_is_a_genuine_error(conn, tmp_path):
+    # DB says the copy is on a retention drive, but the drive isn't mounted (root
+    # dir absent) → resolve_root fails → genuine error, NOT a refusal.
+    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
+    rel = "Artist/Album/01.flac"
+    rf = _put(rugged, rel)
+    _present(conn, a, rugged, rel, rf)
+    _propose_delete(conn, audio=a, loc=rugged, rel=rel)
+    import shutil
+    shutil.rmtree(rugged.root_path)                      # "unmount" the drive
+
+    result = execute_deletes(conn, now=1000, dry_run=False, min_copies=1)
+
+    assert result.deleted == 0 and result.refused == 0
+    assert result.errors and not result.refused_reasons  # a real failure, not a refusal
 
 
 def test_only_processes_delete_actions(conn, tmp_path):
@@ -194,14 +237,16 @@ def test_only_processes_delete_actions(conn, tmp_path):
 # ── CLI: dry-run default, --execute to delete ─────────────────────────────────
 
 
-def _cli_cfg_and_seed(tmp_path):
+def _cli_cfg_and_seed(tmp_path, *, min_copies=1, delete_from="DAP"):
+    """Seed a two-retention-drive + Pending library; queue a DELETE from
+    `delete_from` ("DAP", "DwRugged", or "Pending"). Returns cfg + the file paths."""
     from types import SimpleNamespace
 
     from spindlebot.config import LocationConfig
     from spindlebot.core.enums import LocationKind
     from spindlebot.services.locations import get_by_name, register_from_config
 
-    core = SimpleNamespace(db_path=tmp_path / "spindlebot.db", min_copies=1,
+    core = SimpleNamespace(db_path=tmp_path / "spindlebot.db", min_copies=min_copies,
                            pending_dir=tmp_path / "Pending")
     locs = [
         LocationConfig(name="DwRugged", kind=LocationKind.LOCAL_DRIVE,
@@ -216,23 +261,27 @@ def _cli_cfg_and_seed(tmp_path):
 
     conn = open_db(core.db_path)
     register_from_config(conn, cfg, 0)
-    rugged, dap = get_by_name(conn, "DwRugged"), get_by_name(conn, "DAP")
+    rugged = get_by_name(conn, "DwRugged")
+    dap = get_by_name(conn, "DAP")
+    pending = get_by_name(conn, "Pending")
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "A/B/01.flac"
-    rf, df = _put(rugged, rel), _put(dap, rel)
+    rf, df, pf = _put(rugged, rel), _put(dap, rel), _put(pending, rel)
     _present(conn, a, rugged, rel, rf)
     _present(conn, a, dap, rel, df)
-    _propose_delete(conn, audio=a, loc=dap, rel=rel)
+    _present(conn, a, pending, rel, pf)
+    src = {"DwRugged": rugged, "DAP": dap, "Pending": pending}[delete_from]
+    _propose_delete(conn, audio=a, loc=src, rel=rel)
     conn.commit()
     conn.close()
-    return cfg, rf, df
+    return cfg, rf, df, pf
 
 
 def test_cmd_delete_is_dry_run_by_default(tmp_path, capsys):
     import json
 
     from spindlebot.cli import cmd_delete
-    cfg, rf, df = _cli_cfg_and_seed(tmp_path)
+    cfg, rf, df, pf = _cli_cfg_and_seed(tmp_path)
     rc = cmd_delete(cfg, ["--json"])                 # no --execute
     data = json.loads(capsys.readouterr().out)
     assert rc == 0 and data["dry_run"] is True and data["deleted"] == 1
@@ -243,8 +292,50 @@ def test_cmd_delete_execute_deletes(tmp_path, capsys):
     import json
 
     from spindlebot.cli import cmd_delete
-    cfg, rf, df = _cli_cfg_and_seed(tmp_path)
+    cfg, rf, df, pf = _cli_cfg_and_seed(tmp_path)
     rc = cmd_delete(cfg, ["--execute", "--json"])
     data = json.loads(capsys.readouterr().out)
     assert rc == 0 and data["dry_run"] is False and data["deleted"] == 1
     assert not df.exists() and rf.exists()
+
+
+def test_cmd_delete_below_floor_refusal_exits_zero(tmp_path, capsys):
+    # min_copies=3 but only 2 retention copies → deleting one refused. Exit 0.
+    import json
+
+    from spindlebot.cli import cmd_delete
+    cfg, rf, df, pf = _cli_cfg_and_seed(tmp_path, min_copies=3, delete_from="DAP")
+    rc = cmd_delete(cfg, ["--execute", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0                                   # refusal is safe/expected → exit 0
+    assert data["deleted"] == 0 and data["refused"] == 1
+    assert data["refused_reasons"] and not data["errors"]
+    assert df.exists() and rf.exists()               # nothing deleted
+
+
+def test_cmd_delete_non_retention_refusal_exits_zero(tmp_path, capsys):
+    # DELETE queued against the non-retention Pending library → refused. Exit 0.
+    import json
+
+    from spindlebot.cli import cmd_delete
+    cfg, rf, df, pf = _cli_cfg_and_seed(tmp_path, delete_from="Pending")
+    rc = cmd_delete(cfg, ["--execute", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert data["deleted"] == 0 and data["refused"] == 1
+    assert data["refused_reasons"] and not data["errors"]
+    assert pf.exists() and rf.exists() and df.exists()   # authoring bytes untouched
+
+
+def test_cmd_delete_genuine_error_exits_nonzero(tmp_path, capsys):
+    # The retention source drive isn't mounted → genuine error → nonzero exit.
+    import json
+    import shutil
+
+    from spindlebot.cli import cmd_delete
+    cfg, rf, df, pf = _cli_cfg_and_seed(tmp_path, delete_from="DAP")
+    shutil.rmtree(tmp_path / "DAP")                   # "unmount" the source drive
+    rc = cmd_delete(cfg, ["--execute", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 1                                   # a real failure → nonzero
+    assert data["errors"] and not data["refused_reasons"]

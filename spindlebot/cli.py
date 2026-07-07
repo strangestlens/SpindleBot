@@ -548,9 +548,11 @@ def cmd_delete(cfg, args: list[str]) -> int:
     """
     Execute acknowledged DELETE actions — remove a RETENTION copy. DESTRUCTIVE,
     and GATED: a delete that would leave fewer than min_copies retention copies of
-    the content is REFUSED, never performed. DRY-RUN by default (only reports what
-    it would delete); pass --execute to actually delete. Run `review` + acknowledge
-    first to queue the work.
+    the content — or whose source is not a retention location at all — is REFUSED,
+    never performed. A refusal is safe/expected (warned, exit 0); only genuine
+    failures exit nonzero. DRY-RUN by default (only reports what it would delete);
+    pass --execute to actually delete. Run `review` + acknowledge first to queue
+    the work.
     """
     import json as _json
     import time
@@ -581,15 +583,17 @@ def cmd_delete(cfg, args: list[str]) -> int:
         verb = "Would delete" if result.dry_run else "Deleted"
         print(f"{verb} {result.deleted} retention copy(ies) "
               f"({result.bytes_freed / (1024 * 1024):.1f} MB), "
-              f"{result.refused} refused (would drop below "
-              f"min_copies={cfg.core.min_copies}), {result.skipped} skipped.")
+              f"{result.refused} refused (kept safe), {result.skipped} skipped.")
+        for r in result.refused_reasons:
+            print(f"  ⚠ {r}", file=sys.stderr)
         if result.dry_run and result.deleted:
             print("Re-run with --execute to actually delete.")
         for e in result.errors:
             print(f"  ! {e}", file=sys.stderr)
-    # Nonzero only on a real error. A refusal is the safe, expected outcome and is
-    # surfaced in result.errors, so `delete` returns nonzero when anything was
-    # refused or failed — automation should not treat a refused delete as "done".
+    # A refusal (below-floor, or a non-retention source) is a SAFE, expected
+    # outcome — warned via refused_reasons, exit 0 (Daniel's call, mirroring
+    # prune's below_floor). Nonzero is reserved for genuine failures in
+    # result.errors (unmounted/unidentified location, OSError).
     return 0 if not result.errors else 1
 
 
