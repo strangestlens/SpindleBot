@@ -22,7 +22,7 @@ def _tables(conn) -> set[str]:
 
 def test_open_db_creates_schema_at_latest_version(tmp_path):
     conn = open_db(tmp_path / "spindlebot.db")
-    assert current_version(conn) == LATEST_VERSION == 5
+    assert current_version(conn) == LATEST_VERSION == 6
     assert {
         "location", "audio_content", "audio_presence", "location_scan",
         "album", "album_track", "sidecar_content", "sidecar_presence",
@@ -35,7 +35,7 @@ def test_open_db_creates_schema_at_latest_version(tmp_path):
 def test_open_db_creates_parent_dirs(tmp_path):
     conn = open_db(tmp_path / "nested" / "deeper" / "spindlebot.db")
     assert (tmp_path / "nested" / "deeper" / "spindlebot.db").exists()
-    assert current_version(conn) == 5
+    assert current_version(conn) == 6
 
 
 def test_pragmas_applied(tmp_path):
@@ -48,15 +48,15 @@ def test_migrate_is_idempotent(tmp_path):
     db = tmp_path / "spindlebot.db"
     open_db(db).close()
     conn = open_db(db)  # second open must not re-run or error
-    assert current_version(conn) == 5
+    assert current_version(conn) == 6
     # re-invoking migrate directly is also a no-op
-    assert migrate(conn) == 5
+    assert migrate(conn) == 6
 
 
 def test_migrate_from_fresh_connect(tmp_path):
     conn = connect(tmp_path / "spindlebot.db")
     assert current_version(conn) == 0       # not migrated yet
-    assert migrate(conn) == 5
+    assert migrate(conn) == 6
     assert {
         "location", "audio_content", "audio_presence", "location_scan",
         "album", "album_track", "sidecar_content", "sidecar_presence",
@@ -103,12 +103,72 @@ def test_v3_upgrades_existing_v2_db(tmp_path):
     conn.commit()
     assert current_version(conn) == 2
 
-    assert migrate(conn) == 5
+    assert migrate(conn) == 6
     assert "album" in _tables(conn) and "sidecar_content" in _tables(conn)
     # pre-existing data survives the upgrade
     assert conn.execute(
         "SELECT identity FROM audio_content"
     ).fetchone()[0] == "keep"
+
+
+def _cols(conn, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def test_v6_adds_mtime_to_presence_tables(tmp_path):
+    conn = open_db(tmp_path / "spindlebot.db")
+    assert current_version(conn) == 6
+    assert "mtime" in _cols(conn, "audio_presence")
+    assert "mtime" in _cols(conn, "sidecar_presence")
+
+
+def test_v6_upgrades_existing_v5_db(tmp_path):
+    """An existing v5 DB with presence data migrates forward to v6 without loss.
+
+    Pre-v6 rows have no mtime, so the column is added NULL for them.
+    """
+    db = tmp_path / "spindlebot.db"
+    conn = connect(db)
+    for target, sql_file in migrations.MIGRATIONS:
+        if target > 5:
+            break
+        sql = (migrations._SCHEMA_DIR / sql_file).read_text(encoding="utf-8")
+        with conn:
+            conn.executescript(sql)
+            conn.execute(f"PRAGMA user_version = {target}")
+    conn.execute(
+        "INSERT INTO location (uuid, name, kind) VALUES ('u', 'L', 'library')"
+    )
+    conn.execute(
+        "INSERT INTO audio_content (identity, identity_kind, first_seen_utc, last_seen_utc) "
+        "VALUES ('keep', 'audio_md5', 0, 0)"
+    )
+    conn.execute(
+        "INSERT INTO audio_presence "
+        "(audio_id, location_id, present, rel_path, file_sha256, byte_size, observed_utc) "
+        "VALUES (1, 1, 1, 'a.flac', 'deadbeef', 10, 0)"
+    )
+    conn.commit()
+    assert current_version(conn) == 5
+
+    assert migrate(conn) == 6
+    assert "mtime" in _cols(conn, "audio_presence")
+    # pre-existing presence survives; its mtime is NULL (unknown until re-scanned)
+    row = conn.execute(
+        "SELECT file_sha256, mtime FROM audio_presence"
+    ).fetchone()
+    assert row["file_sha256"] == "deadbeef"
+    assert row["mtime"] is None
+
+
+def test_v6_migration_is_idempotent(tmp_path):
+    db = tmp_path / "spindlebot.db"
+    open_db(db).close()
+    conn = open_db(db)
+    assert migrate(conn) == 6
+    # exactly one mtime column on each table (no duplicate ALTER)
+    assert sum(1 for c in _cols(conn, "audio_presence") if c == "mtime") == 1
+    assert sum(1 for c in _cols(conn, "sidecar_presence") if c == "mtime") == 1
 
 
 def test_sidecar_content_triple_unique(tmp_path):

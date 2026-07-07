@@ -85,6 +85,50 @@ def test_presence_set_and_get(conn):
     assert presence_repo.get(conn, a.id, loc.id) == p
 
 
+def test_presence_update_omitting_mtime_preserves_recorded_mtime(conn):
+    """A later set_presence without mtime (sync/prune) must not null a stored mtime."""
+    loc = location_repo.upsert(conn, uuid="u1", name="Pending", kind="library")
+    a = _audio(conn, "a" * 32)
+    presence_repo.set_presence(conn, audio_id=a.id, location_id=loc.id,
+                               present=True, observed_utc=10,
+                               rel_path="01.flac", file_sha256="old",
+                               byte_size=123, mtime=999_000_000_000)
+    # e.g. a copy executor writing a fresh integrity hash but no mtime.
+    presence_repo.set_presence(conn, audio_id=a.id, location_id=loc.id,
+                               present=True, observed_utc=20,
+                               rel_path="01.flac", file_sha256="new",
+                               byte_size=123)
+    p = presence_repo.get(conn, a.id, loc.id)
+    assert p.file_sha256 == "new"
+    assert p.mtime == 999_000_000_000   # preserved, not nulled
+
+
+def test_get_by_rel_path_returns_present_most_recent(conn):
+    """Ignores a stale present=0 row that shares the path with replaced content."""
+    loc = location_repo.upsert(conn, uuid="u1", name="X", kind="local_drive")
+    stale = _audio(conn, "a" * 32)   # old content that used to live at 01.flac
+    live = _audio(conn, "b" * 32)    # new content now at the same path
+    presence_repo.set_presence(conn, audio_id=stale.id, location_id=loc.id,
+                               present=False, observed_utc=30,
+                               rel_path="01.flac", file_sha256="stale",
+                               byte_size=1, mtime=1)
+    presence_repo.set_presence(conn, audio_id=live.id, location_id=loc.id,
+                               present=True, observed_utc=10,
+                               rel_path="01.flac", file_sha256="live",
+                               byte_size=2, mtime=2)
+    found = presence_repo.get_by_rel_path(conn, loc.id, "01.flac")
+    assert found is not None
+    assert found.audio_id == live.id and found.file_sha256 == "live"
+
+
+def test_get_by_rel_path_none_when_only_absent(conn):
+    loc = location_repo.upsert(conn, uuid="u1", name="X", kind="local_drive")
+    a = _audio(conn, "a" * 32)
+    presence_repo.set_presence(conn, audio_id=a.id, location_id=loc.id,
+                               present=False, observed_utc=1, rel_path="01.flac")
+    assert presence_repo.get_by_rel_path(conn, loc.id, "01.flac") is None
+
+
 def test_presence_update_flips_present(conn):
     loc = location_repo.upsert(conn, uuid="u1", name="X", kind="local_drive")
     a = _audio(conn, "a" * 32)

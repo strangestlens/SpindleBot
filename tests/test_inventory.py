@@ -479,3 +479,168 @@ def test_inventory_sidecar_idempotent_then_tracks_content_change(conn, tmp_path)
     assert sc2.id == sc1.id                 # same sidecar identity
     assert sc2.sha256 != sc1.sha256         # content hash followed the edit
     assert sidecar_repo.count(conn) == 1
+
+
+# ── incremental re-scan (skip hashing unchanged files) ────────────────────────
+
+class _HashSpy:
+    """Wraps a hashing function, counting how many times it actually runs."""
+
+    def __init__(self, fn):
+        self._fn = fn
+        self.calls = 0
+
+    def __call__(self, path):
+        self.calls += 1
+        return self._fn(path)
+
+
+def _install_hash_spies(monkeypatch):
+    from spindlebot.core import identity as _identity
+
+    id_spy = _HashSpy(_identity.audio_content_id)
+    sha_spy = _HashSpy(_identity.file_sha256)
+    monkeypatch.setattr(inventory, "audio_content_id", id_spy)
+    monkeypatch.setattr(inventory, "file_sha256", sha_spy)
+    return id_spy, sha_spy
+
+
+def _snapshot_presence(conn, loc_id):
+    rows = conn.execute(
+        "SELECT audio_id, rel_path, file_sha256, byte_size, mtime "
+        "FROM audio_presence WHERE location_id = ? ORDER BY rel_path",
+        (loc_id,),
+    ).fetchall()
+    return [tuple(r) for r in rows]
+
+
+def test_second_scan_no_changes_rehashes_nothing(conn, tmp_path, monkeypatch):
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)),
+                tags={"album": "Album", "title": "One", "tracknumber": "1"})
+    (root / "AA" / "Album" / "cover.jpg").write_bytes(b"\xff\xd8jpeg")
+
+    _run(conn, root, now=1000)
+    before = _snapshot_presence(conn, ensure_pending_location(conn, 1000).id)
+
+    id_spy, sha_spy = _install_hash_spies(monkeypatch)
+    result, loc = _run(conn, root, now=2000)
+
+    # Nothing was re-hashed: neither identity nor per-copy integrity.
+    assert id_spy.calls == 0
+    assert sha_spy.calls == 0
+    # Content/presence unchanged except observed_utc; identity + sha256 reused.
+    assert result.scanned == 1 and result.new == 0 and result.updated == 1
+    assert _snapshot_presence(conn, loc.id) == before
+    pres = conn.execute(
+        "SELECT observed_utc FROM audio_presence WHERE location_id = ?", (loc.id,)
+    ).fetchone()
+    assert pres["observed_utc"] == 2000   # refreshed
+
+
+def test_changed_size_is_rehashed(conn, tmp_path, monkeypatch):
+    root = tmp_path / "Pending"
+    path = root / "01.flac"
+    _write_flac(path, audio_md5_bytes=bytes(range(1, 17)))
+    _run(conn, root, now=1000)
+
+    loc = ensure_pending_location(conn, 1000)
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    old = presence_repo.get(conn, audio.id, loc.id)
+
+    # Rewrite with a different audio md5 → different identity AND different bytes.
+    _write_flac(path, audio_md5_bytes=bytes(range(17, 33)))
+    # Ensure size differs even if the FLAC container happened to be equal-length.
+    with open(path, "ab") as fh:
+        fh.write(b"padding")
+
+    id_spy, sha_spy = _install_hash_spies(monkeypatch)
+    result, _ = _run(conn, root, now=2000)
+
+    assert id_spy.calls == 1 and sha_spy.calls == 1     # the file WAS re-hashed
+    new_audio = audio_repo.get_by_identity(conn, bytes(range(17, 33)).hex())
+    assert new_audio is not None                        # new identity recorded
+    new = presence_repo.get(conn, new_audio.id, loc.id)
+    assert new.file_sha256 != old.file_sha256           # integrity hash updated
+
+
+def test_changed_mtime_only_is_rehashed(conn, tmp_path, monkeypatch):
+    import os as _os
+
+    root = tmp_path / "Pending"
+    path = root / "01.flac"
+    _write_flac(path, audio_md5_bytes=bytes(range(1, 17)))
+    _run(conn, root, now=1000)
+
+    # Same bytes/size, but a newer mtime → treated as changed, so it re-hashes.
+    st = path.stat()
+    _os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    id_spy, sha_spy = _install_hash_spies(monkeypatch)
+    _run(conn, root, now=2000)
+    assert id_spy.calls == 1 and sha_spy.calls == 1
+
+
+def test_rehash_flag_rehashes_everything(conn, tmp_path, monkeypatch):
+    root = tmp_path / "Pending"
+    _write_flac(root / "01.flac", audio_md5_bytes=bytes(range(1, 17)))
+    (root / "cover.jpg").write_bytes(b"\xff\xd8jpeg")
+    # Give the cover an album to attach to so it's inventoried as a sidecar.
+    _write_flac(root / "02.flac", audio_md5_bytes=bytes(range(33, 49)),
+                tags={"album": "Album", "title": "Two", "tracknumber": "2"})
+    _run(conn, root, now=1000)
+
+    loc = ensure_pending_location(conn, 1000)
+
+    id_spy, sha_spy = _install_hash_spies(monkeypatch)
+    inventory_location(conn, location=loc, root=root, now=2000, rehash=True)
+
+    # Both audio files re-identified; every copy (audio + sidecar) re-hashed.
+    assert id_spy.calls == 2
+    assert sha_spy.calls >= 3   # 2 audio + at least 1 sidecar
+
+
+def test_reused_identity_survives_a_moved_mtime_when_size_matches(conn, tmp_path, monkeypatch):
+    """Sanity: unchanged (size,mtime) reuses even the fallback file_sha256 identity."""
+    root = tmp_path / "Pending"
+    # all-zero audio md5 → identity falls back to whole-file sha256
+    _write_flac(root / "01.flac", audio_md5_bytes=b"\x00" * 16)
+    _run(conn, root, now=1000)
+    rows = conn.execute("SELECT identity_kind FROM audio_content").fetchall()
+    assert rows[0]["identity_kind"] == "file_sha256"
+
+    id_spy, sha_spy = _install_hash_spies(monkeypatch)
+    _run(conn, root, now=2000)
+    assert id_spy.calls == 0 and sha_spy.calls == 0
+    assert audio_repo.count(conn) == 1
+
+
+def test_noninventory_update_keeps_mtime_so_next_scan_still_skips(conn, tmp_path, monkeypatch):
+    """A sync/copy write (new file_sha256, no mtime) must not defeat the skip.
+
+    Simulates the copy executor updating a copy's integrity hash without an
+    mtime; the recorded mtime is preserved (COALESCE), so the next inventory
+    scan of the unchanged file still reuses everything and hashes nothing.
+    """
+    root = tmp_path / "Pending"
+    path = root / "01.flac"
+    _write_flac(path, audio_md5_bytes=bytes(range(1, 17)))
+    _run(conn, root, now=1000)
+
+    loc = ensure_pending_location(conn, 1000)
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    recorded_mtime = presence_repo.get(conn, audio.id, loc.id).mtime
+    assert recorded_mtime is not None
+
+    # Non-inventory writer: refresh file_sha256 + observed_utc, omit mtime.
+    presence_repo.set_presence(
+        conn, audio_id=audio.id, location_id=loc.id, present=True,
+        observed_utc=1500, rel_path="01.flac", file_sha256="rewritten",
+        byte_size=path.stat().st_size,
+    )
+    assert presence_repo.get(conn, audio.id, loc.id).mtime == recorded_mtime
+
+    id_spy, sha_spy = _install_hash_spies(monkeypatch)
+    _run(conn, root, now=2000)
+    assert id_spy.calls == 0 and sha_spy.calls == 0

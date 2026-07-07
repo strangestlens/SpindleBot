@@ -87,9 +87,11 @@ class AudioPresence:
     file_sha256: str | None
     byte_size: int | None
     observed_utc: int
+    mtime: int | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "AudioPresence":
+        keys = row.keys()
         return AudioPresence(
             audio_id=row["audio_id"],
             location_id=row["location_id"],
@@ -98,6 +100,7 @@ class AudioPresence:
             file_sha256=row["file_sha256"],
             byte_size=row["byte_size"],
             observed_utc=row["observed_utc"],
+            mtime=row["mtime"] if "mtime" in keys else None,
         )
 
 
@@ -156,9 +159,11 @@ class SidecarPresence:
     file_sha256: str | None
     byte_size: int | None
     observed_utc: int
+    mtime: int | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "SidecarPresence":
+        keys = row.keys()
         return SidecarPresence(
             sidecar_id=row["sidecar_id"],
             location_id=row["location_id"],
@@ -167,6 +172,7 @@ class SidecarPresence:
             file_sha256=row["file_sha256"],
             byte_size=row["byte_size"],
             observed_utc=row["observed_utc"],
+            mtime=row["mtime"] if "mtime" in keys else None,
         )
 
 
