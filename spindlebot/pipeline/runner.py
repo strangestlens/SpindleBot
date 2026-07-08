@@ -408,10 +408,13 @@ class ImportRunner:
         succeeded, so a sync problem here is logged, not promoted to a failure.
         """
         cfg = self.cfg
+        # The same resolved entrypoint the auto-sync branch invokes — the hint
+        # must point at it too, not a hard-coded shim path the user may not have.
+        script = cfg.sync_script or (Path(cfg.pipeline_dir) / "music-sync-rugged.sh")
         if not cfg.auto_sync_on_import:
             self._log(
-                "ℹ️  Not auto-syncing. Run ~/.local/bin/music-sync-rugged.sh to "
-                "push to DwRugged now, or set core.auto_sync_on_import = true."
+                f"ℹ️  Not auto-syncing. Run {script} to push to DwRugged now, "
+                "or set core.auto_sync_on_import = true."
             )
             return
 
@@ -426,7 +429,6 @@ class ImportRunner:
             )
             return
 
-        script = cfg.sync_script or (Path(cfg.pipeline_dir) / "music-sync-rugged.sh")
         self._log("🔄 auto-syncing to DwRugged…")
         try:
             rc = self._sync_runner(script)

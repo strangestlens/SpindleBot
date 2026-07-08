@@ -828,6 +828,25 @@ def test_auto_sync_default_false_logs_hint_and_does_not_sync(tmp_path):
     sync.assert_not_called()
     assert log_contains(cfg, "Not auto-syncing")
     assert log_contains(cfg, "core.auto_sync_on_import = true")
+    # The hint points at the SAME resolved entrypoint auto-sync would invoke
+    # (pipeline_dir fallback here), never a hard-coded ~/.local/bin shim.
+    assert log_contains(cfg, str(cfg.pipeline_dir / "music-sync-rugged.sh"))
+    assert not log_contains(cfg, "~/.local/bin")
+
+
+def test_auto_sync_hint_uses_configured_sync_script(tmp_path):
+    """An explicit cfg.sync_script overrides the pipeline_dir fallback in the
+    hint, matching what the auto-sync branch would actually run."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+    cfg.sync_script = tmp_path / "custom" / "my-sync.sh"
+
+    result = _run_complete_processing_import(cfg, sync_runner=MagicMock(return_value=0))
+
+    assert result.success
+    assert log_contains(cfg, f"Run {cfg.sync_script} to push to DwRugged")
 
 
 def test_auto_sync_true_mounted_invokes_sync(tmp_path):
