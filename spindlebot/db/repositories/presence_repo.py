@@ -74,6 +74,42 @@ def get_by_rel_path(
     return AudioPresence.from_row(row) if row else None
 
 
+def find_present_by_rel_paths(
+    conn: sqlite3.Connection, rel_paths: list[str]
+) -> AudioPresence | None:
+    """Most-recently-observed present presence row matching any of `rel_paths`,
+    across *all* locations.
+
+    Used to parent an orphan sidecar (a `.lrc` whose track was pruned from the
+    scanned location) to the audio_content already recorded elsewhere: the caller
+    passes the sidecar's canonical rel_path stem paired with each audio extension.
+    Returns None when no such content exists in the DB — nothing to link against.
+
+    Ambiguity guard: presence is keyed by (audio_id, location_id), not rel_path,
+    so the same path can be present for more than one distinct audio_id (e.g. a
+    track re-ripped to different decoded audio, present at that path on two
+    locations). When the matches span multiple audio_ids there is no single
+    correct parent, so this returns None rather than guessing.
+    """
+    if not rel_paths:
+        return None
+    placeholders = ",".join("?" * len(rel_paths))
+    rows = conn.execute(
+        f"""
+        SELECT * FROM audio_presence
+        WHERE present = 1 AND rel_path IN ({placeholders})
+        ORDER BY observed_utc DESC
+        """,
+        rel_paths,
+    ).fetchall()
+    if not rows:
+        return None
+    presences = [AudioPresence.from_row(r) for r in rows]
+    if len({p.audio_id for p in presences}) > 1:
+        return None  # ambiguous: same path, multiple distinct contents
+    return presences[0]
+
+
 def list_for_location(
     conn: sqlite3.Connection, location_id: int, *, present: bool | None = None
 ) -> list[AudioPresence]:

@@ -13,6 +13,7 @@ to any registered location and added sidecar discovery.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import time
@@ -49,6 +50,8 @@ from spindlebot.services.locations import (  # noqa: F401
     ensure_pending_location,
     location_uuid,
 )
+
+log = logging.getLogger(__name__)
 
 PENDING_LOCATION_UUID = location_uuid("Pending")
 
@@ -146,6 +149,35 @@ def _resolve_album_for_dir(directory: Path, dir_albums: dict[Path, set[int]]) ->
         if d.parent == directory:
             sub |= albums
     return next(iter(sub)) if len(sub) == 1 else None
+
+
+def _orphan_track_audio_id(conn, path: Path, root: Path) -> int | None:
+    """Parent audio id for a track-level sidecar whose track is absent here.
+
+    The audio was inventoried elsewhere (or here, before a prune) but isn't on
+    disk at this location now, so the in-scan stem index misses it. Match the
+    sidecar's canonical rel_path stem against a present audio_presence at ANY
+    location — the pipeline lays tracks at identical `Artist/Album/…` paths on
+    every location, so the stem is stable. Returns None when no such content
+    exists in the DB: an orphan with nothing to reconcile against.
+    """
+    rel_stem = path.relative_to(root).with_suffix("")
+    candidates = [f"{rel_stem}.{ext}" for ext in AUDIO_EXTENSIONS]
+    pres = presence_repo.find_present_by_rel_paths(conn, candidates)
+    return pres.audio_id if pres is not None else None
+
+
+def _db_dir_albums(conn) -> dict[Path, set[int]]:
+    """Relative-dir → album ids, from every present track across all locations.
+
+    The DB-wide counterpart to the in-scan `dir_albums`, used to attach an
+    album-level orphan sidecar (cover.jpg / bare .nolrc whose album's audio was
+    pruned from here) to the album recorded from a prior inventory elsewhere.
+    """
+    out: dict[Path, set[int]] = defaultdict(set)
+    for rel_path, album_id in album_repo.list_present_track_paths(conn):
+        out[Path(rel_path).parent].add(album_id)
+    return out
 
 
 _EMPTY_TAGS = {
@@ -401,22 +433,40 @@ def inventory_location(
                  current=str(path.relative_to(root)))
             _maybe_checkpoint()
 
+        # DB-wide dir→album index, built lazily on the first album-level orphan.
+        db_dir_albums: dict[Path, set[int]] | None = None
         for path, role in sidecar_files:
             try:
+                rel_path = str(path.relative_to(root))
                 if role is SidecarRole.LRC or _is_track_nolrc(path):
                     # .lrc and per-track <base>.nolrc both parent to the track
-                    # sharing their stem in the same directory.
+                    # sharing their stem in the same directory. When that track
+                    # isn't present here (pruned after sync), fall back to the
+                    # audio identity recorded from another location.
                     audio_id = stem_audio.get((path.parent, path.stem.lower()))
                     if audio_id is None:
-                        continue  # orphan sidecar with no matching track in its dir
+                        audio_id = _orphan_track_audio_id(conn, path, root)
+                    if audio_id is None:
+                        log.info("inventory: skipping orphan sidecar with no known "
+                                 "track: %s", rel_path)
+                        continue
                     parent_kind, parent_id = SidecarParentKind.TRACK, audio_id
                 else:
                     album_id = _resolve_album_for_dir(path.parent, dir_albums)
                     if album_id is None:
-                        continue  # no album to attach this cover/.nolrc to
+                        # Album's audio absent here — resolve against albums known
+                        # from a prior inventory of this or another location.
+                        if db_dir_albums is None:
+                            db_dir_albums = _db_dir_albums(conn)
+                        album_id = _resolve_album_for_dir(
+                            path.relative_to(root).parent, db_dir_albums
+                        )
+                    if album_id is None:
+                        log.info("inventory: skipping orphan album sidecar with no "
+                                 "known album: %s", rel_path)
+                        continue
                     parent_kind, parent_id = SidecarParentKind.ALBUM, album_id
 
-                rel_path = str(path.relative_to(root))
                 st = path.stat()
                 byte_size = st.st_size
                 mtime = st.st_mtime_ns

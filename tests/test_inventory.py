@@ -14,8 +14,10 @@ from spindlebot.core.albums import album_key
 from spindlebot.core.enums import SidecarParentKind, SidecarRole
 from spindlebot.db.connection import open_db
 from spindlebot.db.repositories import (
+    action_repo,
     album_repo,
     audio_repo,
+    location_repo,
     presence_repo,
     scan_repo,
     sidecar_presence_repo,
@@ -431,6 +433,129 @@ def test_inventory_orphan_per_track_nolrc_is_skipped(conn, tmp_path):
     result, _ = _run(conn, root)
     assert result.sidecars == 0
     assert sidecar_repo.count(conn) == 0
+
+
+def test_inventory_registers_orphan_lrc_linked_to_existing_track(conn, tmp_path):
+    # The real gap: audio is synced elsewhere and pruned from here, then a late
+    # .lrc lands. On re-inventory the track is no longer on disk (in-scan stem
+    # index misses it), but the audio_content is already in the DB from the first
+    # scan — so the orphan .lrc must attach to it, not be skipped.
+    root = tmp_path / "Pending"
+    flac = root / "AA" / "Album" / "01.flac"
+    _write_flac(flac, audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    result1, loc = _run(conn, root)
+    assert result1.sidecars == 0
+
+    (root / "AA" / "Album" / "01.lrc").write_text("[00:01.00]hello\n")
+    flac.unlink()  # audio pruned; only the late lyric remains
+    result2, _ = _run(conn, root)
+
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    sc = sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
+                          parent_id=audio.id, role=SidecarRole.LRC)
+    assert sc is not None
+    pres = sidecar_presence_repo.get(conn, sc.id, loc.id)
+    assert pres is not None and pres.present is True
+    assert pres.rel_path == "AA/Album/01.lrc"
+    assert result2.sidecars == 1 and result2.sidecars_new == 1
+
+
+def test_inventory_registers_orphan_sidecars_from_another_location(conn, tmp_path):
+    # Audio lives (and stays) on a retention location; a separate location holds
+    # only late sidecars whose parents were never scanned there. Both the
+    # track-level .lrc and the album-level cover.jpg must link to the identities
+    # recorded from the other location.
+    rugged_root = tmp_path / "DwRugged"
+    _write_flac(rugged_root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    rugged = location_repo.upsert(conn, uuid="rugged", name="DwRugged",
+                                  kind="local_drive", is_retention=True)
+    inventory_location(conn, location=rugged, root=rugged_root, now=1000)
+
+    pending_root = tmp_path / "Pending"
+    (pending_root / "AA" / "Album").mkdir(parents=True)
+    (pending_root / "AA" / "Album" / "01.lrc").write_text("[00:01.00]hi\n")
+    (pending_root / "AA" / "Album" / "cover.jpg").write_bytes(b"\xff\xd8jpeg")
+    result, pending = _run(conn, pending_root)
+
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    lrc = sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
+                           parent_id=audio.id, role=SidecarRole.LRC)
+    assert lrc is not None
+    assert sidecar_presence_repo.get(conn, lrc.id, pending.id).present is True
+
+    al = album_repo.get_by_key(conn, album_key("AA", "Album"))
+    cover = sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                             parent_id=al.id, role=SidecarRole.COVER)
+    assert cover is not None
+    assert sidecar_presence_repo.get(conn, cover.id, pending.id).present is True
+    assert result.sidecars == 2
+
+
+def test_inventory_orphan_sidecar_with_unknown_album_is_skipped(conn, tmp_path):
+    # A .lrc and cover.jpg whose album/track the DB has never seen: there is
+    # nothing to link them to, so both are skipped without error (logged).
+    root = tmp_path / "Pending"
+    (root / "Ghost" / "Album").mkdir(parents=True)
+    (root / "Ghost" / "Album" / "01.lrc").write_text("[00:01.00]x\n")
+    (root / "Ghost" / "Album" / "cover.jpg").write_bytes(b"\xff\xd8jpeg")
+    result, _ = _run(conn, root)
+    assert result.sidecars == 0
+    assert sidecar_repo.count(conn) == 0
+
+
+def test_inventory_orphan_lrc_ambiguous_parent_is_skipped(conn, tmp_path):
+    # The same rel_path is present for two DISTINCT audio_ids (a re-rip to
+    # different decoded audio, present at that path on two locations). There is
+    # no single correct parent, so the orphan .lrc is skipped, never mis-attached.
+    from spindlebot.core.identity import ContentId
+    a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=1000)
+    b = audio_repo.upsert(conn, ContentId("audio_md5", "b" * 32), now=1000)
+    loc_a = location_repo.upsert(conn, uuid="la", name="LocA", kind="local_drive")
+    loc_b = location_repo.upsert(conn, uuid="lb", name="LocB", kind="local_drive")
+    for aud, loc in ((a, loc_a), (b, loc_b)):
+        presence_repo.set_presence(conn, audio_id=aud.id, location_id=loc.id,
+                                   present=True, observed_utc=1000,
+                                   rel_path="AA/Album/01.flac")
+
+    root = tmp_path / "Pending"
+    (root / "AA" / "Album").mkdir(parents=True)
+    (root / "AA" / "Album" / "01.lrc").write_text("[00:01.00]hi\n")
+    result, _ = _run(conn, root)
+    assert result.sidecars == 0
+    assert sidecar_repo.count(conn) == 0
+
+
+def test_registered_orphan_lrc_yields_a_reconciler_copy(conn, tmp_path):
+    # End-to-end: the orphan .lrc registered against DwRugged's audio is now
+    # visible to the reconciler, which proposes copying it back to retention.
+    from spindlebot.core.enums import ActionKind
+    from spindlebot.services.reconciler import reconcile_location
+
+    rugged_root = tmp_path / "DwRugged"
+    _write_flac(rugged_root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    rugged = location_repo.upsert(conn, uuid="rugged", name="DwRugged",
+                                  kind="local_drive", is_retention=True)
+    inventory_location(conn, location=rugged, root=rugged_root, now=1000)
+
+    pending_root = tmp_path / "Pending"
+    (pending_root / "AA" / "Album").mkdir(parents=True)
+    (pending_root / "AA" / "Album" / "01.lrc").write_text("[00:01.00]hi\n")
+    pending = location_repo.upsert(conn, uuid="pending", name="Pending",
+                                   kind="library", is_authoritative_audio=True)
+    inventory_location(conn, location=pending, root=pending_root, now=1000)
+
+    result = reconcile_location(conn, target=rugged,
+                                source_locations=[pending], now=2000)
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    lrc = sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
+                           parent_id=audio.id, role=SidecarRole.LRC)
+    sidecar_copies = [a for a in action_repo.list_for_run(conn, result.run_id)
+                      if a.action_kind == ActionKind.COPY and a.content_kind == "sidecar"]
+    assert len(sidecar_copies) == 1
+    assert sidecar_copies[0].content_id == lrc.id
+    assert sidecar_copies[0].dest_location_id == rugged.id
 
 
 def test_inventory_bare_nolrc_still_album_level(conn, tmp_path):
