@@ -117,6 +117,89 @@ def test_inventory_ignores_non_audio_and_missing_root(conn, tmp_path):
     assert missing.scanned == 0
 
 
+def test_inventory_skips_appledouble_files(conn, tmp_path):
+    # macOS writes ._<name> AppleDouble companions onto exFAT/FAT (DAP cards).
+    # They carry a real file's extension but are resource-fork junk — must be
+    # skipped before classification, never hashed or recorded.
+    root = tmp_path / "M0Pro"
+    album = root / "Artist" / "Album"
+    _write_flac(album / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)),
+                tags={"artist": "Artist", "album": "Album", "title": "One"})
+    (album / "cover.jpg").write_bytes(b"real cover")
+    # AppleDouble companions — sort before their real counterparts, so a naive
+    # walk would hit these first (this is what crashed the M0Pro scan at 0/N).
+    (album / "._01.flac").write_bytes(b"Mac OS X\x00\x00\x00\x02")
+    (album / "._cover.jpg").write_bytes(b"Mac OS X\x00\x00\x00\x02")
+    (album / "._01.lrc").write_bytes(b"Mac OS X\x00\x00\x00\x02")
+
+    result, loc = _run(conn, root)
+
+    assert result.scanned == 1 and result.new == 1 and result.errors == 0
+    assert audio_repo.count(conn) == 1
+    assert result.sidecars == 1  # only the real cover.jpg, not ._cover.jpg / ._01.lrc
+
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    assert audio is not None and audio.title == "One"
+
+
+def test_read_tags_returns_full_shape_for_unreadable_file(tmp_path):
+    # The contract that KeyError'd the M0Pro scan: an unreadable audio file must
+    # yield the full key set (all None), never a dict missing keys.
+    bad = tmp_path / "garbage.flac"
+    bad.write_bytes(b"this is not a flac file")
+    tags = inventory._read_tags(bad)
+    assert set(tags) == {"artist", "albumartist", "album", "title",
+                         "disc_no", "track_no", "duration_s", "mb_albumid"}
+    assert all(v is None for v in tags.values())
+
+
+def test_inventory_does_not_abort_on_unreadable_audio_file(conn, tmp_path):
+    # Regression for the KeyError crash: a mutagen-unreadable file (sorted first)
+    # must not abort the whole scan — the following good track still records.
+    root = tmp_path / "Pending"
+    (root / "Artist" / "Album").mkdir(parents=True)
+    (root / "Artist" / "Album" / "00_bad.flac").write_bytes(b"not a real flac")
+    _write_flac(root / "Artist" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)),
+                tags={"artist": "Artist", "album": "Album", "title": "One"})
+
+    result, _ = _run(conn, root)
+
+    # Both files scanned; the good one is fully tagged. The bad one falls back to
+    # a file_sha256 identity (a real file whose bytes we still track), tags None.
+    assert result.scanned == 2 and result.errors == 0
+    good = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    assert good is not None and good.title == "One"
+
+
+def test_inventory_isolates_keyerror_from_bad_tag_dict(conn, tmp_path, monkeypatch):
+    # Belt-and-suspenders: if _read_tags ever regresses to a partial dict, the
+    # per-file isolation must catch the KeyError, count it, and keep scanning.
+    root = tmp_path / "Pending"
+    _write_flac(root / "Artist" / "Album" / "00_first.flac",
+                audio_md5_bytes=bytes(range(1, 17)),
+                tags={"artist": "A", "album": "Album", "title": "First"})
+    _write_flac(root / "Artist" / "Album" / "01_second.flac",
+                audio_md5_bytes=bytes(range(17, 33)),
+                tags={"artist": "A", "album": "Album", "title": "Second"})
+
+    real_read_tags = inventory._read_tags
+
+    def flaky(path):
+        if path.name == "00_first.flac":
+            return {}  # simulate the old contract violation
+        return real_read_tags(path)
+
+    monkeypatch.setattr(inventory, "_read_tags", flaky)
+    result, _ = _run(conn, root)
+
+    assert result.scanned == 2 and result.errors == 1
+    assert any("00_first.flac" in p for p in result.error_paths)
+    # The second, well-formed track still lands in the DB.
+    assert audio_repo.get_by_identity(conn, bytes(range(17, 33)).hex()) is not None
+
+
 def test_scan_status_closed_set():
     from spindlebot.core.enums import ScanStatus
     assert set(ScanStatus) == {
