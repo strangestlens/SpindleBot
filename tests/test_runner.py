@@ -779,6 +779,172 @@ def test_runner_without_spindlebot_cfg_lands_in_pending(tmp_path):
     assert not any(s.name == "promote" for s in result.stages)
 
 
+# ── auto-sync on import ───────────────────────────────────────────────────────
+#
+# Reuses the Processing-world scaffolding: a lyric-complete album under
+# Processing that promotes to Pending, then the end-of-run auto-sync-or-hint
+# block fires (spindlebot_cfg is set). The sync itself is injected, so nothing
+# shells out.
+
+
+def _run_complete_processing_import(cfg, *, sync_runner=None):
+    """Drive a full, successful single-album import through the Processing flow.
+
+    Returns the ImportResult. The album is lyric-complete so it promotes and the
+    run succeeds, reaching the auto-sync-or-hint block.
+    """
+    album = cfg.processing_dir / "Artist" / "Album"
+    _write_flac(album / "01. Track.flac", tags={"albumartist": "Artist", "album": "Album"})
+    _mark_lrc(album / "01. Track.flac")
+    album_paths = sorted(album.glob("*.flac"))
+
+    with patch(_CHECK_WAIT, return_value=None), \
+         patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_COUNT_DISCS, return_value=1), \
+         patch("spindlebot.pipeline.runner.notify",
+               return_value=MagicMock(macos_error=None, telegram_error=None)), \
+         patch("spindlebot.pipeline.stages.fetch_art.fetch_art",
+               return_value=MagicMock(embedded=0, skipped=0, missing=0, errors=0)), \
+         patch("spindlebot.pipeline.stages.fetch_lyrics.fetch_lyrics",
+               return_value=MagicMock(synced=1, plain=0, missing=0, errors=[])), \
+         patch(_SUBPROCESS,
+               side_effect=_runner_beet_stub(cfg.processing_dir, album_paths, cfg.pending_dir)):
+        return ImportRunner(cfg, sync_runner=sync_runner).run()
+
+
+def test_auto_sync_default_false_logs_hint_and_does_not_sync(tmp_path):
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+    # auto_sync_on_import defaults to False; retention mounted would be irrelevant.
+    cfg.retention_path = tmp_path  # exists, but must be ignored when flag is off
+
+    sync = MagicMock(return_value=0)
+    result = _run_complete_processing_import(cfg, sync_runner=sync)
+
+    assert result.success
+    sync.assert_not_called()
+    assert log_contains(cfg, "Not auto-syncing")
+    assert log_contains(cfg, "core.auto_sync_on_import = true")
+    # The hint points at the SAME resolved entrypoint auto-sync would invoke
+    # (pipeline_dir fallback here), never a hard-coded ~/.local/bin shim.
+    assert log_contains(cfg, str(cfg.pipeline_dir / "music-sync-rugged.sh"))
+    assert not log_contains(cfg, "~/.local/bin")
+
+
+def test_auto_sync_hint_uses_configured_sync_script(tmp_path):
+    """An explicit cfg.sync_script overrides the pipeline_dir fallback in the
+    hint, matching what the auto-sync branch would actually run."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+    cfg.sync_script = tmp_path / "custom" / "my-sync.sh"
+
+    result = _run_complete_processing_import(cfg, sync_runner=MagicMock(return_value=0))
+
+    assert result.success
+    assert log_contains(cfg, f"Run {cfg.sync_script} to push to DwRugged")
+
+
+def test_auto_sync_true_mounted_invokes_sync(tmp_path):
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+    cfg.auto_sync_on_import = True
+    cfg.retention_path = tmp_path  # exists → "mounted"
+    cfg.sync_script = tmp_path / "pipeline" / "music-sync-rugged.sh"
+
+    sync = MagicMock(return_value=0)
+    result = _run_complete_processing_import(cfg, sync_runner=sync)
+
+    assert result.success
+    sync.assert_called_once_with(cfg.sync_script)
+    assert log_contains(cfg, "auto-syncing to DwRugged")
+    assert not log_contains(cfg, "isn't mounted")
+
+
+def test_auto_sync_true_not_mounted_does_not_invoke(tmp_path):
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+    cfg.auto_sync_on_import = True
+    cfg.retention_path = tmp_path / "DwRugged" / "does-not-exist"  # not mounted
+
+    sync = MagicMock(return_value=0)
+    result = _run_complete_processing_import(cfg, sync_runner=sync)
+
+    assert result.success
+    sync.assert_not_called()
+    assert log_contains(cfg, "isn't mounted")
+
+
+def test_auto_sync_failure_logged_but_import_succeeds(tmp_path):
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+    cfg.auto_sync_on_import = True
+    cfg.retention_path = tmp_path  # mounted
+
+    sync = MagicMock(return_value=3)  # sync script exits nonzero
+    result = _run_complete_processing_import(cfg, sync_runner=sync)
+
+    assert result.success, "a sync failure must not turn a successful import into a failure"
+    sync.assert_called_once()
+    assert log_contains(cfg, "auto-sync exited 3")
+
+
+def test_failed_import_never_auto_syncs(tmp_path):
+    """Flag on + drive mounted, but the import itself fails → no auto-sync."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    cfg.spindlebot_cfg = MagicMock()
+    cfg.auto_sync_on_import = True
+    cfg.retention_path = tmp_path  # mounted
+
+    sync = MagicMock(return_value=0)
+    beet_fail = MagicMock(returncode=1, stdout="", stderr="beet error")
+    with patch(_CHECK_WAIT, return_value=None), \
+         patch(_PRETAG, return_value=True), \
+         patch(_SUBPROCESS, return_value=beet_fail):
+        result = ImportRunner(cfg, sync_runner=sync).run()
+
+    assert not result.success
+    sync.assert_not_called()
+    assert not log_contains(cfg, "auto-syncing to DwRugged")
+
+
+def test_default_sync_runner_logs_stderr_tail_on_failure(tmp_path):
+    """A sync script that dies before opening rugged-sync.log (bootstrap/config
+    error) leaves its stderr as the only trace — the default runner must log a
+    tail of it (file only, echo=False) while preserving the exit code."""
+    cfg = _make_config(tmp_path)
+    runner = ImportRunner(cfg)
+
+    fail = MagicMock(returncode=1, stdout="",
+                     stderr="line1\nERROR: SpindleBot not configured. Run setup.sh.")
+    echoed = []
+    runner._echo = echoed.append
+    with patch(_SUBPROCESS, return_value=fail):
+        rc = runner._default_sync_runner(tmp_path / "music-sync-rugged.sh")
+
+    assert rc == 1
+    assert log_contains(cfg, "ERROR: SpindleBot not configured")
+    assert echoed == [], "sync output tail must go to the log file only"
+
+    # Success produces no output-tail logging.
+    ok = MagicMock(returncode=0, stdout="noise", stderr="")
+    with patch(_SUBPROCESS, return_value=ok):
+        rc = runner._default_sync_runner(tmp_path / "music-sync-rugged.sh")
+    assert rc == 0
+    assert not log_contains(cfg, "noise")
+
+
 # ── already-in-library duplicate handling ─────────────────────────────────────
 
 

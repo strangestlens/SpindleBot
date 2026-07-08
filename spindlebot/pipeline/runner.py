@@ -83,6 +83,13 @@ class ImportConfig:
     # Full SpindleBotConfig — used by stages that need notifications/secrets.
     # Optional so existing tests that build ImportConfig directly don't break.
     spindlebot_cfg: Optional[object] = None
+    # Auto-sync (opt-in): after a successful import, fire the mount-sync flow.
+    auto_sync_on_import: bool = False
+    # The retention destination path (e.g. /Volumes/DwRugged/Music/Library);
+    # its existence is the "is the drive mounted?" check. None → never mounted.
+    retention_path: Optional[Path] = None
+    # The self-guarding sync script; defaults to pipeline_dir/music-sync-rugged.sh.
+    sync_script: Optional[Path] = None
 
 
 @dataclass
@@ -124,9 +131,12 @@ class ImportRunner:
         self,
         config: ImportConfig,
         echo: Optional[Callable[[str], None]] = None,
+        sync_runner: Optional[Callable[[Path], int]] = None,
     ) -> None:
         self.cfg = config
         self._echo = echo
+        # Injectable so tests never shell out for real; returns the sync exit code.
+        self._sync_runner = sync_runner or self._default_sync_runner
 
     def _log(self, msg: str, *, echo: bool = True) -> None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -364,7 +374,71 @@ class ImportRunner:
         # does NOT fail the run — that album is simply caught up later by
         # `spindlebot finalize`.
         result.success = not promote_move_failed
+
+        # Auto-sync (opt-in) runs only on a fully successful import, and only in
+        # the real pipeline (spindlebot_cfg set — mirrors the via_processing
+        # gate; programmatic/test runs with no cfg skip it entirely). Pending is
+        # complete-by-construction now, so it's safe to push.
+        if result.success and cfg.spindlebot_cfg is not None:
+            self._auto_sync_or_hint()
+
         return result
+
+    def _default_sync_runner(self, script: Path) -> int:
+        """Fire the self-guarding mount-sync script; return its exit code.
+
+        The script logs to rugged-sync.log itself, but an early bootstrap or
+        config error can die before that log is ever opened — so on a nonzero
+        exit, the captured stderr (or stdout) tail is the only trace of why.
+        Logged to the file only (echo=False) to keep the terminal uncluttered.
+        """
+        proc = subprocess.run([str(script)], capture_output=True, text=True)
+        if proc.returncode != 0:
+            output = (proc.stderr or proc.stdout or "").strip()
+            if output:
+                tail = "\n".join(output.splitlines()[-5:])
+                self._log(f"auto-sync output tail:\n{tail}", echo=False)
+        return proc.returncode
+
+    def _auto_sync_or_hint(self) -> None:
+        """After a successful import: either kick off the mount-sync (opt-in) or
+        log a tail-friendly hint on how to sync manually.
+
+        Never raises and never mutates the import result — the import already
+        succeeded, so a sync problem here is logged, not promoted to a failure.
+        """
+        cfg = self.cfg
+        # The same resolved entrypoint the auto-sync branch invokes — the hint
+        # must point at it too, not a hard-coded shim path the user may not have.
+        script = cfg.sync_script or (Path(cfg.pipeline_dir) / "music-sync-rugged.sh")
+        if not cfg.auto_sync_on_import:
+            self._log(
+                f"ℹ️  Not auto-syncing. Run {script} to push to DwRugged now, "
+                "or set core.auto_sync_on_import = true."
+            )
+            return
+
+        # The retention destination path existing == the drive is mounted. Don't
+        # invoke the sync when it isn't — the script would just no-op, and a
+        # clear log line tells the user to run it on reconnect.
+        retention = cfg.retention_path
+        if retention is None or not retention.exists():
+            self._log(
+                "auto-sync on, but DwRugged isn't mounted — run the sync when "
+                "you reconnect it."
+            )
+            return
+
+        self._log("🔄 auto-syncing to DwRugged…")
+        try:
+            rc = self._sync_runner(script)
+        except Exception as exc:
+            self._log(f"auto-sync could not start: {exc}")
+            return
+        if rc != 0:
+            self._log(f"auto-sync exited {rc} — check rugged-sync.log")
+        else:
+            self._log("auto-sync finished ✓", echo=False)
 
     def _resolve_album_batches(self, album_dir: Path) -> list[_AlbumBatch]:
         """Split album_dir into per-album batches by album_key.

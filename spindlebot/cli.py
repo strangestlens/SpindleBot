@@ -28,6 +28,22 @@ import sys
 from pathlib import Path
 
 
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _retention_path(destinations) -> Path | None:
+    """Path of the first enabled local_drive destination, or None.
+
+    Auto-sync's mount check is `path.exists()`, which is meaningless for an
+    rclone remote (always false) — so only a local_drive destination can serve
+    as the retention mount probe.
+    """
+    return next(
+        (Path(d.path) for d in destinations
+         if d.enabled and d.type == "local_drive"),
+        None,
+    )
+
+
 # ── check ─────────────────────────────────────────────────────────────────────
 
 def cmd_check(cfg) -> int:
@@ -110,10 +126,13 @@ def cmd_check(cfg) -> int:
 
 def cmd_config_shell(cfg) -> int:
     """Emit shell-safe exports for every config value needed by shell scripts."""
-    # Primary destination path (first enabled one)
-    dest_path = next(
-        (d.path for d in cfg.destinations if d.enabled), ""
-    )
+    # Primary destination path — the first enabled LOCAL_DRIVE destination,
+    # the same selection as ImportConfig.retention_path. music-sync-rugged.sh
+    # uses this as REMOTE for its `[ ! -d "$REMOTE" ]` mount check, so an
+    # rclone remote here would make the script silently no-op even with the
+    # drive mounted.
+    retention = _retention_path(cfg.destinations)
+    dest_path = str(retention) if retention is not None else ""
 
     exports = {
         "SPINDLEBOT_PENDING_DIR":      str(cfg.core.pending_dir),
@@ -133,6 +152,7 @@ def cmd_config_shell(cfg) -> int:
         "SPINDLEBOT_LYRICS_DELAY":     str(cfg.lyrics.request_delay_seconds),
         "SPINDLEBOT_MACOS_NOTIFY":     "1" if cfg.notifications.macos_notify else "0",
         "SPINDLEBOT_TELEGRAM_ENABLED": "1" if cfg.notifications.telegram_enabled else "0",
+        "SPINDLEBOT_AUTO_SYNC_ON_IMPORT": "1" if cfg.core.auto_sync_on_import else "0",
     }
 
     for key, val in exports.items():
@@ -705,6 +725,9 @@ def main(argv: list[str] | None = None) -> int:
             pipeline_dir=cfg.pipeline_dir,
             log_file=cfg.core.log_dir / "watcher.log",
             spindlebot_cfg=cfg,
+            auto_sync_on_import=cfg.core.auto_sync_on_import,
+            retention_path=_retention_path(cfg.destinations),
+            sync_script=cfg.pipeline_dir / "music-sync-rugged.sh",
         )
         print(f"💿 {Path(trigger).name}")
         runner = ImportRunner(import_cfg, echo=lambda msg: print(f"  {msg}"))
