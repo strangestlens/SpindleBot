@@ -30,8 +30,13 @@ def _audio(conn, identity="a" * 32):
     return audio_repo.upsert(conn, ContentId("audio_md5", identity), now=0)
 
 
+_UUID_BY_ID = {1: "a", 2: "b"}  # matches the locations created in the `conn` fixture
+
+
 def _obs(location_id, name, sha):
-    return LyricObservation(location_id=location_id, name=name, sha=sha)
+    """A vclock actor keyed on the STABLE uuid; `name` is display-only."""
+    return LyricObservation(location_id=location_id, uuid=_UUID_BY_ID[location_id],
+                            name=name, sha=sha)
 
 
 def _held(lineage, location_id):
@@ -140,3 +145,59 @@ def test_rerun_with_unchanged_shas_is_idempotent(conn):
     assert len(lyric_repo.list_versions(conn, second.doc_id)) == n_after_first
     assert lyric_repo.head_version(conn, second.doc_id).id == head_after_first
     assert len(second.concurrent) == len(first.concurrent) == 1
+
+
+# ── legacy NULL-head repair (item 1) ──────────────────────────────────────────
+
+def test_legacy_doc_with_versions_but_null_head_does_not_explode(conn):
+    # The OLD reconciler minted versions and never set a head. On the first post-v7
+    # reconcile, a NULL head must not classify every held version as concurrent.
+    a = _audio(conn)
+    doc = lyric_repo.ensure_doc(conn, a.id, now=0)
+    # two legacy versions, agreeing locations now both hold the LATEST one; head NULL
+    lyric_repo.add_version(conn, doc_id=doc.id, sha256="old",
+                           vclock_json=vclock.to_json({"a": 1}), source="scan", now=0)
+    lyric_repo.add_version(conn, doc_id=doc.id, sha256="new",
+                           vclock_json=vclock.to_json({"b": 1}), source="scan", now=0)
+    assert lyric_repo.head_version(conn, doc.id) is None
+
+    lineage = lyrics_sync.reconcile_doc(
+        conn, audio_id=a.id, now=100,
+        observations=[_obs(1, "A", "new"), _obs(2, "B", "new")],
+    )
+    # head repaired to the latest version; both locations current → NO conflict
+    assert lineage.head_version_id is not None
+    assert lineage.concurrent == []
+    assert _held(lineage, 1).is_head and _held(lineage, 2).is_head
+    # a genuinely divergent legacy doc still surfaces at most one conflict, never N
+    other = _audio(conn, "c" * 32)
+    d2 = lyric_repo.ensure_doc(conn, other.id, now=0)
+    lyric_repo.add_version(conn, doc_id=d2.id, sha256="old",
+                           vclock_json=vclock.to_json({"a": 1}), source="scan", now=0)
+    lyric_repo.add_version(conn, doc_id=d2.id, sha256="new",
+                           vclock_json=vclock.to_json({"b": 1}), source="scan", now=0)
+    div = lyrics_sync.reconcile_doc(
+        conn, audio_id=other.id, now=100,
+        observations=[_obs(1, "A", "old"), _obs(2, "B", "new")],
+    )
+    assert len(div.concurrent) == 1
+
+
+# ── stable actor key across a rename (item 4) ─────────────────────────────────
+
+def test_rename_between_edits_stays_linear_not_concurrent(conn):
+    a = _audio(conn)
+    lyrics_sync.reconcile_doc(conn, audio_id=a.id, now=100,
+                              observations=[_obs(1, "A", "s1")])
+    # location 1 is renamed, then edits again; the vclock actor is its uuid, so
+    # the second edit must still fast-forward (dominate), not read as concurrent.
+    lineage = lyrics_sync.reconcile_doc(conn, audio_id=a.id, now=200,
+                                        observations=[_obs(1, "A-renamed", "s2")])
+    assert lineage.concurrent == []
+    versions = lyric_repo.list_versions(conn, lineage.doc_id)
+    head = lyric_repo.head_version(conn, lineage.doc_id)
+    old = next(v for v in versions if v.id != head.id)
+    assert vclock.strictly_dominates(vclock.from_json(head.vclock_json),
+                                     vclock.from_json(old.vclock_json))
+    # actor key is the stable uuid "a", never the mutable display name
+    assert set(vclock.from_json(head.vclock_json)) == {"a"}

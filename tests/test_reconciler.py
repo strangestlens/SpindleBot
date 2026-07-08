@@ -422,6 +422,45 @@ def test_behind_location_is_not_a_conflict(conn):
     assert rugged_v.version_id != head.id
 
 
+def test_conflict_not_proposed_for_target_not_party_to_divergence(conn):
+    # pending<->rugged diverge; dap (the target) agrees with the head side. The
+    # dap review must NOT attach that conflict to itself — it isn't a party.
+    pending, rugged = _pending(conn), _rugged(conn)
+    dap = _loc(conn, "dap", "DAP", is_retention=True)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "sha-AAA")   # becomes head (lowest location id)
+    _lrc(conn, x.id, rugged.id, "sha-BBB")    # concurrent with head
+    _lrc(conn, x.id, dap.id, "sha-AAA")       # dap holds the head version
+    _scan(conn, dap.id)
+
+    result = reconcile_location(conn, target=dap,
+                                source_locations=[pending, rugged], now=1000)
+
+    assert result.conflicts == 0
+    actions = [a for a in action_repo.list_for_run(conn, result.run_id)
+               if a.action_kind == ActionKind.RESOLVE_CONFLICT]
+    assert actions == []
+    # no conflict row opened during a review dap isn't party to
+    assert conflict_repo.find_open_for_audio(conn, x.id) is None
+
+
+def test_resolve_action_names_head_and_concurrent_sides(conn):
+    pending, rugged = _pending(conn), _rugged(conn)   # pending id < rugged id
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "sha-AAA")   # head side (winner)
+    _lrc(conn, x.id, rugged.id, "sha-BBB")    # target holds the concurrent version
+    _scan(conn, rugged.id)
+    result = reconcile_location(conn, target=rugged,
+                                source_locations=[pending], now=1000)
+    action = next(a for a in action_repo.list_for_run(conn, result.run_id)
+                  if a.action_kind == ActionKind.RESOLVE_CONFLICT)
+    # source = a head-holder (winner), dest = the target (concurrent/loser side)
+    assert action.source_location_id == pending.id
+    assert action.dest_location_id == rugged.id
+    assert "head on Pending" in action.reason
+    assert "concurrent on DwRugged" in action.reason
+
+
 def test_run_note_records_below_floor(conn):
     pending, rugged = _pending(conn), _rugged(conn)
     x = _audio(conn, "x" * 32)

@@ -38,7 +38,8 @@ from spindlebot.db.repositories import lyric_repo, lyric_version_presence_repo
 class LyricObservation:
     """A track's .lrc observed present at one location, with its per-copy sha."""
     location_id: int
-    name: str            # vclock actor key (human-readable location name)
+    uuid: str            # STABLE vclock actor key — survives a location rename
+    name: str            # human-readable, for messaging/logs only (never causality)
     sha: str
 
 
@@ -87,8 +88,18 @@ def reconcile_doc(
     # Read PRIOR per-location versions before we touch presence this pass — a
     # location's "base" must be what it held on the previous scan.
     prior = {p.location_id: p for p in lyric_version_presence_repo.list_for_doc(conn, doc.id)}
-    by_sha = {v.sha256: v for v in lyric_repo.list_versions(conn, doc.id)}
+    existing_versions = lyric_repo.list_versions(conn, doc.id)
+    by_sha = {v.sha256: v for v in existing_versions}
     head = lyric_repo.head_version(conn, doc.id)
+
+    # REPAIR legacy docs: the OLD reconciler minted versions but never set a head.
+    # Left NULL, `head is None` would classify every held version as concurrent —
+    # a flood of spurious conflicts on the first post-v7 reconcile. Adopt the
+    # latest version (highest id) as head; a single-version doc then reads as
+    # current, a genuinely divergent one still surfaces exactly one real conflict.
+    if head is None and existing_versions:
+        head = existing_versions[-1]
+        lyric_repo.set_head(conn, doc.id, head.id, now)
 
     resolved: list[tuple[LyricObservation, int]] = []
     for obs in sorted(observations, key=lambda o: o.location_id):
@@ -104,8 +115,8 @@ def reconcile_doc(
             linear = head is None or (base is not None and base.id == head.id)
             if linear:
                 new_vc = (
-                    vclock.bump(vclock.from_json(head.vclock_json), obs.name)
-                    if head is not None else {obs.name: 1}
+                    vclock.bump(vclock.from_json(head.vclock_json), obs.uuid)
+                    if head is not None else {obs.uuid: 1}
                 )
                 version = lyric_repo.add_version(
                     conn, doc_id=doc.id, sha256=obs.sha,
@@ -117,7 +128,7 @@ def reconcile_doc(
                 # Independent edit off L's own (older/None) base — concurrent with
                 # a head that advanced elsewhere.
                 base_vc = vclock.from_json(base.vclock_json) if base is not None else {}
-                new_vc = vclock.bump(base_vc, obs.name)
+                new_vc = vclock.bump(base_vc, obs.uuid)
                 version = lyric_repo.add_version(
                     conn, doc_id=doc.id, sha256=obs.sha,
                     vclock_json=vclock.to_json(new_vc), source="scan", now=now,

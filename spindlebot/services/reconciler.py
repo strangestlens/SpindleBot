@@ -83,7 +83,8 @@ def _lyric_observations(
             if not sha:
                 continue
             obs.setdefault(audio_id, []).append(
-                LyricObservation(location_id=loc.id, name=loc.name, sha=sha)
+                LyricObservation(location_id=loc.id, uuid=loc.uuid,
+                                 name=loc.name, sha=sha)
             )
     return obs
 
@@ -218,10 +219,15 @@ def reconcile_location(
             lineage = lyrics_sync.reconcile_doc(
                 conn, audio_id=audio_id, observations=observations, now=now
             )
-            concurrent = lineage.concurrent
-            if not concurrent:
+            # Only act when the TARGET is a party to the divergence (holds a
+            # concurrent version). A conflict between two OTHER locations belongs
+            # to their own reviews, not this target's — and the conflict row is
+            # deduped, so whichever party reviews first opens it once.
+            loser = next((h for h in lineage.concurrent
+                          if h.location_id == target.id), None)
+            if loser is None:
                 continue
-            loser = concurrent[0]
+            winner = next((h for h in lineage.held if h.is_head), None)
             if conflict_repo.find_open_for_audio(conn, audio_id) is None:
                 conflict_repo.open_conflict(
                     conn, audio_id=audio_id,
@@ -231,8 +237,13 @@ def reconcile_location(
             action_repo.add(
                 conn, run_id=run_id, action_kind=ActionKind.RESOLVE_CONFLICT,
                 content_kind=ContentKind.AUDIO, content_id=audio_id,
-                source_location_id=loser.location_id, dest_location_id=target.id,
-                now=now, reason=f"concurrent lyric edits diverge on {target.name}",
+                source_location_id=winner.location_id if winner else None,
+                dest_location_id=target.id, now=now,
+                reason=(
+                    "lyrics diverge: head on "
+                    f"{winner.location_name if winner else 'another copy'}, "
+                    f"concurrent on {target.name}"
+                ),
             )
             result.conflicts += 1
             _tick("conflict")
