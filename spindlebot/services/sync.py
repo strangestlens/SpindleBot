@@ -25,7 +25,7 @@ from __future__ import annotations
 import subprocess
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from spindlebot.core.enums import ActionKind, ContentKind, RunKind, ScanStatus
@@ -297,9 +297,9 @@ class DeleteResult:
     deleted: int = 0       # retention copies removed (or would-be, under dry_run)
     bytes_freed: int = 0
     refused: int = 0       # safely declined: non-retention source or below-floor
-    skipped: int = 0       # non-audio content (DELETE is audio-only today)
+    skipped: int = 0       # non-audio content only (DELETE is audio-only today)
     refused_reasons: list[str] = field(default_factory=list)  # why each refusal (warnings, not errors)
-    errors: list[str] = field(default_factory=list)  # genuine failures (unmounted, OSError)
+    errors: list[str] = field(default_factory=list)  # genuine failures (unmounted, bad rel_path, OSError)
 
 
 def execute_deletes(
@@ -329,7 +329,9 @@ def execute_deletes(
 
     Both refusals are safe, expected outcomes (not failures): they go in
     `refused` / `refused_reasons` as warnings, never in `errors`. `errors` is
-    reserved for genuine failures (unmounted/unidentified location, OSError).
+    reserved for genuine failures (unmounted/unidentified location, an unsafe
+    rel_path — absolute or containing `..` — that could unlink outside the
+    location root, OSError). `skipped` means strictly non-audio content.
 
     The non-retention Pending/authoring copy is never counted toward the floor
     (that is `count_retention_copies`'s job) — so it can never make a delete look
@@ -355,9 +357,20 @@ def execute_deletes(
                        if action.source_location_id is not None else None)
                 root = resolve_root(loc) if loc else None
                 if root is None or not action.rel_path:
-                    result.skipped += 1
                     result.errors.append(
                         f"action {action.id}: location not mounted or identified")
+                    continue
+
+                # Destructive-path hardening: rel_path must be a real relative path
+                # inside root. An absolute path would make `root / rel_path` discard
+                # root; a `..` segment could traverse outside it — either way we'd
+                # unlink outside the location. Refuse (as an error) before building
+                # the target, never touch bytes.
+                rp = PurePosixPath(action.rel_path)
+                if rp.is_absolute() or ".." in rp.parts:
+                    result.errors.append(
+                        f"action {action.id}: unsafe rel_path {action.rel_path!r} "
+                        f"(absolute or contains '..') — not deleted")
                     continue
 
                 # DELETE is only for retention copies — never unlink an authoring

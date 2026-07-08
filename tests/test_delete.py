@@ -208,7 +208,34 @@ def test_unmounted_source_is_a_genuine_error(conn, tmp_path):
     result = execute_deletes(conn, now=1000, dry_run=False, min_copies=1)
 
     assert result.deleted == 0 and result.refused == 0
+    assert result.skipped == 0                           # skipped is non-audio only
     assert result.errors and not result.refused_reasons  # a real failure, not a refusal
+
+
+@pytest.mark.parametrize("bad_rel", ["/etc/passwd", "../../../etc/passwd",
+                                     "Artist/../../outside.flac"])
+def test_unsafe_rel_path_is_refused_and_deletes_nothing(conn, tmp_path, bad_rel):
+    # An absolute or `..`-containing rel_path could unlink OUTSIDE the location
+    # root — validate before building the target; record an error, delete nothing.
+    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", retention=True)
+    a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
+    # a sentinel file OUTSIDE any location root that a traversal could target
+    outside = tmp_path / "outside.flac"
+    outside.write_bytes(b"do not touch")
+    good = "Artist/Album/01.flac"
+    rf, df = _put(rugged, good), _put(dap, good)
+    _present(conn, a, rugged, good, rf)
+    _present(conn, a, dap, good, df)
+    action = _propose_delete(conn, audio=a, loc=dap, rel=bad_rel)
+
+    result = execute_deletes(conn, now=1000, dry_run=False, min_copies=1)
+
+    assert result.deleted == 0 and result.refused == 0 and result.skipped == 0
+    assert result.errors and not result.refused_reasons  # a real failure
+    assert outside.exists()                              # nothing outside touched
+    assert rf.exists() and df.exists()
+    assert action_repo.get(conn, action.id).executed_utc is None
 
 
 def test_only_processes_delete_actions(conn, tmp_path):
