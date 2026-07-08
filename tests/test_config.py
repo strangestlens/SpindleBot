@@ -434,6 +434,41 @@ class TestDestinations(unittest.TestCase):
             Path("/Volumes/DwRugged/Music/Library"),
         )
 
+    def test_config_shell_destination_path_prefers_local_drive(self):
+        # music-sync-rugged.sh uses SPINDLEBOT_DESTINATION_PATH as REMOTE for
+        # its own `[ ! -d "$REMOTE" ]` mount check — an enabled rclone
+        # destination listed first must not be exported, or the script would
+        # silently no-op even with the drive mounted.
+        import contextlib
+        import io
+
+        from spindlebot.cli import cmd_config_shell
+
+        config = MINIMAL_CONFIG + textwrap.dedent("""\
+            [[destinations]]
+            name    = "Backblaze"
+            type    = "rclone"
+            path    = "b2:my-bucket/Library"
+            enabled = true
+
+            [[destinations]]
+            name    = "DwRugged"
+            type    = "local_drive"
+            path    = "/Volumes/DwRugged/Music/Library"
+            enabled = true
+        """)
+        _write(self.tmp, "config.toml", config)
+        cfg = _load_with_dir(self.tmp)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cmd_config_shell(cfg)
+        self.assertIn(
+            "export SPINDLEBOT_DESTINATION_PATH='/Volumes/DwRugged/Music/Library'",
+            out.getvalue(),
+        )
+        self.assertNotIn("b2:my-bucket", out.getvalue())
+
     def test_retention_path_none_without_local_drive(self):
         from spindlebot.cli import _retention_path
 

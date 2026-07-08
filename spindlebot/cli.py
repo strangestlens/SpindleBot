@@ -126,10 +126,13 @@ def cmd_check(cfg) -> int:
 
 def cmd_config_shell(cfg) -> int:
     """Emit shell-safe exports for every config value needed by shell scripts."""
-    # Primary destination path (first enabled one)
-    dest_path = next(
-        (d.path for d in cfg.destinations if d.enabled), ""
-    )
+    # Primary destination path — the first enabled LOCAL_DRIVE destination,
+    # the same selection as ImportConfig.retention_path. music-sync-rugged.sh
+    # uses this as REMOTE for its `[ ! -d "$REMOTE" ]` mount check, so an
+    # rclone remote here would make the script silently no-op even with the
+    # drive mounted.
+    retention = _retention_path(cfg.destinations)
+    dest_path = str(retention) if retention is not None else ""
 
     exports = {
         "SPINDLEBOT_PENDING_DIR":      str(cfg.core.pending_dir),
