@@ -312,6 +312,56 @@ def test_inventory_records_cover_and_nolrc_at_album_level(conn, tmp_path):
     assert sidecar_presence_repo.get(conn, cover.id, loc.id).rel_path == "AA/Album/cover.jpg"
 
 
+def test_inventory_per_track_nolrc_parents_to_track(conn, tmp_path):
+    # A per-track <base>.nolrc marker (definitive miss) is a track-parented NOLRC
+    # sidecar, matched by stem like a .lrc — NOT an album-level marker.
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    _write_flac(root / "AA" / "Album" / "02.flac",
+                audio_md5_bytes=bytes(range(17, 33)), tags=_album_tags("Two", 2))
+    (root / "AA" / "Album" / "01.lrc").write_text("[00:01.00]a\n")
+    (root / "AA" / "Album" / "02.nolrc").write_bytes(b"")
+    result, _ = _run(conn, root)
+
+    assert result.sidecars == 2
+    track1 = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    track2 = audio_repo.get_by_identity(conn, bytes(range(17, 33)).hex())
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
+                            parent_id=track1.id, role=SidecarRole.LRC) is not None
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
+                            parent_id=track2.id, role=SidecarRole.NOLRC) is not None
+    # It is NOT attached at the album level.
+    al = album_repo.get_by_key(conn, album_key("AA", "Album"))
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                            parent_id=al.id, role=SidecarRole.NOLRC) is None
+
+
+def test_inventory_orphan_per_track_nolrc_is_skipped(conn, tmp_path):
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    (root / "AA" / "Album" / "99.nolrc").write_bytes(b"")
+    result, _ = _run(conn, root)
+    assert result.sidecars == 0
+    assert sidecar_repo.count(conn) == 0
+
+
+def test_inventory_bare_nolrc_still_album_level(conn, tmp_path):
+    # The bare .nolrc (no stem) remains an album-level marker even now that
+    # per-track <base>.nolrc exists.
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac",
+                audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
+    (root / "AA" / "Album" / ".nolrc").write_bytes(b"")
+    result, _ = _run(conn, root)
+
+    assert result.sidecars == 1
+    al = album_repo.get_by_key(conn, album_key("AA", "Album"))
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                            parent_id=al.id, role=SidecarRole.NOLRC) is not None
+
+
 def test_inventory_cover_resolves_through_disc_subfolders(conn, tmp_path):
     root = tmp_path / "Pending"
     _write_flac(root / "AA" / "Album" / "Disc 1" / "01.flac",

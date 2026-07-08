@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import struct
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,8 +17,10 @@ from spindlebot.pipeline.stages.fetch_lyrics import (
     _fetch_from_lrclib,
     _get_tags,
     _plain_to_lrc,
+    _query_lrclib,
     _strip_cjk,
     _title_from_filename,
+    album_lyrics_complete,
     fetch_lyrics,
 )
 
@@ -260,6 +263,221 @@ class TestFetchLyrics:
         assert result.plain == 1
         lrc_path = tmp_path / "track.lrc"
         assert "Embedded verse" in lrc_path.read_text()
+
+
+# ── unit: _query_lrclib miss vs transient error ──────────────────────────────
+
+
+class TestQueryLrclibMissVsError:
+    """The load-bearing distinction: a successful/404 response is a definitive
+    miss (returns None,None); anything else is transient (raises)."""
+
+    def _http_error(self, code):
+        return urllib.error.HTTPError(
+            url="u", code=code, msg="x", hdrs=None, fp=None)
+
+    def test_404_is_definitive_miss(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=self._http_error(404)):
+            assert _query_lrclib("a", "t", "al", 100, 0.0) == (None, None)
+
+    def test_200_with_no_lyrics_is_definitive_miss(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   return_value=_lrclib_response(synced=None, plain=None)):
+            assert _query_lrclib("a", "t", "al", 100, 0.0) == (None, None)
+
+    def test_500_is_transient_error(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=self._http_error(500)):
+            with pytest.raises(urllib.error.HTTPError):
+                _query_lrclib("a", "t", "al", 100, 0.0)
+
+    def test_connection_error_is_transient(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("refused")):
+            with pytest.raises(urllib.error.URLError):
+                _query_lrclib("a", "t", "al", 100, 0.0)
+
+
+# ── unit: per-track terminal markers (miss vs error) ─────────────────────────
+
+
+class TestPerTrackTerminalMarkers:
+
+    def test_definitive_miss_writes_per_track_nolrc(self, tmp_path):
+        f = tmp_path / "01. Song.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib",
+                   return_value=(None, None)):
+            result = fetch_lyrics(tmp_path, _cfg())
+
+        assert result.missing == 1
+        assert (tmp_path / "01. Song.nolrc").exists()
+        assert not (tmp_path / "01. Song.lrc").exists()
+
+    def test_transient_error_writes_nothing(self, tmp_path):
+        f = tmp_path / "01. Song.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib",
+                   side_effect=urllib.error.URLError("connection refused")):
+            result = fetch_lyrics(tmp_path, _cfg())
+
+        assert result.errors == ["01. Song.flac"]
+        assert not (tmp_path / "01. Song.nolrc").exists()
+        assert not (tmp_path / "01. Song.lrc").exists()
+
+    def test_synced_hit_clears_stale_per_track_nolrc(self, tmp_path):
+        f = tmp_path / "01. Song.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+        (tmp_path / "01. Song.nolrc").write_text("")
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib",
+                   return_value=("[00:01.00] Hello", None)):
+            result = fetch_lyrics(tmp_path, _cfg(), force=True)
+
+        assert result.synced == 1
+        assert (tmp_path / "01. Song.lrc").exists()
+        assert not (tmp_path / "01. Song.nolrc").exists()
+
+    def test_existing_per_track_nolrc_not_requeried(self, tmp_path):
+        """A definitively-missed track (has .nolrc, no .lrc) is terminal: no
+        lrclib call on a later run, and it still counts as a miss."""
+        f = tmp_path / "01. Song.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+        (tmp_path / "01. Song.nolrc").write_text("")
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib") as mock_fetch:
+            result = fetch_lyrics(tmp_path, _cfg())
+
+        mock_fetch.assert_not_called()
+        assert result.missing == 1
+        assert result.total_found == 0
+        assert album_lyrics_complete(tmp_path) is True
+
+    def test_force_requeries_existing_nolrc(self, tmp_path):
+        """--force re-queries a track that previously missed; a fresh hit writes
+        .lrc and clears the stale .nolrc."""
+        f = tmp_path / "01. Song.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+        (tmp_path / "01. Song.nolrc").write_text("")
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib",
+                   return_value=("[00:01.00] Now found", None)) as mock_fetch:
+            result = fetch_lyrics(tmp_path, _cfg(), force=True)
+
+        mock_fetch.assert_called_once()
+        assert result.synced == 1
+        assert (tmp_path / "01. Song.lrc").exists()
+        assert not (tmp_path / "01. Song.nolrc").exists()
+
+    def test_stale_nolrc_removal_failure_aborts_before_writing_lrc(self, tmp_path):
+        """If the stale .nolrc can't be removed, the track never ends up carrying
+        both markers — it aborts as a transient error, .nolrc intact, no .lrc."""
+        f = tmp_path / "01. Song.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+        (tmp_path / "01. Song.nolrc").write_text("")
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib",
+                   return_value=("[00:01.00] Found", None)), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.os.remove",
+                   side_effect=PermissionError("locked")):
+            result = fetch_lyrics(tmp_path, _cfg(), force=True)
+
+        assert result.errors == ["01. Song.flac"]
+        assert (tmp_path / "01. Song.nolrc").exists()
+        assert not (tmp_path / "01. Song.lrc").exists()
+
+    def test_definitive_miss_not_written_on_dry_run(self, tmp_path):
+        f = tmp_path / "01. Song.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib",
+                   return_value=(None, None)):
+            fetch_lyrics(tmp_path, _cfg(), dry_run=True)
+
+        assert not (tmp_path / "01. Song.nolrc").exists()
+
+    def test_album_nolrc_not_written_when_a_track_errors(self, tmp_path):
+        """Mixed album: one definitive miss + one transient error. No blanket marker."""
+        miss = tmp_path / "01. Miss.flac"
+        err = tmp_path / "02. Err.flac"
+        _write_minimal_flac(miss, {"artist": "Band", "title": "Miss", "album": "Record"})
+        _write_minimal_flac(err, {"artist": "Band", "title": "Err", "album": "Record"})
+
+        def _fetch(artist, title, *a, **k):
+            if title == "Err":
+                raise urllib.error.URLError("timeout")
+            return (None, None)
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib",
+                   side_effect=_fetch):
+            result = fetch_lyrics(tmp_path, _cfg())
+
+        assert result.missing == 1
+        assert result.errors == ["02. Err.flac"]
+        # The missed track still gets its own terminal marker...
+        assert (tmp_path / "01. Miss.nolrc").exists()
+        # ...but the blanket album-level marker must NOT fire (album incomplete).
+        assert not (tmp_path / ".nolrc").exists()
+
+    def test_album_nolrc_written_when_all_tracks_definitively_miss(self, tmp_path):
+        for i, t in enumerate(["One", "Two"], start=1):
+            f = tmp_path / f"0{i}. {t}.flac"
+            _write_minimal_flac(f, {"artist": "Band", "title": t, "album": "Record"})
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib",
+                   return_value=(None, None)):
+            result = fetch_lyrics(tmp_path, _cfg())
+
+        assert result.missing == 2 and not result.errors
+        assert (tmp_path / ".nolrc").exists()
+        assert (tmp_path / "01. One.nolrc").exists()
+        assert (tmp_path / "02. Two.nolrc").exists()
+
+
+# ── unit: album_lyrics_complete predicate ─────────────────────────────────────
+
+
+class TestAlbumLyricsComplete:
+
+    def test_empty_dir_is_complete(self, tmp_path):
+        assert album_lyrics_complete(tmp_path) is True
+
+    def test_complete_when_every_track_has_lrc(self, tmp_path):
+        for i in (1, 2):
+            _write_minimal_flac(tmp_path / f"0{i}. T.flac",
+                                {"artist": "B", "title": "T", "album": "R"})
+            (tmp_path / f"0{i}. T.lrc").write_text("[00:00.00] x\n")
+        assert album_lyrics_complete(tmp_path) is True
+
+    def test_complete_with_mix_of_lrc_and_nolrc(self, tmp_path):
+        _write_minimal_flac(tmp_path / "01. A.flac", {"artist": "B", "title": "A", "album": "R"})
+        _write_minimal_flac(tmp_path / "02. B.flac", {"artist": "B", "title": "B", "album": "R"})
+        (tmp_path / "01. A.lrc").write_text("[00:00.00] x\n")
+        (tmp_path / "02. B.nolrc").write_text("")
+        assert album_lyrics_complete(tmp_path) is True
+
+    def test_incomplete_when_a_track_has_neither(self, tmp_path):
+        _write_minimal_flac(tmp_path / "01. A.flac", {"artist": "B", "title": "A", "album": "R"})
+        _write_minimal_flac(tmp_path / "02. B.flac", {"artist": "B", "title": "B", "album": "R"})
+        (tmp_path / "01. A.lrc").write_text("[00:00.00] x\n")
+        # 02 has nothing → not terminal
+        assert album_lyrics_complete(tmp_path) is False
+
+    def test_album_level_nolrc_implies_complete(self, tmp_path):
+        # No per-track terminal state at all, but the album marker says all-miss.
+        _write_minimal_flac(tmp_path / "01. A.flac", {"artist": "B", "title": "A", "album": "R"})
+        _write_minimal_flac(tmp_path / "02. B.flac", {"artist": "B", "title": "B", "album": "R"})
+        (tmp_path / ".nolrc").write_text("")
+        assert album_lyrics_complete(tmp_path) is True
+
+    def test_predicate_writes_nothing(self, tmp_path):
+        _write_minimal_flac(tmp_path / "01. A.flac", {"artist": "B", "title": "A", "album": "R"})
+        before = {p.name for p in tmp_path.iterdir()}
+        album_lyrics_complete(tmp_path)
+        assert {p.name for p in tmp_path.iterdir()} == before
 
 
 # ── unit: _get_tags sort/English fields ───────────────────────────────────────

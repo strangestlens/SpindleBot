@@ -56,6 +56,7 @@ PENDING_LOCATION_UUID = location_uuid("Pending")
 # writes cover.jpg; the others are accepted for foreign locations.
 _COVER_NAMES = {"cover.jpg", "cover.jpeg", "cover.png"}
 _NOLRC_NAME = ".nolrc"
+_NOLRC_SUFFIX = ".nolrc"
 _LRC_SUFFIX = ".lrc"
 
 
@@ -79,13 +80,22 @@ class InventoryResult:
 
 def _classify_sidecar(path: Path) -> SidecarRole | None:
     name = path.name.lower()
-    if name == _NOLRC_NAME:
+    # `.nolrc` with no stem is the album-level miss marker; `<track>.nolrc`
+    # (e.g. "01. Song.nolrc") is a per-track terminal miss marker. Both map to
+    # the NOLRC role; parenting (album vs track) is decided in the walk from the
+    # presence/absence of a stem.
+    if name == _NOLRC_NAME or path.suffix.lower() == _NOLRC_SUFFIX:
         return SidecarRole.NOLRC
     if name in _COVER_NAMES:
         return SidecarRole.COVER
     if path.suffix.lower() == _LRC_SUFFIX:
         return SidecarRole.LRC
     return None
+
+
+def _is_track_nolrc(path: Path) -> bool:
+    """A per-track `<base>.nolrc` (has a stem), vs the bare album-level `.nolrc`."""
+    return path.name.lower() != _NOLRC_NAME and path.suffix.lower() == _NOLRC_SUFFIX
 
 
 def _walk_tree(root: Path) -> tuple[list[Path], list[tuple[Path, SidecarRole]], int]:
@@ -373,10 +383,12 @@ def inventory_location(
 
         for path, role in sidecar_files:
             try:
-                if role is SidecarRole.LRC:
+                if role is SidecarRole.LRC or _is_track_nolrc(path):
+                    # .lrc and per-track <base>.nolrc both parent to the track
+                    # sharing their stem in the same directory.
                     audio_id = stem_audio.get((path.parent, path.stem.lower()))
                     if audio_id is None:
-                        continue  # orphan .lrc with no matching track in its dir
+                        continue  # orphan sidecar with no matching track in its dir
                     parent_kind, parent_id = SidecarParentKind.TRACK, audio_id
                 else:
                     album_id = _resolve_album_for_dir(path.parent, dir_albums)
