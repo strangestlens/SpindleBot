@@ -173,9 +173,11 @@ def test_inventory_does_not_abort_on_unreadable_audio_file(conn, tmp_path):
     assert good is not None and good.title == "One"
 
 
-def test_inventory_isolates_keyerror_from_bad_tag_dict(conn, tmp_path, monkeypatch):
+def test_inventory_tolerates_partial_tag_dict(conn, tmp_path, monkeypatch):
     # Belt-and-suspenders: if _read_tags ever regresses to a partial dict, the
-    # per-file isolation must catch the KeyError, count it, and keep scanning.
+    # caller merges over the empty shape so indexing can't KeyError — the track
+    # is recorded (with the missing tags None), no error, scan continues. We do
+    # NOT broadly catch KeyError, so unrelated bugs still surface as errors.
     root = tmp_path / "Pending"
     _write_flac(root / "Artist" / "Album" / "00_first.flac",
                 audio_md5_bytes=bytes(range(1, 17)),
@@ -188,15 +190,16 @@ def test_inventory_isolates_keyerror_from_bad_tag_dict(conn, tmp_path, monkeypat
 
     def flaky(path):
         if path.name == "00_first.flac":
-            return {}  # simulate the old contract violation
+            return {}  # simulate the old contract violation (missing keys)
         return real_read_tags(path)
 
     monkeypatch.setattr(inventory, "_read_tags", flaky)
     result, _ = _run(conn, root)
 
-    assert result.scanned == 2 and result.errors == 1
-    assert any("00_first.flac" in p for p in result.error_paths)
-    # The second, well-formed track still lands in the DB.
+    assert result.scanned == 2 and result.errors == 0
+    # Both tracks recorded; the partial-dict one has None tags but is not dropped.
+    first = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    assert first is not None and first.title is None
     assert audio_repo.get_by_identity(conn, bytes(range(17, 33)).hex()) is not None
 
 

@@ -346,7 +346,10 @@ def inventory_location(
         for path in audio_files:
             result.scanned += 1
             try:
-                tags = _read_tags(path)
+                # Merge over the empty shape so indexing below can never KeyError,
+                # even if _read_tags ever regresses to a partial dict — without a
+                # broad KeyError catch that would mask unrelated bugs downstream.
+                tags = {**_EMPTY_TAGS, **_read_tags(path)}
                 rel_path = str(path.relative_to(root))
                 st = path.stat()
                 byte_size = st.st_size
@@ -389,7 +392,7 @@ def inventory_location(
                     seen_albums.add(album.id)
                 result.updated += 1 if existed else 0
                 result.new += 0 if existed else 1
-            except (OSError, KeyError) as exc:  # bad/vanished file mid-scan: isolate, keep going
+            except OSError as exc:  # file vanished/unreadable mid-scan: isolate, keep going
                 result.errors += 1
                 result.error_paths.append(f"{path}: {exc}")
             done += 1
