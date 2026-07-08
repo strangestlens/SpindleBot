@@ -28,6 +28,22 @@ import sys
 from pathlib import Path
 
 
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _retention_path(destinations) -> Path | None:
+    """Path of the first enabled local_drive destination, or None.
+
+    Auto-sync's mount check is `path.exists()`, which is meaningless for an
+    rclone remote (always false) — so only a local_drive destination can serve
+    as the retention mount probe.
+    """
+    return next(
+        (Path(d.path) for d in destinations
+         if d.enabled and d.type == "local_drive"),
+        None,
+    )
+
+
 # ── check ─────────────────────────────────────────────────────────────────────
 
 def cmd_check(cfg) -> int:
@@ -707,9 +723,7 @@ def main(argv: list[str] | None = None) -> int:
             log_file=cfg.core.log_dir / "watcher.log",
             spindlebot_cfg=cfg,
             auto_sync_on_import=cfg.core.auto_sync_on_import,
-            retention_path=next(
-                (Path(d.path) for d in cfg.destinations if d.enabled), None
-            ),
+            retention_path=_retention_path(cfg.destinations),
             sync_script=cfg.pipeline_dir / "music-sync-rugged.sh",
         )
         print(f"💿 {Path(trigger).name}")

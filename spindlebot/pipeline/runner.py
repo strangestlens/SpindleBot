@@ -385,8 +385,19 @@ class ImportRunner:
         return result
 
     def _default_sync_runner(self, script: Path) -> int:
-        """Fire the self-guarding mount-sync script; return its exit code."""
+        """Fire the self-guarding mount-sync script; return its exit code.
+
+        The script logs to rugged-sync.log itself, but an early bootstrap or
+        config error can die before that log is ever opened — so on a nonzero
+        exit, the captured stderr (or stdout) tail is the only trace of why.
+        Logged to the file only (echo=False) to keep the terminal uncluttered.
+        """
         proc = subprocess.run([str(script)], capture_output=True, text=True)
+        if proc.returncode != 0:
+            output = (proc.stderr or proc.stdout or "").strip()
+            if output:
+                tail = "\n".join(output.splitlines()[-5:])
+                self._log(f"auto-sync output tail:\n{tail}", echo=False)
         return proc.returncode
 
     def _auto_sync_or_hint(self) -> None:

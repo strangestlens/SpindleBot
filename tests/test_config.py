@@ -407,6 +407,53 @@ class TestDestinations(unittest.TestCase):
         cfg = _load_with_dir(self.tmp)
         self.assertEqual(len(cfg.destinations), 2)
 
+    def test_retention_path_skips_rclone_destinations(self):
+        # An enabled rclone destination listed FIRST must not become the
+        # auto-sync mount probe — `Path("b2:...").exists()` is always false, so
+        # auto-sync would silently never fire. The first enabled local_drive
+        # wins; rclone-only (or none enabled) resolves to None.
+        from spindlebot.cli import _retention_path
+
+        config = MINIMAL_CONFIG + textwrap.dedent("""\
+            [[destinations]]
+            name    = "Backblaze"
+            type    = "rclone"
+            path    = "b2:my-bucket/Library"
+            enabled = true
+
+            [[destinations]]
+            name    = "DwRugged"
+            type    = "local_drive"
+            path    = "/Volumes/DwRugged/Music/Library"
+            enabled = true
+        """)
+        _write(self.tmp, "config.toml", config)
+        cfg = _load_with_dir(self.tmp)
+        self.assertEqual(
+            _retention_path(cfg.destinations),
+            Path("/Volumes/DwRugged/Music/Library"),
+        )
+
+    def test_retention_path_none_without_local_drive(self):
+        from spindlebot.cli import _retention_path
+
+        config = MINIMAL_CONFIG + textwrap.dedent("""\
+            [[destinations]]
+            name    = "Backblaze"
+            type    = "rclone"
+            path    = "b2:my-bucket/Library"
+            enabled = true
+
+            [[destinations]]
+            name    = "Unmounted"
+            type    = "local_drive"
+            path    = "/Volumes/Off/Music"
+            enabled = false
+        """)
+        _write(self.tmp, "config.toml", config)
+        cfg = _load_with_dir(self.tmp)
+        self.assertIsNone(_retention_path(cfg.destinations))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

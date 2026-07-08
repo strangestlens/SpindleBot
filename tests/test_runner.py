@@ -900,6 +900,32 @@ def test_failed_import_never_auto_syncs(tmp_path):
     assert not log_contains(cfg, "auto-syncing to DwRugged")
 
 
+def test_default_sync_runner_logs_stderr_tail_on_failure(tmp_path):
+    """A sync script that dies before opening rugged-sync.log (bootstrap/config
+    error) leaves its stderr as the only trace — the default runner must log a
+    tail of it (file only, echo=False) while preserving the exit code."""
+    cfg = _make_config(tmp_path)
+    runner = ImportRunner(cfg)
+
+    fail = MagicMock(returncode=1, stdout="",
+                     stderr="line1\nERROR: SpindleBot not configured. Run setup.sh.")
+    echoed = []
+    runner._echo = echoed.append
+    with patch(_SUBPROCESS, return_value=fail):
+        rc = runner._default_sync_runner(tmp_path / "music-sync-rugged.sh")
+
+    assert rc == 1
+    assert log_contains(cfg, "ERROR: SpindleBot not configured")
+    assert echoed == [], "sync output tail must go to the log file only"
+
+    # Success produces no output-tail logging.
+    ok = MagicMock(returncode=0, stdout="noise", stderr="")
+    with patch(_SUBPROCESS, return_value=ok):
+        rc = runner._default_sync_runner(tmp_path / "music-sync-rugged.sh")
+    assert rc == 0
+    assert not log_contains(cfg, "noise")
+
+
 # ── already-in-library duplicate handling ─────────────────────────────────────
 
 
