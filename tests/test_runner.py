@@ -542,10 +542,15 @@ def test_duplicate_album_moved_to_duplicates(tmp_path):
 
     mock_notify.assert_called_once()
 
-    # No multidisc/posttag stage for a duplicate; duplicate_check recorded.
+    # No multidisc/posttag stage for a duplicate; duplicate_check recorded and
+    # reported truthfully — it RAN (moved files + notified), so not `skipped`.
     stage_names = [s.name for s in result.stages]
     assert "duplicate_check" in stage_names
     assert "multidisc" not in stage_names
+    dup_stage = next(s for s in result.stages if s.name == "duplicate_check")
+    assert dup_stage.success
+    assert not dup_stage.skipped
+    assert "moved to Duplicates" in dup_stage.message
 
 
 def test_no_op_without_library_match_leaves_files(tmp_path):
@@ -571,6 +576,84 @@ def test_no_op_without_library_match_leaves_files(tmp_path):
     # Left where it was; NOT moved to Duplicates.
     assert (imp / "orphan.flac").exists()
     assert not (cfg.duplicates_dir / "Nobody").exists()
+
+
+def test_partial_tags_not_treated_as_duplicate(tmp_path):
+    """A no-op batch with album set but EMPTY albumartist must not be branded a
+    duplicate — a one-sided match could hit an unrelated album. Files stay."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    # album present, albumartist absent (and no artist to fall back on).
+    _write_flac(imp / "partial.flac", tags={"album": "Ambiguous", "discnumber": 1,
+                                            "disctotal": 1})
+
+    backward_queries = []
+
+    def fake(argv, *args, **kwargs):
+        argv = list(argv)
+        is_ls = len(argv) >= 2 and argv[1] == "ls"
+        forward = any(a.startswith("added:") and a.endswith("..") for a in argv)
+        backward = any(a.startswith("added:..") for a in argv)
+        if is_ls and backward:
+            backward_queries.append(argv)
+            # If a lookup somehow ran, pretend a match exists — the test proves
+            # the runner never issues it for a one-sided batch.
+            return MagicMock(returncode=0, stdout="/lib/Some/Album/01.flac\n", stderr="")
+        if is_ls and forward:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=fake):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    # No pre-existing-album lookup was issued (both fields required).
+    assert backward_queries == []
+    # Treated as an unmatched no-op: warned, left in Import, not moved.
+    assert log_contains(cfg, "no matching album in the library")
+    assert (imp / "partial.flac").exists()
+    assert not any(cfg.duplicates_dir.rglob("*.flac"))
+
+
+def test_failed_beet_ls_does_not_move_files(tmp_path):
+    """A transient `beet ls` failure (nonzero exit) must be treated as UNKNOWN,
+    not as 'nothing imported' — no duplicate handling, files left in place."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    _write_flac(imp / "flaky.flac", tags={"albumartist": "Radiohead", "album": "Kid A",
+                                          "discnumber": 1, "disctotal": 1})
+
+    def fake(argv, *args, **kwargs):
+        argv = list(argv)
+        # The post-import "added since" verification ls fails.
+        if len(argv) >= 2 and argv[1] == "ls" and any(
+            a.startswith("added:") and a.endswith("..") for a in argv
+        ):
+            return MagicMock(returncode=1, stdout="", stderr="db locked")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch("spindlebot.pipeline.runner.notify",
+               return_value=MagicMock(macos_error=None, telegram_error=None)) as mock_notify, \
+         patch(_SUBPROCESS, side_effect=fake):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    # Nothing moved, nothing branded a duplicate, no duplicate notify.
+    assert (imp / "flaky.flac").exists()
+    assert not any(cfg.duplicates_dir.rglob("*.flac"))
+    assert not log_contains(cfg, "already in library")
+    assert log_contains(cfg, "could not verify import result")
+    mock_notify.assert_not_called()
 
 
 def test_new_album_still_imports_normally(tmp_path):

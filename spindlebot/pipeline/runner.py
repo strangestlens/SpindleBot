@@ -388,7 +388,20 @@ class ImportRunner:
         # Did this album actually produce new items? beet skips ("already in the
         # library") without a nonzero exit, so a green import can still be a
         # no-op. Anything added since import_start is genuinely new.
-        new_paths = self._items_added_since(import_start)
+        ok, new_paths = self._items_added_since(import_start)
+        if not ok:
+            # `beet ls` itself failed — we CANNOT tell whether items were added.
+            # Treat as unknown, never as "nothing imported": skip duplicate
+            # handling entirely and leave the files in Import untouched.
+            self._log(
+                f"⚠  {batch.label} — could not verify import result "
+                "(beet ls failed); leaving files in Import"
+            )
+            result.stages.append(
+                StageResult("duplicate_check", success=True,
+                            message="unknown: beet ls failed")
+            )
+            return True
         if not new_paths:
             self._handle_no_new_items(batch, import_start, result)
             # A duplicate (or an unmatched no-op) produced no rows to fix.
@@ -400,28 +413,37 @@ class ImportRunner:
         result.stages.append(StageResult("multidisc", success=True))
         return True
 
-    def _items_added_since(self, since: str) -> list[str]:
-        """beets item paths added at/after `since` (this batch's window)."""
+    def _items_added_since(self, since: str) -> tuple[bool, list[str]]:
+        """(ok, paths) for beets items added at/after `since` (this batch's window).
+
+        `ok` is False when `beet ls` itself failed (nonzero exit): the empty
+        stdout of a failed query is indistinguishable from a genuine no-op, so
+        the caller must treat a failure as UNKNOWN, never as "nothing imported".
+        """
         proc = subprocess.run(
             [str(self.cfg.beet), "ls", "-f", "$path", f"added:{since}.."],
             capture_output=True,
             text=True,
         )
-        return [p for p in proc.stdout.strip().splitlines() if p]
+        if proc.returncode != 0:
+            return False, []
+        return True, [p for p in proc.stdout.strip().splitlines() if p]
 
     def _existing_album_dir(self, batch: _AlbumBatch, before: str) -> tuple[str, int] | None:
         """Directory + track count of a pre-existing beets album matching this
         batch, considering only items added BEFORE this import attempt.
 
-        Match by musicbrainz_albumid when the rip carries one, else by
-        albumartist+album. Returns None when beets has no such album — i.e. the
-        no-op was NOT a duplicate but some other import failure.
+        Match by musicbrainz_albumid when the rip carries one, else by BOTH
+        albumartist AND album — a one-sided fallback (e.g. album alone, or an
+        empty albumartist:) could match an unrelated album and falsely brand a
+        genuinely-new rip a duplicate. Returns None when there's no confident
+        match — including when `beet ls` failed (unknown, not a duplicate).
         """
         aa, al, mbid = self._batch_album_ids(batch)
         cfg = self.cfg
         if mbid:
             query = [f"mb_albumid:{mbid}", f"added:..{before}"]
-        elif aa or al:
+        elif aa and al:
             query = [f"albumartist:{aa}", f"album:{al}", f"added:..{before}"]
         else:
             return None
@@ -431,6 +453,8 @@ class ImportRunner:
             capture_output=True,
             text=True,
         )
+        if proc.returncode != 0:
+            return None
         paths = [p for p in proc.stdout.strip().splitlines() if p]
         if not paths:
             return None
@@ -475,9 +499,10 @@ class ImportRunner:
             "moved to Duplicates"
         )
         self._move_to_duplicates(batch, artist, album)
+        # Not `skipped`: this stage actively ran (moved files + notified).
         result.stages.append(
-            StageResult("duplicate_check", success=True, skipped=True,
-                        message=f"duplicate of {existing_dir}")
+            StageResult("duplicate_check", success=True,
+                        message=f"duplicate: moved to Duplicates ({existing_dir})")
         )
 
         if self.cfg.spindlebot_cfg is not None:

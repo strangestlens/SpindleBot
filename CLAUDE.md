@@ -137,7 +137,7 @@ tests/
 3. **disc check** — `check_wait()`: wait if multi-disc set incomplete (bypass with `--force`)
 4. **pretag** — normalize tags before beet sees them
 5. **beet import** — streams live to terminal when echo callback set
-   - **duplicate handling** (per album batch): a green `beet import` that adds NO new items is checked against the existing library (match by `musicbrainz_albumid`, else `albumartist`+`album`, on items added *before* the import). A match ⇒ already-in-library duplicate: log the `⏭` milestone, move the rip to `duplicates_dir/<artist>/<album>/`, notify, and skip the remaining stages for it. No match ⇒ a *different* no-op failure: warn and LEAVE the files in Import (never moved/discarded).
+   - **duplicate handling** (per album batch): a green `beet import` that adds NO new items is checked against the existing library (match by `musicbrainz_albumid`, else BOTH `albumartist`+`album` — a one-sided fallback could false-match an unrelated album — on items added *before* the import). A match ⇒ already-in-library duplicate: log the `⏭` milestone, move the rip to `duplicates_dir/<artist>/<album>/`, notify, and skip the remaining stages for it. No match ⇒ a *different* no-op failure: warn and LEAVE the files in Import (never moved/discarded). If the post-import `beet ls` verification itself *fails* (nonzero exit), the result is UNKNOWN — skip duplicate handling and leave the files in place rather than risk moving a real import.
 6. **multidisc fix** — patch `disctotal` + `multidisc` flex attr in beets DB via `sqlite3`
 7. **beet move** — relocate to canonical library paths
 8. **posttag** — strip beet alias tags, truncate DATE to year
