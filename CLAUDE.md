@@ -148,9 +148,12 @@ tests/
 8. **posttag** — strip beet alias tags, truncate DATE to year
 9. **fetch-art + fetch-lyrics** — embed art, write `.lrc` sidecars
 10. **archive** — move XLD `.log` to archive dir
+11. **auto-sync-or-hint** — only on a fully successful run with `spindlebot_cfg` set (mirrors the `via_processing` gate). If `core.auto_sync_on_import` is **false** (default): log a tail-friendly HINT to run `music-sync-rugged.sh` manually. If **true**: check whether the retention destination path (`ImportConfig.retention_path`, the first enabled `[[destinations]]`) exists — mounted ⇒ log `🔄 auto-syncing…` and invoke the self-guarding `music-sync-rugged.sh` (do NOT reimplement sync); not mounted ⇒ log a reconnect hint and don't invoke. A sync failure here is logged, never promoted to an import failure. Injectable via `ImportRunner(sync_runner=…)` + `ImportConfig.sync_script`/`retention_path` so tests never shell out.
 
 `ImportRunner.__init__` accepts an optional `echo: Callable[[str], None]` for live terminal
-feedback. `_log(msg, *, echo=True)` always writes to the log file; routes to echo only for
+feedback, and an optional `sync_runner: Callable[[Path], int]` (defaults to running
+`sync_script` via subprocess) so auto-sync is testable without shelling out.
+`_log(msg, *, echo=True)` always writes to the log file; routes to echo only for
 user-facing milestones (emoji-prefixed). Verbose/internal messages pass `echo=False`.
 
 ## Testing

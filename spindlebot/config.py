@@ -51,6 +51,7 @@ class CoreConfig:
     duplicates_dir: Path  # already-in-library rips moved here instead of stranding in Import
     db_path: Path       # SpindleBot's own SQLite system-of-record DB
     min_copies: int = 1  # retention floor: refuse to drop a content below this many retention copies
+    auto_sync_on_import: bool = False  # after a successful import, auto-run the mount-sync (opt-in; slows imports)
 
 
 @dataclass
@@ -143,6 +144,14 @@ def _expand(val: str) -> Path:
     return Path(os.path.expandvars(val)).expanduser()
 
 
+def _env_truthy(name: str, default: bool) -> bool:
+    """Read a boolean from the environment; fall back to `default` if unset."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def load() -> SpindleBotConfig:
@@ -185,6 +194,10 @@ def load() -> SpindleBotConfig:
         ),
         db_path=_expand(c.get("db_path", "~/.config/spindlebot/spindlebot.db")),
         min_copies=max(1, int(c.get("min_copies", 1))),
+        auto_sync_on_import=_env_truthy(
+            "SPINDLEBOT_AUTO_SYNC_ON_IMPORT",
+            bool(c.get("auto_sync_on_import", False)),
+        ),
     )
 
     # ── Tools ─────────────────────────────────────────────────────────────────

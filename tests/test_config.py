@@ -203,6 +203,44 @@ class TestConfigLoading(unittest.TestCase):
         # min_copies can never drop below 1 — a 0 floor would defeat retention.
         self.assertEqual(_load_with_dir(self.tmp).core.min_copies, 1)
 
+    def test_auto_sync_on_import_defaults_false(self):
+        _write(self.tmp, "config.toml", MINIMAL_CONFIG)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertFalse(cfg.core.auto_sync_on_import)
+
+    def test_auto_sync_on_import_from_config_file(self):
+        config = MINIMAL_CONFIG.replace(
+            'archive_dir = "/tmp/AllDiscs"',
+            'archive_dir = "/tmp/AllDiscs"\n    auto_sync_on_import = true',
+        )
+        _write(self.tmp, "config.toml", config)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertTrue(cfg.core.auto_sync_on_import)
+
+    def test_auto_sync_on_import_env_override(self):
+        # Env var wins over the config.toml value (and parses truthy strings).
+        config = MINIMAL_CONFIG.replace(
+            'archive_dir = "/tmp/AllDiscs"',
+            'archive_dir = "/tmp/AllDiscs"\n    auto_sync_on_import = false',
+        )
+        _write(self.tmp, "config.toml", config)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        with mock.patch.dict(os.environ, {"SPINDLEBOT_AUTO_SYNC_ON_IMPORT": "1"}):
+            cfg = _load_with_dir(self.tmp)
+        self.assertTrue(cfg.core.auto_sync_on_import)
+
+        # An explicit falsey env value also overrides a true config value.
+        config_true = MINIMAL_CONFIG.replace(
+            'archive_dir = "/tmp/AllDiscs"',
+            'archive_dir = "/tmp/AllDiscs"\n    auto_sync_on_import = true',
+        )
+        _write(self.tmp, "config.toml", config_true)
+        with mock.patch.dict(os.environ, {"SPINDLEBOT_AUTO_SYNC_ON_IMPORT": "off"}):
+            cfg = _load_with_dir(self.tmp)
+        self.assertFalse(cfg.core.auto_sync_on_import)
+
     def test_legacy_staging_library_keys_still_honored(self):
         # Pre-rename config.toml files use staging_dir/library_dir — they must
         # still map to import_dir/pending_dir until users migrate.

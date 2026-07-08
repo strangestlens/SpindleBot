@@ -133,6 +133,7 @@ def cmd_config_shell(cfg) -> int:
         "SPINDLEBOT_LYRICS_DELAY":     str(cfg.lyrics.request_delay_seconds),
         "SPINDLEBOT_MACOS_NOTIFY":     "1" if cfg.notifications.macos_notify else "0",
         "SPINDLEBOT_TELEGRAM_ENABLED": "1" if cfg.notifications.telegram_enabled else "0",
+        "SPINDLEBOT_AUTO_SYNC_ON_IMPORT": "1" if cfg.core.auto_sync_on_import else "0",
     }
 
     for key, val in exports.items():
@@ -705,6 +706,11 @@ def main(argv: list[str] | None = None) -> int:
             pipeline_dir=cfg.pipeline_dir,
             log_file=cfg.core.log_dir / "watcher.log",
             spindlebot_cfg=cfg,
+            auto_sync_on_import=cfg.core.auto_sync_on_import,
+            retention_path=next(
+                (Path(d.path) for d in cfg.destinations if d.enabled), None
+            ),
+            sync_script=cfg.pipeline_dir / "music-sync-rugged.sh",
         )
         print(f"💿 {Path(trigger).name}")
         runner = ImportRunner(import_cfg, echo=lambda msg: print(f"  {msg}"))
