@@ -628,6 +628,106 @@ def test_runner_mixed_run_promotes_complete_holds_incomplete(tmp_path):
     assert sum(1 for s in promote_stages if s.skipped) == 1
 
 
+def test_runner_stage7_move_failure_aborts(tmp_path):
+    """A failing Stage-7 move (beet move -d Processing, nonzero exit) aborts the
+    run — posttag/lyrics/promote must NOT run, so nothing is fetched against
+    files still in Pending and no incomplete album is stranded there."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+
+    posttag_called = {"hit": False}
+
+    def stub(argv, *args, **kwargs):
+        argv = list(argv)
+        cmd = argv[1] if len(argv) >= 2 else ""
+        # Stage-7 move into Processing (has -d) fails; the promote move (path:)
+        # would succeed, but the run must abort before ever reaching it.
+        if cmd == "move" and "-d" in argv:
+            return MagicMock(returncode=1, stdout="", stderr="disk full")
+        if cmd == "ls":
+            is_name = any(a == "$albumartist - $album" for a in argv)
+            if is_name:
+                return MagicMock(returncode=0, stdout="Artist - Album\n", stderr="")
+            return MagicMock(returncode=0, stdout="/proc/a/01.flac\n", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    def spy_posttag(files):
+        posttag_called["hit"] = True
+        return 0
+
+    with patch(_CHECK_WAIT, return_value=None), \
+         patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, side_effect=spy_posttag), \
+         patch(_COUNT_DISCS, return_value=1), \
+         patch("spindlebot.pipeline.runner.notify",
+               return_value=MagicMock(macos_error=None, telegram_error=None)), \
+         patch("spindlebot.pipeline.stages.fetch_lyrics.fetch_lyrics") as mock_lyrics, \
+         patch(_SUBPROCESS, side_effect=stub):
+        result = ImportRunner(cfg).run()
+
+    assert not result.success
+    move_stage = next(s for s in result.stages if s.name == "move")
+    assert not move_stage.success
+    assert "disk full" in move_stage.message
+    assert log_contains(cfg, "beet move to Processing failed")
+    # Later stages never ran.
+    assert not posttag_called["hit"]
+    mock_lyrics.assert_not_called()
+    assert not any(s.name == "promote" for s in result.stages)
+    assert not any(s.name == "posttag" for s in result.stages)
+
+
+def test_runner_without_spindlebot_cfg_lands_in_pending(tmp_path):
+    """With spindlebot_cfg=None the art/lyrics/promote stages don't run, so the
+    album must move straight to Pending (prior behavior) — never stranded in
+    Processing with nothing to promote it out."""
+    cfg = _make_config(tmp_path)  # spindlebot_cfg defaults to None
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    track = cfg.pending_dir / "Artist" / "Album" / "01. Track.flac"
+
+    def stub(argv, *args, **kwargs):
+        argv = list(argv)
+        cmd = argv[1] if len(argv) >= 2 else ""
+        if cmd == "move":
+            # No -d → move to configured directory (Pending). Model it by
+            # planting the file under Pending so the paths ls can report it.
+            if not any(a == "-d" for a in argv):
+                track.parent.mkdir(parents=True, exist_ok=True)
+                track.write_bytes(b"x")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if cmd == "ls":
+            is_name = any(a == "$albumartist - $album" for a in argv)
+            if is_name:
+                return MagicMock(returncode=0, stdout="Artist - Album\n", stderr="")
+            out = str(track) + "\n" if track.exists() else "/proc/a/01.flac\n"
+            return MagicMock(returncode=0, stdout=out, stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_CHECK_WAIT, return_value=None), \
+         patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_COUNT_DISCS, return_value=1), \
+         patch(_SUBPROCESS, side_effect=stub) as mock_sub:
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    # Landed in Pending, not Processing.
+    assert track.exists()
+    assert not any(cfg.processing_dir.rglob("*.flac"))
+    # The Stage-7 move targeted Pending (path:), never Processing (-d).
+    move_calls = [c.args[0] for c in mock_sub.call_args_list
+                  if len(c.args[0]) >= 2 and c.args[0][1] == "move"]
+    assert move_calls, "a move must have been issued"
+    assert all("-d" not in argv for argv in move_calls)
+    assert any(a == f"path:{cfg.pending_dir}/" for argv in move_calls for a in argv)
+    # No promote stage (nothing routed through Processing).
+    assert not any(s.name == "promote" for s in result.stages)
+
+
 # ── already-in-library duplicate handling ─────────────────────────────────────
 
 

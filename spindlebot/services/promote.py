@@ -37,8 +37,13 @@ class PromoteResult:
     promoted: bool
     label: str = ""
     # Tracks (audio filenames) still lacking a terminal .lrc/.nolrc marker.
-    # Empty when promoted. Populated when the album stayed in Processing.
+    # Empty when promoted. Populated when the album stayed in Processing
+    # because it wasn't lyric-complete.
     waiting_on: list[str] = field(default_factory=list)
+    # Set when the album WAS lyric-complete but the `beet move` to Pending
+    # failed (nonzero exit): promoted stays False, the album stays in Processing,
+    # and finalize will retry it on a later sweep.
+    move_error: str = ""
 
 
 @dataclass
@@ -71,15 +76,29 @@ def _incomplete_tracks(album_dir: Path) -> list[str]:
     return missing
 
 
+def _default_label(album_dir: Path) -> str:
+    """Path-derived "<albumartist> - <album>" label (beets nests that way).
+
+    Falls back to just the album dir name when there's no parent to read an
+    artist from (e.g. an album planted directly at processing_dir's root).
+    """
+    parent = album_dir.parent.name
+    return f"{parent} - {album_dir.name}" if parent else album_dir.name
+
+
 def promote_album(album_dir: str | Path, beet: str | Path, *, label: str = "") -> PromoteResult:
     """Promote a single Processing album to Pending iff it is lyric-complete.
 
     Complete → `beet move path:<album_dir>/` relocates its items to the beets
     `directory` (Pending) and updates the DB paths. Not complete → left in
     Processing, with the tracks still awaiting lyrics reported.
+
+    The `beet move` return code is checked: a nonzero exit (DB locked, beets
+    error, path mismatch) leaves the album in Processing with promoted=False and
+    move_error set, so finalize retries it — never reported promoted on failure.
     """
     album_dir = Path(album_dir)
-    label = label or album_dir.name
+    label = label or _default_label(album_dir)
 
     if not album_lyrics_complete(album_dir):
         return PromoteResult(
@@ -90,11 +109,19 @@ def promote_album(album_dir: str | Path, beet: str | Path, *, label: str = "") -
         )
 
     # Trailing slash per beets gotcha #3 — without it a path: query can miss.
-    subprocess.run(
+    proc = subprocess.run(
         [str(beet), "move", "--yes", f"path:{album_dir}/"],
         capture_output=True,
         text=True,
     )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+        return PromoteResult(
+            album_dir=album_dir,
+            promoted=False,
+            label=label,
+            move_error=err,
+        )
     return PromoteResult(album_dir=album_dir, promoted=True, label=label)
 
 
@@ -148,7 +175,7 @@ def finalize_processing(
             pr = PromoteResult(
                 album_dir=album_dir,
                 promoted=complete,
-                label=album_dir.name,
+                label=_default_label(album_dir),
                 waiting_on=[] if complete else _incomplete_tracks(album_dir),
             )
         else:

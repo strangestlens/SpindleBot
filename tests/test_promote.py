@@ -153,6 +153,47 @@ def test_nolrc_marker_counts_as_complete(tmp_path):
     assert (pending / "Missy Album" / "02. Track.flac").exists()
 
 
+def test_promote_move_failure_stays_in_processing(tmp_path):
+    """A lyric-complete album whose `beet move` fails (nonzero exit) is NOT
+    reported promoted — it stays in Processing so finalize retries it."""
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing, "Doomed Move")
+    _complete_all(album)
+
+    def failing_move(argv, *args, **kwargs):
+        if list(argv)[1] == "move":
+            return MagicMock(returncode=1, stdout="", stderr="database is locked")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_SUBPROCESS, side_effect=failing_move):
+        result = promote_album(album, "/bin/beet")
+
+    assert not result.promoted
+    assert result.move_error == "database is locked"
+    assert result.waiting_on == []  # complete — it's a move failure, not lyrics
+    # Files stayed in Processing; nothing under Pending.
+    assert (album / "01. Track.flac").exists()
+    assert not (pending / "Doomed Move").exists()
+
+
+def test_promote_label_is_path_derived(tmp_path):
+    """Default label reads artist from the parent dir (beets nests
+    <albumartist>/<album>/) so logs disambiguate across artists."""
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing / "Radiohead", "In Rainbows")
+    _complete_all(album)
+
+    with patch(_SUBPROCESS, side_effect=_beet_move_stub(pending)):
+        result = promote_album(album, "/bin/beet")
+
+    assert result.promoted
+    assert result.label == "Radiohead - In Rainbows"
+
+
 # ── finalize_processing ───────────────────────────────────────────────────────
 
 
@@ -233,3 +274,31 @@ def test_finalize_is_idempotent(tmp_path):
     assert second.scanned == 0
     assert second.promoted == []
     assert second.waiting == []
+
+
+def test_finalize_reports_move_failure_as_waiting(tmp_path):
+    """A complete album whose promote move fails surfaces in `waiting` with a
+    move_error (not promoted), and stays in Processing for the next sweep."""
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing, "Move Fails")
+    _complete_all(album)
+
+    def fake_fetch(album_dir, cfg, *, dry_run=False, force=False):
+        return MagicMock(synced=0, plain=0, missing=0, errors=[])
+
+    def failing_move(argv, *args, **kwargs):
+        if list(argv)[1] == "move":
+            return MagicMock(returncode=1, stdout="", stderr="beets error")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_FETCH, side_effect=fake_fetch), \
+         patch(_SUBPROCESS, side_effect=failing_move):
+        result = finalize_processing(processing, _cfg_stub())
+
+    assert result.promoted == []
+    assert len(result.waiting) == 1
+    assert result.waiting[0].move_error == "beets error"
+    assert (album / "01. Track.flac").exists()
+    assert not (pending / "Move Fails").exists()

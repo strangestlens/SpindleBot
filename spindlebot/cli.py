@@ -234,7 +234,7 @@ def cmd_finalize(cfg, args: list[str]) -> int:
             ],
             "waiting": [
                 {"label": p.label, "album_dir": str(p.album_dir),
-                 "waiting_on": p.waiting_on}
+                 "waiting_on": p.waiting_on, "move_error": p.move_error}
                 for p in result.waiting
             ],
         }))
@@ -250,8 +250,11 @@ def cmd_finalize(cfg, args: list[str]) -> int:
         arrow = "would promote →" if dry_run else "✅"
         print(f"  {arrow} {p.label} → Pending")
     for p in result.waiting:
-        waiting = ", ".join(p.waiting_on) or "album"
-        print(f"  ⏳ {p.label} waiting on lyrics: {waiting}")
+        if p.move_error:
+            print(f"  ✗  {p.label} promote failed (stays in Processing): {p.move_error}")
+        else:
+            waiting = ", ".join(p.waiting_on) or "album"
+            print(f"  ⏳ {p.label} waiting on lyrics: {waiting}")
     return 0
 
 

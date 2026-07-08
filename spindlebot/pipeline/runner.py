@@ -18,13 +18,16 @@ Stages (in order):
                             already-in-library duplicate → move it to
                             duplicates_dir + notify + skip its later stages
   6. multidisc fix        — patch disctotal + multidisc flex attr in beets DB
-  7. beet move            — relocate files into the Processing area (NOT Pending):
-                            all remaining processing happens there so a mid-fetch
-                            mount-sync can't prune audio / strand late lyrics
+  7. beet move            — relocate files into Processing (NOT Pending) so a
+                            mid-fetch mount-sync can't prune audio / strand late
+                            lyrics; a failed move ABORTS the run. When
+                            spindlebot_cfg is None (no art/lyrics/promote to
+                            follow), moves straight to Pending instead.
   8. posttag              — strip beet alias tags, truncate DATE to year
   9. fetch art + lyrics   — embed art, write .lrc sidecars (in Processing)
  10. promote              — per album: if lyric-complete, beet-move it to Pending;
-                            else leave it in Processing (finalize catches it up)
+                            else leave it in Processing (finalize catches it up).
+                            A failed promote move leaves the album in Processing.
  11. archive              — mv XLD .log to archive dir (.log mode only)
 
 Pending is complete-by-construction: an album lands there only once every track
@@ -245,18 +248,37 @@ class ImportRunner:
 
         import_start = run_start
 
-        # Stage 7: beet move → Processing (NOT Pending). All remaining work runs
-        # on the files in Processing; each album promotes to Pending in Stage 10
-        # only once it is lyric-complete.
-        subprocess.run(
-            [str(cfg.beet), "move", "-d", str(cfg.processing_dir),
-             f"added:{import_start}.."],
-            capture_output=True,
-            text=True,
-        )
-        self._log("Moved files to Processing", echo=False)
+        # Stage 7: beet move. When spindlebot_cfg is set (the normal pipeline),
+        # the art/lyrics + promote stages will run, so route the album through
+        # Processing — it promotes to Pending only once lyric-complete. When
+        # spindlebot_cfg is None (tests / programmatic use), those stages are
+        # skipped, so there'd be nothing to promote the album out of Processing:
+        # move straight to Pending, preserving the pre-Processing behavior.
+        via_processing = cfg.spindlebot_cfg is not None
+        if via_processing:
+            move_argv = [str(cfg.beet), "move", "-d", str(cfg.processing_dir),
+                         f"added:{import_start}.."]
+            dest_label = "Processing"
+        else:
+            move_argv = [str(cfg.beet), "move",
+                         f"added:{import_start}..", f"path:{cfg.pending_dir}/"]
+            dest_label = "Pending"
 
-        # Get canonical paths of imported files (local processing area only)
+        move_proc = subprocess.run(move_argv, capture_output=True, text=True)
+        if move_proc.returncode != 0:
+            # A failed move must abort — otherwise the runner would fetch lyrics
+            # against files still sitting in Pending and the promote (scoped to
+            # Processing) would match nothing, silently recreating the mid-fetch
+            # prune window with an incomplete album stranded in Pending.
+            err = (move_proc.stderr or move_proc.stdout or "").strip() or f"exit {move_proc.returncode}"
+            self._log(f"✗  beet move to {dest_label} failed: {err}")
+            result.stages.append(
+                StageResult("move", success=False, message=err)
+            )
+            return result
+        self._log(f"Moved files to {dest_label}", echo=False)
+
+        # Get canonical paths of imported files (local area only)
         paths_proc = subprocess.run(
             [str(cfg.beet), "ls", "-f", "$path", f"added:{import_start}.."],
             capture_output=True,
@@ -298,11 +320,23 @@ class ImportRunner:
                     + (f" errors={lr.errors}" if lr.errors else "")
                 )
 
-                pr = promote_album(d, cfg.beet)
+                # Path-derived "<albumartist> - <album>" label (beets nests that
+                # way) so logs disambiguate across artists — no extra beet call.
+                dpath = Path(d)
+                label = f"{dpath.parent.name} - {dpath.name}" if dpath.parent.name else dpath.name
+                pr = promote_album(d, cfg.beet, label=label)
                 if pr.promoted:
                     self._log(f"✅ {pr.label} → Pending")
                     result.stages.append(
                         StageResult("promote", success=True, message=f"{pr.label} → Pending")
+                    )
+                elif pr.move_error:
+                    # Lyric-complete but the move to Pending failed — the album
+                    # stays in Processing; `spindlebot finalize` will retry it.
+                    self._log(f"✗  {pr.label} promote failed (stays in Processing): {pr.move_error}")
+                    result.stages.append(
+                        StageResult("promote", success=False,
+                                    message=f"{pr.label} move failed: {pr.move_error}")
                     )
                 else:
                     waiting = ", ".join(pr.waiting_on) or "album"
