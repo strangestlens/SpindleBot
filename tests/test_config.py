@@ -152,6 +152,35 @@ class TestConfigLoading(unittest.TestCase):
             cfg = _load_with_dir(self.tmp)
         self.assertEqual(str(cfg.core.duplicates_dir), "/tmp/FromEnv")
 
+    def test_processing_dir_default(self):
+        _write(self.tmp, "config.toml", MINIMAL_CONFIG)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertIsInstance(cfg.core.processing_dir, Path)
+        self.assertTrue(str(cfg.core.processing_dir).endswith("Processing"))
+        self.assertFalse(str(cfg.core.processing_dir).startswith("~"))
+
+    def test_processing_dir_from_config_file(self):
+        config = MINIMAL_CONFIG.replace(
+            'import_dir  = "/tmp/Staging"',
+            'import_dir  = "/tmp/Staging"\n    processing_dir = "/tmp/Proc"',
+        )
+        _write(self.tmp, "config.toml", config)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertEqual(str(cfg.core.processing_dir), "/tmp/Proc")
+
+    def test_processing_dir_env_override(self):
+        config = MINIMAL_CONFIG.replace(
+            'import_dir  = "/tmp/Staging"',
+            'import_dir  = "/tmp/Staging"\n    processing_dir = "/tmp/Proc"',
+        )
+        _write(self.tmp, "config.toml", config)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        with mock.patch.dict(os.environ, {"SPINDLEBOT_PROCESSING_DIR": "/tmp/FromEnv"}):
+            cfg = _load_with_dir(self.tmp)
+        self.assertEqual(str(cfg.core.processing_dir), "/tmp/FromEnv")
+
     def test_min_copies_defaults_to_one(self):
         _write(self.tmp, "config.toml", MINIMAL_CONFIG)
         _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)

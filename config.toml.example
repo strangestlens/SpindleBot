@@ -4,10 +4,15 @@
 
 [core]
 # Import: active import area — XLD rips / downloads land here for processing.
-# Pending: processed albums waiting to be distributed to retention destinations.
+# Processing: in-flight import work happens here; an album promotes to Pending
+#   only once every track has a terminal .lrc/.nolrc marker (lyric-complete), so
+#   a mount-sync can never prune audio mid-fetch or strand late lyric sidecars.
+# Pending: processed, lyric-complete albums waiting to be distributed to
+#   retention destinations. Complete-by-construction — sync/prune trust it.
 # (legacy keys staging_dir/library_dir are still honored if present.)
-import_dir  = "~/Library/Application Support/SpindleBot/Import"
-pending_dir = "~/Library/Application Support/SpindleBot/Pending"
+import_dir     = "~/Library/Application Support/SpindleBot/Import"
+processing_dir = "~/Library/Application Support/SpindleBot/Processing"
+pending_dir    = "~/Library/Application Support/SpindleBot/Pending"
 log_dir     = "~/.config/beets"    # watcher.log and rugged-sync.log land here
 archive_dir = "~/Music/All Discs"  # XLD .log files archived here after import
 duplicates_dir = "~/Library/Application Support/SpindleBot/Duplicates"  # rips already in the library are moved here (never stranded in Import)

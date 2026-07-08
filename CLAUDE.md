@@ -4,11 +4,12 @@
 
 SpindleBot is an event-driven pipeline for ripping, tagging, and managing a lossless music library on macOS. It handles two primary flows:
 
-**Import:** XLD rips a CD → writes a `.log` to the Import area → fswatch triggers `music-watcher.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → beet move → posttag → fetch-art → fetch-lyrics → archive log → notify
+**Import:** XLD rips a CD → writes a `.log` to the Import area → fswatch triggers `music-watcher.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → **beet move → Processing** → posttag → fetch-art → fetch-lyrics → **per-album promote to Pending (only if lyric-complete)** → archive log → notify. An album lands in Pending only once every track has a terminal `.lrc`/`.nolrc` marker, so Pending is complete-by-construction and sync/prune can trust it. Albums left in Processing (transient lyric errors) are caught up by `spindlebot finalize`.
 
 Also triggered automatically when a directory is dropped into the Import area (e.g. Amazon download).
 
 > **Working areas (renamed Apr 2026, Phase A):** "Staging" → **Import** (active import) and "Library" → **Pending** (processed albums awaiting distribution), both relocated under `~/Library/Application Support/SpindleBot/`. Config keys are `core.import_dir` / `core.pending_dir` (legacy `staging_dir`/`library_dir` still honored); env vars are `SPINDLEBOT_IMPORT_DIR` / `SPINDLEBOT_PENDING_DIR`.
+> **Processing area (added Jul 2026, Option C):** a third area **Processing** between Import and Pending holds in-flight albums while art/lyrics are fetched; an album is promoted to Pending only once `album_lyrics_complete()` holds. This eliminates the fetch-lyrics window in which a mount-sync could prune audio out of Pending mid-fetch and strand late lyric sidecars. Config key `core.processing_dir` (default `~/Library/Application Support/SpindleBot/Processing`); env var `SPINDLEBOT_PROCESSING_DIR`. The promote/finalize orchestration lives in `services/promote.py`; `spindlebot finalize` re-fetches lyrics and promotes anything still stuck.
 
 **Sync:** launchd detects DwRugged mount → `music-sync-rugged.sh` → fetch-art → posttag → rsync → beets DB path reconciliation → fetch-lyrics → notify
 
@@ -32,7 +33,7 @@ Replacing "library = whatever is at known paths" with a **SpindleBot-owned SQLit
 **Layering (keep consistent):**
 - `spindlebot/core/` — pure, no DB/IO side effects, no `print`: `identity.py` (hashing), `enums.py`, `models.py` (frozen dataclasses + `from_row`), `errors.py`.
 - `spindlebot/db/` — `connection.py` (`open_db` = WAL + `foreign_keys=ON` + migrate); `schema.sql`=v1 … `schema_v5.sql`=v5; `migrations.py` (append-only `[(version, file)]`, forward-only, `user_version`-keyed). `repositories/` is the **only** layer that issues SQL; the caller owns the transaction (repos don't commit).
-- `spindlebot/services/` — orchestration over repos+core; side-effect-free re `print`; returns typed results. `inventory.py`, `locations.py` (registry + deterministic `location_uuid`), `volumes.py` (marker files), `reconciler.py` (planner: diff DB vs observed → `pending_action`; never touches bytes/FS).
+- `spindlebot/services/` — orchestration over repos+core; side-effect-free re `print`; returns typed results. `inventory.py`, `locations.py` (registry + deterministic `location_uuid`), `volumes.py` (marker files), `reconciler.py` (planner: diff DB vs observed → `pending_action`; never touches bytes/FS), `promote.py` (promote a lyric-complete album out of Processing into Pending via a beets-native `beet move path:<dir>/`; `finalize_processing` sweeps the whole area).
 - `cli.py` — thin client; `print` only here; every command supports `--json`.
 
 **Conventions:**
@@ -50,14 +51,15 @@ Replacing "library = whatever is at known paths" with a **SpindleBot-owned SQLit
 ```
 spindlebot/
   cli.py                         — CLI entry point: check / config / import / import-staging /
-                                     inventory / review / fetch-lyrics / fetch-art / notify / restart
+                                     inventory / review / finalize / fetch-lyrics / fetch-art / notify / restart
   config.py                      — typed config dataclasses, loads config.toml + secrets.toml,
                                      env var overrides
   disc.py                        — AUDIO_EXTENSIONS, find_audio_files(), check_wait(),
                                      count_discs()
   staging.py                     — scan_staging() → list[StagingItem]
   pipeline/
-    runner.py                    — ImportRunner: orchestrates all 10 import stages, echo
+    runner.py                    — ImportRunner: orchestrates all import stages (incl. move→Processing
+                                     + per-album promote to Pending), echo
                                      callback for live terminal output
     stages/
       pretag.py                  — pretag() + posttag(): normalize tags pre/post beet import,
@@ -88,6 +90,9 @@ spindlebot/
     volumes.py                   — marker files (.spindlebot-location-<uuid>), resolve_root
     reconciler.py                — planner: diff DB vs observed → pending_action (copy/missing/
                                      conflict); min_copies floor; requires a target scan; no bytes
+    promote.py                   — promote_album() moves a lyric-complete album out of Processing
+                                     into Pending (beet move path:<dir>/); finalize_processing()
+                                     sweeps the whole Processing area (retry lyrics + promote)
 
 music-watcher.sh                 — fswatch daemon: fires spindlebot import on .log or dir drop
                                      installed to ~/.local/bin/ by setup.sh
@@ -229,7 +234,8 @@ SpindleBot DB would track copies across devices.
 - beet: `/opt/homebrew/bin/beet`
 - Config: `~/.config/spindlebot/config.toml` + `secrets.toml`
 - Import area: `~/Library/Application Support/SpindleBot/Import` (active import; formerly `~/Music/Staging`)
-- Pending area: `~/Library/Application Support/SpindleBot/Pending` → `/Volumes/DwRugged/Music/Library` (processed albums awaiting distribution; formerly `~/Music/Library`)
+- Processing area: `~/Library/Application Support/SpindleBot/Processing` (in-flight import processing; albums promote to Pending once lyric-complete; `core.processing_dir`, env `SPINDLEBOT_PROCESSING_DIR`)
+- Pending area: `~/Library/Application Support/SpindleBot/Pending` → `/Volumes/DwRugged/Music/Library` (processed, lyric-complete albums awaiting distribution; formerly `~/Music/Library`)
 - Duplicates area: `~/Library/Application Support/SpindleBot/Duplicates` (already-in-library rips moved here by import instead of stranding in Import; `core.duplicates_dir`, env `SPINDLEBOT_DUPLICATES_DIR`)
 - beets DB: `~/.config/beets/library.db`
 - launchd agents: `com.strangestlens.music-watcher`, `com.strangestlens.music-sync-rugged`
@@ -247,6 +253,7 @@ bats tests/shell/                                            # run shell tests
 python3 -m spindlebot import-staging --dry-run               # preview what's in the Import area
 python3 -m spindlebot import "~/Library/Application Support/SpindleBot/Import/Album/"        # import a specific directory
 python3 -m spindlebot import "~/Library/Application Support/SpindleBot/Import/Album.log" --force   # skip disc check
+python3 -m spindlebot finalize [--dry-run] [--json]          # retry lyrics + promote lyric-complete albums out of Processing → Pending
 python3 -m spindlebot fetch-art <album_dir> [--dry-run] [--force]
 python3 -m spindlebot fetch-lyrics <album_dir> [--dry-run] [--force]
 
