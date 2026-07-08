@@ -22,7 +22,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from spindlebot.core import vclock
 from spindlebot.core.enums import (
     ActionKind,
     ContentKind,
@@ -36,13 +35,14 @@ from spindlebot.core.progress import ProgressCallback, emit
 from spindlebot.db.repositories import (
     action_repo,
     conflict_repo,
-    lyric_repo,
     presence_repo,
     run_repo,
     scan_repo,
     sidecar_presence_repo,
     sidecar_repo,
 )
+from spindlebot.services import lyrics_sync
+from spindlebot.services.lyrics_sync import LyricObservation
 
 
 @dataclass
@@ -68,52 +68,24 @@ def _present_lrc(conn, location_id: int) -> dict[int, tuple[str | None, int]]:
     return out
 
 
-def _ensure_version(conn, doc_id: int, sha: str, origin: str, now: int):
-    """Get-or-create (dedup by sha) a lyric version stamped with origin's vclock."""
-    for v in lyric_repo.list_versions(conn, doc_id):
-        if v.sha256 == sha:
-            return v
-    return lyric_repo.add_version(
-        conn, doc_id=doc_id, sha256=sha,
-        vclock_json=vclock.to_json({origin: 1}), source="scan", now=now,
-    )
+def _lyric_observations(
+    conn, locations: list[Location]
+) -> dict[int, list[LyricObservation]]:
+    """Per audio_id, the .lrc observed present across the given locations.
 
-
-def _flag_lyric_divergence(conn, *, target, auth, audio_id, target_sha, auth_sha,
-                           run_id, now, result) -> bool:
-    """Record a cross-location lyric divergence and propose a resolve action.
-
-    At this phase the two versions have independent single-location vclocks, so
-    they are concurrent — a genuine divergence for a human to adjudicate, never
-    auto-resolved. winner/loser here just name the two diverging sides; real
-    adjudication is Phase 4.
-
-    The conflict ROW is deduped (one open conflict per track), but the
-    resolve_conflict ACTION is proposed every run — exactly like COPY/MISSING,
-    so the latest run is always a complete, acknowledgeable plan.
-
-    Phase-4 note: the dedup checks only OPEN conflicts, so once resolution exists
-    a resolved conflict whose bytes still differ would re-open here. That's
-    moot until Phase 4 propagates the winning lyric (making the shas match); when
-    the conflicts CLI lands, key the dedup on the version pair, not just status.
+    A track's .lrc maps to one sidecar_content row (keyed by parent track), so
+    the same sidecar_id resolves to the same audio_id at every location; only the
+    per-copy file_sha256 differs. Copies with no recorded sha are skipped.
     """
-    doc = lyric_repo.ensure_doc(conn, audio_id, now)
-    tv = _ensure_version(conn, doc.id, target_sha, target.name, now)
-    av = _ensure_version(conn, doc.id, auth_sha, auth.name, now)
-    if not vclock.concurrent(vclock.from_json(tv.vclock_json),
-                             vclock.from_json(av.vclock_json)):
-        return False
-    if conflict_repo.find_open_for_audio(conn, audio_id) is None:
-        conflict_repo.open_conflict(conn, audio_id=audio_id, winner_version=av.id,
-                                    loser_version=tv.id, now=now)
-    action_repo.add(
-        conn, run_id=run_id, action_kind=ActionKind.RESOLVE_CONFLICT,
-        content_kind=ContentKind.AUDIO, content_id=audio_id,
-        source_location_id=auth.id, dest_location_id=target.id, now=now,
-        reason=f"lyrics differ between {auth.name} and {target.name}",
-    )
-    result.conflicts += 1
-    return True
+    obs: dict[int, list[LyricObservation]] = {}
+    for loc in locations:
+        for _sid, (sha, audio_id) in _present_lrc(conn, loc.id).items():
+            if not sha:
+                continue
+            obs.setdefault(audio_id, []).append(
+                LyricObservation(location_id=loc.id, name=loc.name, sha=sha)
+            )
+    return obs
 
 
 def reconcile_location(
@@ -236,31 +208,34 @@ def reconcile_location(
                     result.below_floor_ids.append(audio_id)
             _tick("missing")
 
-        # CONFLICT: same track's .lrc present on target and an authoritative
-        # location with different per-copy content → flag a divergence.
-        target_lrc = _present_lrc(conn, target.id)
-        if target_lrc:
-            conflicted: set[int] = set()   # flag each track's divergence once per run
-            for src in sources:
-                if src.id == target.id:
-                    continue
-                src_lrc = _present_lrc(conn, src.id)
-                for sid, (t_sha, audio_id) in target_lrc.items():
-                    if audio_id in conflicted:
-                        continue
-                    other = src_lrc.get(sid)
-                    if other is None:
-                        continue
-                    a_sha, _ = other
-                    if not t_sha or not a_sha or t_sha == a_sha:
-                        continue
-                    if _flag_lyric_divergence(
-                        conn, target=target, auth=src, audio_id=audio_id,
-                        target_sha=t_sha, auth_sha=a_sha,
-                        run_id=run_id, now=now, result=result,
-                    ):
-                        conflicted.add(audio_id)
-                    _tick("conflict")
+        # LYRIC LINEAGE: fold every location's observed .lrc into causal lineage.
+        # Agreement (shared sha) is no conflict; a linear edit silently advances
+        # the head (4.1 propagates it); a behind location is a future target. Only
+        # genuinely CONCURRENT versions open a conflict — deduped one-per-track,
+        # with the resolve action re-proposed each run so the latest plan is whole.
+        lyric_locs = [target] + [s for s in sources if s.id != target.id]
+        for audio_id, observations in _lyric_observations(conn, lyric_locs).items():
+            lineage = lyrics_sync.reconcile_doc(
+                conn, audio_id=audio_id, observations=observations, now=now
+            )
+            concurrent = lineage.concurrent
+            if not concurrent:
+                continue
+            loser = concurrent[0]
+            if conflict_repo.find_open_for_audio(conn, audio_id) is None:
+                conflict_repo.open_conflict(
+                    conn, audio_id=audio_id,
+                    winner_version=lineage.head_version_id,
+                    loser_version=loser.version_id, now=now,
+                )
+            action_repo.add(
+                conn, run_id=run_id, action_kind=ActionKind.RESOLVE_CONFLICT,
+                content_kind=ContentKind.AUDIO, content_id=audio_id,
+                source_location_id=loser.location_id, dest_location_id=target.id,
+                now=now, reason=f"concurrent lyric edits diverge on {target.name}",
+            )
+            result.conflicts += 1
+            _tick("conflict")
     except BaseException:
         status = ScanStatus.INTERRUPTED
         raise

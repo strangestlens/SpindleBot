@@ -277,6 +277,23 @@ class LyricVersion:
 
 
 @dataclass(frozen=True)
+class LyricVersionPresence:
+    doc_id: int
+    location_id: int
+    version_id: int
+    observed_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "LyricVersionPresence":
+        return LyricVersionPresence(
+            doc_id=row["doc_id"],
+            location_id=row["location_id"],
+            version_id=row["version_id"],
+            observed_utc=row["observed_utc"],
+        )
+
+
+@dataclass(frozen=True)
 class Conflict:
     id: int
     audio_id: int | None

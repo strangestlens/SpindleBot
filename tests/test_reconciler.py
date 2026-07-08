@@ -370,6 +370,58 @@ def test_conflict_row_deduped_but_action_reproposed_each_run(conn):
     assert len(latest) == 1 and latest[0].content_id == x.id
 
 
+def test_linear_edit_advances_head_without_a_conflict(conn):
+    # A location improving a lyric (newer bytes off the current head) fast-forwards
+    # the head and is NOT a conflict — 4.1 will propagate it to the behind side.
+    from spindlebot.db.repositories import lyric_version_presence_repo
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "sha-1")
+    _lrc(conn, x.id, rugged.id, "sha-1")   # agree first
+    _scan(conn, rugged.id)
+    first = reconcile_location(conn, target=rugged,
+                               source_locations=[pending], now=1000)
+    assert first.conflicts == 0
+
+    _lrc(conn, x.id, pending.id, "sha-2")  # pending improves the lyric
+    second = reconcile_location(conn, target=rugged,
+                                source_locations=[pending], now=2000)
+
+    assert second.conflicts == 0
+    assert conflict_repo.list_open(conn) == []
+    doc = lyric_repo.get_doc(conn, x.id)
+    versions = lyric_repo.list_versions(conn, doc.id)
+    assert len(versions) == 2
+    head = lyric_repo.head_version(conn, doc.id)
+    old = next(v for v in versions if v.id != head.id)
+    assert vclock.strictly_dominates(vclock.from_json(head.vclock_json),
+                                     vclock.from_json(old.vclock_json))
+    # pending now holds the new head; rugged is behind (still the old version)
+    assert lyric_version_presence_repo.get(conn, doc.id, pending.id).version_id == head.id
+    assert lyric_version_presence_repo.get(conn, doc.id, rugged.id).version_id == old.id
+
+
+def test_behind_location_is_not_a_conflict(conn):
+    # rugged (target) holds an OLD version while the head advanced on pending.
+    from spindlebot.db.repositories import lyric_version_presence_repo
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "sha-1")
+    _lrc(conn, x.id, rugged.id, "sha-1")
+    _scan(conn, rugged.id)
+    reconcile_location(conn, target=rugged, source_locations=[pending], now=1000)
+    _lrc(conn, x.id, pending.id, "sha-2")  # head advances on pending
+    result = reconcile_location(conn, target=rugged,
+                                source_locations=[pending], now=2000)
+
+    assert result.conflicts == 0
+    doc = lyric_repo.get_doc(conn, x.id)
+    head = lyric_repo.head_version(conn, doc.id)
+    # rugged's held version is strictly older than the head → behind, not conflict
+    rugged_v = lyric_version_presence_repo.get(conn, doc.id, rugged.id)
+    assert rugged_v.version_id != head.id
+
+
 def test_run_note_records_below_floor(conn):
     pending, rugged = _pending(conn), _rugged(conn)
     x = _audio(conn, "x" * 32)
