@@ -66,5 +66,24 @@ def list_track_ids(conn: sqlite3.Connection, album_id: int) -> list[int]:
     return [r[0] for r in rows]
 
 
+def list_present_track_paths(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    """(rel_path, album_id) for every present track across all locations.
+
+    Lets inventory resolve an album-level orphan sidecar (cover.jpg / bare .nolrc
+    whose album's audio was pruned from the scanned location) to the album already
+    recorded from a prior inventory elsewhere, by matching the sidecar's directory
+    against the directory of that album's tracks.
+    """
+    rows = conn.execute(
+        """
+        SELECT p.rel_path, at.album_id
+        FROM audio_presence p
+        JOIN album_track at ON at.audio_id = p.audio_id
+        WHERE p.present = 1 AND p.rel_path IS NOT NULL
+        """
+    ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
 def count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM album").fetchone()[0]

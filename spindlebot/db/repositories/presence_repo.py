@@ -74,6 +74,32 @@ def get_by_rel_path(
     return AudioPresence.from_row(row) if row else None
 
 
+def find_present_by_rel_paths(
+    conn: sqlite3.Connection, rel_paths: list[str]
+) -> AudioPresence | None:
+    """Most-recently-observed present presence row matching any of `rel_paths`,
+    across *all* locations.
+
+    Used to parent an orphan sidecar (a `.lrc` whose track was pruned from the
+    scanned location) to the audio_content already recorded elsewhere: the caller
+    passes the sidecar's canonical rel_path stem paired with each audio extension.
+    Returns None when no such content exists in the DB — nothing to link against.
+    """
+    if not rel_paths:
+        return None
+    placeholders = ",".join("?" * len(rel_paths))
+    row = conn.execute(
+        f"""
+        SELECT * FROM audio_presence
+        WHERE present = 1 AND rel_path IN ({placeholders})
+        ORDER BY observed_utc DESC
+        LIMIT 1
+        """,
+        rel_paths,
+    ).fetchone()
+    return AudioPresence.from_row(row) if row else None
+
+
 def list_for_location(
     conn: sqlite3.Connection, location_id: int, *, present: bool | None = None
 ) -> list[AudioPresence]:
