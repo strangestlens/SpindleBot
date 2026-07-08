@@ -280,13 +280,21 @@ def _process_file(
     Terminal states: "synced"/"plain" write `<base>.lrc`; "missing" (a definitive
     lrclib miss) writes `<base>.nolrc`. "error" is transient — it writes nothing so
     the track stays incomplete and is retried on a later run.
+
+    Both terminal sidecars short-circuit re-query when present (unless `force`): an
+    existing `.lrc` returns "skipped"; an existing `.nolrc` returns "missing"
+    without hitting lrclib, so a definitive miss is never re-queried.
     """
     base = os.path.splitext(audio_path)[0]
     lrc_path = base + ".lrc"
     nolrc_path = base + ".nolrc"
 
-    if os.path.exists(lrc_path) and not force:
-        return "skipped"
+    if not force:
+        if os.path.exists(lrc_path):
+            return "skipped"
+        if os.path.exists(nolrc_path):
+            # Definitive miss recorded on a prior run — terminal, don't re-query.
+            return "missing"
 
     tags = _get_tags(audio_path)
     if "_error" in tags:
@@ -334,16 +342,22 @@ def _process_file(
         return "missing"
 
     if not dry_run:
+        # Clear any stale per-track miss marker from a prior run BEFORE writing
+        # the .lrc, so a partial failure can never leave the track carrying both
+        # .lrc and .nolrc (contradictory terminal state). "Already gone" is the
+        # normal case; any other removal failure aborts as a transient error,
+        # leaving the prior .nolrc intact (consistent, retried next run).
+        try:
+            os.remove(nolrc_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return "error"
         try:
             with open(lrc_path, "w", encoding="utf-8") as fh:
                 fh.write(lrc_content + "\n")
         except OSError:
             return "error"
-        # Lyrics found: clear any stale per-track miss marker from a prior run.
-        try:
-            os.remove(nolrc_path)
-        except OSError:
-            pass
 
     return outcome
 

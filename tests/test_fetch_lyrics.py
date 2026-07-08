@@ -341,6 +341,54 @@ class TestPerTrackTerminalMarkers:
         assert (tmp_path / "01. Song.lrc").exists()
         assert not (tmp_path / "01. Song.nolrc").exists()
 
+    def test_existing_per_track_nolrc_not_requeried(self, tmp_path):
+        """A definitively-missed track (has .nolrc, no .lrc) is terminal: no
+        lrclib call on a later run, and it still counts as a miss."""
+        f = tmp_path / "01. Song.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+        (tmp_path / "01. Song.nolrc").write_text("")
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib") as mock_fetch:
+            result = fetch_lyrics(tmp_path, _cfg())
+
+        mock_fetch.assert_not_called()
+        assert result.missing == 1
+        assert result.total_found == 0
+        assert album_lyrics_complete(tmp_path) is True
+
+    def test_force_requeries_existing_nolrc(self, tmp_path):
+        """--force re-queries a track that previously missed; a fresh hit writes
+        .lrc and clears the stale .nolrc."""
+        f = tmp_path / "01. Song.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+        (tmp_path / "01. Song.nolrc").write_text("")
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib",
+                   return_value=("[00:01.00] Now found", None)) as mock_fetch:
+            result = fetch_lyrics(tmp_path, _cfg(), force=True)
+
+        mock_fetch.assert_called_once()
+        assert result.synced == 1
+        assert (tmp_path / "01. Song.lrc").exists()
+        assert not (tmp_path / "01. Song.nolrc").exists()
+
+    def test_stale_nolrc_removal_failure_aborts_before_writing_lrc(self, tmp_path):
+        """If the stale .nolrc can't be removed, the track never ends up carrying
+        both markers — it aborts as a transient error, .nolrc intact, no .lrc."""
+        f = tmp_path / "01. Song.flac"
+        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
+        (tmp_path / "01. Song.nolrc").write_text("")
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._fetch_from_lrclib",
+                   return_value=("[00:01.00] Found", None)), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.os.remove",
+                   side_effect=PermissionError("locked")):
+            result = fetch_lyrics(tmp_path, _cfg(), force=True)
+
+        assert result.errors == ["01. Song.flac"]
+        assert (tmp_path / "01. Song.nolrc").exists()
+        assert not (tmp_path / "01. Song.lrc").exists()
+
     def test_definitive_miss_not_written_on_dry_run(self, tmp_path):
         f = tmp_path / "01. Song.flac"
         _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Record"})
