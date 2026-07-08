@@ -33,6 +33,7 @@ def _make_config(tmp_path: Path, *, force: bool = False, trigger: Path | None = 
     (tmp_path / "AllDiscs").mkdir(exist_ok=True)
     (tmp_path / "Library").mkdir(exist_ok=True)
     (tmp_path / "pipeline").mkdir(exist_ok=True)
+    (tmp_path / "Duplicates").mkdir(exist_ok=True)
     db = tmp_path / "library.db"
     db.touch()
 
@@ -45,25 +46,36 @@ def _make_config(tmp_path: Path, *, force: bool = False, trigger: Path | None = 
         pending_dir=tmp_path / "Library",
         import_dir=staging,
         archive=tmp_path / "AllDiscs",
+        duplicates_dir=tmp_path / "Duplicates",
         pipeline_dir=tmp_path / "pipeline",
         log_file=tmp_path / "logs" / "watcher.log",
     )
 
 
 def _successful_subprocess_sequence(library: Path) -> list[MagicMock]:
-    """Standard subprocess.run side_effect for a happy-path import."""
+    """Standard subprocess.run side_effect for a happy-path import.
+
+    Mirrors the call order in ImportRunner: per-batch import, then the
+    "added since import_start" ls (must report a NEW item so the batch isn't
+    treated as an already-in-library duplicate), then the multidisc modify,
+    then the run-wide name/move/paths queries.
+    """
     return [
         MagicMock(returncode=0, stdout="", stderr=""),               # beet import
+        MagicMock(                                                   # beet ls (_items_added_since)
+            returncode=0,
+            stdout=str(library / "track.flac") + "\n",
+            stderr="",
+        ),
+        MagicMock(returncode=0, stdout="", stderr=""),                # beet modify (multidisc)
         MagicMock(returncode=0, stdout="Artist - Album\n", stderr=""), # beet ls (album name)
-        MagicMock(returncode=0),                                      # music-notify.sh
-        MagicMock(returncode=0, stdout="", stderr=""),                # beet modify
         MagicMock(returncode=0, stdout="", stderr=""),                # beet move
         MagicMock(                                                    # beet ls (paths)
             returncode=0,
             stdout=str(library / "track.flac") + "\n",
             stderr="",
         ),
-        MagicMock(returncode=0),                                      # fetch-lyrics
+        MagicMock(returncode=0),                                      # spare
     ]
 
 
@@ -323,14 +335,25 @@ def _beet_import_calls(mock_sub) -> list[list[str]]:
     return calls
 
 
-def _stub_beet(argv, *args, **kwargs):
-    """side_effect for every beet subprocess call (import / ls / move).
+def _fresh_import_stub_beet(argv, *args, **kwargs):
+    """side_effect modeling beets where every imported album is NEW.
 
-    Returns a benign success for all of them so the pipeline's post-import
-    ls/move/ls-paths queries don't blow up; the assertions inspect the recorded
-    `import` argvs.
+    The runner probes `beet ls -f $path added:<start>..` after each import to
+    decide whether that album actually produced new items. Report a fabricated
+    path for that forward-looking query so each batch imports normally (not a
+    duplicate). Every other call (import / modify / move / backward-looking
+    duplicate lookups) returns benign empty success.
     """
+    argv = list(argv)
+    if len(argv) >= 2 and argv[1] == "ls" and any(
+        a.startswith("added:") and a.endswith("..") for a in argv
+    ):
+        return MagicMock(returncode=0, stdout="/lib/new/track.flac\n", stderr="")
     return MagicMock(returncode=0, stdout="", stderr="")
+
+
+# Back-compat alias for existing mixed-import tests.
+_stub_beet = _fresh_import_stub_beet
 
 
 def test_mixed_import_imports_each_album_separately(tmp_path):
@@ -434,3 +457,294 @@ def test_mixed_import_per_album_disctotal_is_correct(tmp_path):
     # One fix call per album, with the correct per-album disc counts.
     assert sorted(seen_disc_counts) == [1, 2], \
         f"per-album disc counts wrong: {seen_disc_counts}"
+
+
+# ── already-in-library duplicate handling ─────────────────────────────────────
+
+
+def _make_beet_fake(existing: dict[str, str]):
+    """Build a subprocess.run side_effect modeling a beets library that already
+    contains the albums in `existing` (albumartist -> existing dir path).
+
+    Semantics used by the runner:
+      * `beet ls -f $path added:<start>..`  (forward window) -> items this run
+        just imported. Empty when the album was already present (a no-op).
+      * `beet ls -f $path <query> added:..<start>` (backward window) -> the
+        pre-existing album. Non-empty only for albums in `existing`.
+    All other calls (import / modify / move / name ls) succeed benignly.
+    """
+    def fake(argv, *args, **kwargs):
+        argv = list(argv)
+        is_ls = len(argv) >= 2 and argv[1] == "ls"
+        forward = any(a.startswith("added:") and a.endswith("..") for a in argv)
+        backward = any(a.startswith("added:..") for a in argv)
+
+        if is_ls and forward:
+            # Forward window (items added by THIS run) is empty: every album fed
+            # to this fake is an already-present no-op. New-album cases use
+            # _fresh_import_stub_beet, which reports a fresh item here instead.
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        if is_ls and backward:
+            artist = _query_value(argv, "albumartist:")
+            mbid = _query_value(argv, "mb_albumid:")
+            match = existing.get(artist) or (existing.get(mbid) if mbid else None)
+            if match:
+                stdout = f"{match}/01.flac\n{match}/02.flac\n"
+                return MagicMock(returncode=0, stdout=stdout, stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    return fake
+
+
+def _query_value(argv: list[str], prefix: str) -> str:
+    for a in argv:
+        if a.startswith(prefix):
+            return a[len(prefix):]
+    return ""
+
+
+def test_duplicate_album_moved_to_duplicates(tmp_path):
+    """An album already in the library is detected as a duplicate: the ⏭ line
+    is logged, its files move to Duplicates/<artist>/<album>/, notify fires,
+    and nothing is left in Import."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    _write_flac(imp / "dup1.flac", tags={"albumartist": "Radiohead", "album": "Kid A",
+                                         "discnumber": 1, "disctotal": 1})
+
+    fake_cfg = MagicMock()  # stand-in SpindleBotConfig so notify() is attempted
+    cfg.spindlebot_cfg = fake_cfg
+
+    fake = _make_beet_fake({"Radiohead": "/Volumes/DwRugged/Music/Radiohead/Kid A"})
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch("spindlebot.pipeline.runner.notify",
+               return_value=MagicMock(macos_error=None, telegram_error=None)) as mock_notify, \
+         patch(_SUBPROCESS, side_effect=fake):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert log_contains(cfg, "⏭")
+    assert log_contains(cfg, "already in library")
+    assert log_contains(cfg, "/Volumes/DwRugged/Music/Radiohead/Kid A")
+
+    # File relocated, not left in Import.
+    assert not (imp / "dup1.flac").exists()
+    moved = cfg.duplicates_dir / "Radiohead" / "Kid A" / "dup1.flac"
+    assert moved.exists(), "duplicate rip must land in Duplicates/<artist>/<album>/"
+
+    mock_notify.assert_called_once()
+
+    # No multidisc/posttag stage for a duplicate; duplicate_check recorded and
+    # reported truthfully — it RAN (moved files + notified), so not `skipped`.
+    stage_names = [s.name for s in result.stages]
+    assert "duplicate_check" in stage_names
+    assert "multidisc" not in stage_names
+    dup_stage = next(s for s in result.stages if s.name == "duplicate_check")
+    assert dup_stage.success
+    assert not dup_stage.skipped
+    assert "moved to Duplicates" in dup_stage.message
+
+
+def test_no_op_without_library_match_leaves_files(tmp_path):
+    """Nothing imported AND beets has no matching album → a distinct warning,
+    files left in Import (never moved to Duplicates)."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    _write_flac(imp / "orphan.flac", tags={"albumartist": "Nobody", "album": "Nowhere",
+                                           "discnumber": 1, "disctotal": 1})
+
+    fake = _make_beet_fake({})  # library has nothing
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=fake):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert log_contains(cfg, "no matching album in the library")
+    # Left where it was; NOT moved to Duplicates.
+    assert (imp / "orphan.flac").exists()
+    assert not (cfg.duplicates_dir / "Nobody").exists()
+
+
+def test_partial_tags_not_treated_as_duplicate(tmp_path):
+    """A no-op batch with album set but EMPTY albumartist must not be branded a
+    duplicate — a one-sided match could hit an unrelated album. Files stay."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    # album present, albumartist absent (and no artist to fall back on).
+    _write_flac(imp / "partial.flac", tags={"album": "Ambiguous", "discnumber": 1,
+                                            "disctotal": 1})
+
+    backward_queries = []
+
+    def fake(argv, *args, **kwargs):
+        argv = list(argv)
+        is_ls = len(argv) >= 2 and argv[1] == "ls"
+        forward = any(a.startswith("added:") and a.endswith("..") for a in argv)
+        backward = any(a.startswith("added:..") for a in argv)
+        if is_ls and backward:
+            backward_queries.append(argv)
+            # If a lookup somehow ran, pretend a match exists — the test proves
+            # the runner never issues it for a one-sided batch.
+            return MagicMock(returncode=0, stdout="/lib/Some/Album/01.flac\n", stderr="")
+        if is_ls and forward:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=fake):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    # No pre-existing-album lookup was issued (both fields required).
+    assert backward_queries == []
+    # Treated as an unmatched no-op: warned, left in Import, not moved.
+    assert log_contains(cfg, "no matching album in the library")
+    assert (imp / "partial.flac").exists()
+    assert not any(cfg.duplicates_dir.rglob("*.flac"))
+
+
+def test_failed_beet_ls_does_not_move_files(tmp_path):
+    """A transient `beet ls` failure (nonzero exit) must be treated as UNKNOWN,
+    not as 'nothing imported' — no duplicate handling, files left in place."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    _write_flac(imp / "flaky.flac", tags={"albumartist": "Radiohead", "album": "Kid A",
+                                          "discnumber": 1, "disctotal": 1})
+
+    def fake(argv, *args, **kwargs):
+        argv = list(argv)
+        # The post-import "added since" verification ls fails.
+        if len(argv) >= 2 and argv[1] == "ls" and any(
+            a.startswith("added:") and a.endswith("..") for a in argv
+        ):
+            return MagicMock(returncode=1, stdout="", stderr="db locked")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch("spindlebot.pipeline.runner.notify",
+               return_value=MagicMock(macos_error=None, telegram_error=None)) as mock_notify, \
+         patch(_SUBPROCESS, side_effect=fake):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    # Nothing moved, nothing branded a duplicate, no duplicate notify.
+    assert (imp / "flaky.flac").exists()
+    assert not any(cfg.duplicates_dir.rglob("*.flac"))
+    assert not log_contains(cfg, "already in library")
+    assert log_contains(cfg, "could not verify import result")
+    mock_notify.assert_not_called()
+
+
+def test_new_album_still_imports_normally(tmp_path):
+    """Regression: a brand-new album imports through all stages, no duplicate
+    handling."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    _write_flac(imp / "new.flac", tags={"albumartist": "Fresh", "album": "Debut",
+                                        "discnumber": 1, "disctotal": 1})
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_fresh_import_stub_beet):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    stage_names = [s.name for s in result.stages]
+    assert "multidisc" in stage_names
+    assert "duplicate_check" not in stage_names
+    # Nothing moved to Duplicates.
+    assert not any(cfg.duplicates_dir.rglob("*.flac"))
+    assert not log_contains(cfg, "already in library")
+
+
+def test_mixed_new_and_duplicate_in_one_run(tmp_path):
+    """One new album + one duplicate in a flat Import: the new one imports, the
+    duplicate moves aside — both handled in a single run (per-album batching)."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    _write_flac(imp / "new.flac", tags={"albumartist": "Fresh", "album": "Debut",
+                                        "discnumber": 1, "disctotal": 1})
+    _write_flac(imp / "dup.flac", tags={"albumartist": "Radiohead", "album": "Kid A",
+                                        "discnumber": 1, "disctotal": 1})
+
+    cfg.spindlebot_cfg = MagicMock()
+
+    # The forward "added since" query immediately follows its batch's import, so
+    # remember which album just imported and answer accordingly: the new album
+    # reports a fresh item, the duplicate reports nothing.
+    last_import = {"targets": []}
+
+    def fake(argv, *args, **kwargs):
+        argv = list(argv)
+        cmd = argv[1] if len(argv) >= 2 else ""
+        is_ls = cmd == "ls"
+        forward = any(a.startswith("added:") and a.endswith("..") for a in argv)
+        backward = any(a.startswith("added:..") for a in argv)
+
+        if cmd == "import":
+            last_import["targets"] = [str(t) for t in argv[2:]]
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        if is_ls and forward:
+            # Fresh album just imported → report a new item; duplicate → empty.
+            if any("new.flac" in t for t in last_import["targets"]):
+                return MagicMock(returncode=0, stdout=str(imp / "new.flac") + "\n",
+                                 stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        if is_ls and backward:
+            artist = _query_value(argv, "albumartist:")
+            if artist == "Radiohead":
+                return MagicMock(returncode=0,
+                                 stdout="/lib/Radiohead/Kid A/01.flac\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch("spindlebot.pipeline.runner.notify",
+               return_value=MagicMock(macos_error=None, telegram_error=None)), \
+         patch("spindlebot.pipeline.stages.fetch_art.fetch_art",
+               return_value=MagicMock(embedded=0, skipped=0, missing=0, errors=0)), \
+         patch("spindlebot.pipeline.stages.fetch_lyrics.fetch_lyrics",
+               return_value=MagicMock(synced=0, plain=0, missing=0, errors=0)), \
+         patch(_SUBPROCESS, side_effect=fake):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    # Duplicate moved aside.
+    assert not (imp / "dup.flac").exists()
+    assert (cfg.duplicates_dir / "Radiohead" / "Kid A" / "dup.flac").exists()
+    assert log_contains(cfg, "already in library")
+
+    # Both albums produced a beet_import success; exactly one was a duplicate.
+    assert sum(1 for s in result.stages if s.name == "beet_import" and s.success) == 2
+    assert sum(1 for s in result.stages if s.name == "duplicate_check") == 1

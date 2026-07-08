@@ -122,6 +122,36 @@ class TestConfigLoading(unittest.TestCase):
         cfg = _load_with_dir(self.tmp)
         self.assertTrue(str(cfg.core.db_path).endswith("spindlebot.db"))
 
+    def test_duplicates_dir_default(self):
+        _write(self.tmp, "config.toml", MINIMAL_CONFIG)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertIsInstance(cfg.core.duplicates_dir, Path)
+        self.assertTrue(str(cfg.core.duplicates_dir).endswith("Duplicates"))
+        self.assertFalse(str(cfg.core.duplicates_dir).startswith("~"))
+
+    def test_duplicates_dir_from_config_file(self):
+        config = MINIMAL_CONFIG.replace(
+            'archive_dir = "/tmp/AllDiscs"',
+            'archive_dir = "/tmp/AllDiscs"\n    duplicates_dir = "/tmp/Dupes"',
+        )
+        _write(self.tmp, "config.toml", config)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        cfg = _load_with_dir(self.tmp)
+        self.assertEqual(str(cfg.core.duplicates_dir), "/tmp/Dupes")
+
+    def test_duplicates_dir_env_override(self):
+        # SPINDLEBOT_DUPLICATES_DIR wins over the config.toml value.
+        config = MINIMAL_CONFIG.replace(
+            'archive_dir = "/tmp/AllDiscs"',
+            'archive_dir = "/tmp/AllDiscs"\n    duplicates_dir = "/tmp/Dupes"',
+        )
+        _write(self.tmp, "config.toml", config)
+        _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)
+        with mock.patch.dict(os.environ, {"SPINDLEBOT_DUPLICATES_DIR": "/tmp/FromEnv"}):
+            cfg = _load_with_dir(self.tmp)
+        self.assertEqual(str(cfg.core.duplicates_dir), "/tmp/FromEnv")
+
     def test_min_copies_defaults_to_one(self):
         _write(self.tmp, "config.toml", MINIMAL_CONFIG)
         _write(self.tmp, "secrets.toml", MINIMAL_SECRETS)

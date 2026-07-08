@@ -47,6 +47,7 @@ class CoreConfig:
     pending_dir: Path   # processed albums awaiting distribution; formerly "library"
     log_dir: Path
     archive_dir: Path
+    duplicates_dir: Path  # already-in-library rips moved here instead of stranding in Import
     db_path: Path       # SpindleBot's own SQLite system-of-record DB
     min_copies: int = 1  # retention floor: refuse to drop a content below this many retention copies
 
@@ -167,6 +168,13 @@ def load() -> SpindleBotConfig:
         ),
         log_dir=_expand(c.get("log_dir", "~/.config/beets")),
         archive_dir=_expand(c.get("archive_dir", "~/Music/All Discs")),
+        duplicates_dir=_expand(
+            os.environ.get(
+                "SPINDLEBOT_DUPLICATES_DIR",
+                c.get("duplicates_dir",
+                      "~/Library/Application Support/SpindleBot/Duplicates"),
+            )
+        ),
         db_path=_expand(c.get("db_path", "~/.config/spindlebot/spindlebot.db")),
         min_copies=max(1, int(c.get("min_copies", 1))),
     )
