@@ -6,10 +6,23 @@ Sources (in preference order):
   2. lrclib.net plain lyrics — wrapped in a minimal LRC envelope
   3. Embedded 'lyrics' tag on the file itself
 
-Per-album .nolrc marker: if every file in the album comes up empty, a .nolrc
-file is written alongside so future runs (and the sync gap-fill) can skip it
-without making redundant API calls. The marker is removed if lyrics are found
-on a later run.
+Per-track terminal state: every track ends in one of two terminal states, or
+stays incomplete (to be retried). A `<track>.lrc` means lyrics were found; a
+`<track>.nolrc` sibling means lrclib definitively has no lyrics for it (a
+successful response with no synced/plain lyrics, including a 404). A *transient*
+failure (connection error, timeout, 5xx, or any other exception) writes NOTHING
+— the track stays incomplete so a later run retries it.
+
+This miss/error distinction is what makes completion reliable: a transient
+network blip must not be swept into a permanent "no lyrics" marker.
+
+Per-album .nolrc marker: retained for backward compatibility and written only
+when EVERY track reached a definitive-miss terminal state (no finds AND no
+transient errors). The marker is removed if lyrics are found on a later run.
+
+`album_lyrics_complete(album_dir)` is a pure predicate: an album is complete when
+every audio file has a terminal sidecar (`.lrc` or `<base>.nolrc`), or the
+album-level `.nolrc` is present (which implies every track missed).
 
 Can be invoked standalone:
     spindlebot fetch-lyrics <album_dir> [--dry-run] [--force]
@@ -47,7 +60,11 @@ class LyricsResult:
 
     @property
     def nolrc_written(self) -> bool:
-        return self.missing > 0 and self.total_found == 0
+        # Album-level marker: only when every track reached a definitive-miss
+        # terminal state. A transient error (self.errors) means at least one
+        # track is still incomplete and retryable, so the album is NOT all-miss
+        # and the blanket marker must not be written.
+        return self.missing > 0 and self.total_found == 0 and not self.errors
 
 
 # ── Tag reading ───────────────────────────────────────────────────────────────
@@ -257,9 +274,16 @@ def _process_file(
 ) -> str:
     """
     Fetch and write lyrics for a single audio file.
+
     Returns one of: "synced", "plain", "skipped", "missing", "error".
+
+    Terminal states: "synced"/"plain" write `<base>.lrc`; "missing" (a definitive
+    lrclib miss) writes `<base>.nolrc`. "error" is transient — it writes nothing so
+    the track stays incomplete and is retried on a later run.
     """
-    lrc_path = os.path.splitext(audio_path)[0] + ".lrc"
+    base = os.path.splitext(audio_path)[0]
+    lrc_path = base + ".lrc"
+    nolrc_path = base + ".nolrc"
 
     if os.path.exists(lrc_path) and not force:
         return "skipped"
@@ -297,6 +321,16 @@ def _process_file(
         lrc_content = _plain_to_lrc(tags["lyrics"])
         outcome = "plain"
     else:
+        # Definitive miss: a successful lrclib response (incl. 404) with no
+        # lyrics. Write the per-track terminal marker so this track is complete
+        # and never re-queried. Transient failures never reach here — they raise
+        # and are caught above as "error", writing nothing.
+        if not dry_run:
+            try:
+                with open(nolrc_path, "w", encoding="utf-8") as fh:
+                    fh.write("")
+            except OSError:
+                return "error"
         return "missing"
 
     if not dry_run:
@@ -305,11 +339,39 @@ def _process_file(
                 fh.write(lrc_content + "\n")
         except OSError:
             return "error"
+        # Lyrics found: clear any stale per-track miss marker from a prior run.
+        try:
+            os.remove(nolrc_path)
+        except OSError:
+            pass
 
     return outcome
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+
+def album_lyrics_complete(album_dir: str | Path) -> bool:
+    """Return True iff every audio file in `album_dir` is in a terminal lyric state.
+
+    A track is terminal when a `<base>.lrc` (found) OR a `<base>.nolrc`
+    (definitive miss) sits beside it. An album-level `.nolrc` short-circuits to
+    complete — it is only ever written when every track missed.
+
+    Pure: reads the directory listing only, writes nothing. An album with no
+    audio files is trivially complete.
+    """
+    album_dir = Path(album_dir)
+    if (album_dir / ".nolrc").exists():
+        return True
+    for audio in find_audio_files(album_dir):
+        # os.path.splitext (not Path.with_suffix) — a stem like "01. Title"
+        # contains dots that with_suffix would mangle. Matches _process_file.
+        base = os.path.splitext(str(audio))[0]
+        if os.path.exists(base + ".lrc") or os.path.exists(base + ".nolrc"):
+            continue
+        return False
+    return True
 
 
 def fetch_lyrics(
