@@ -18,10 +18,17 @@ Stages (in order):
                             already-in-library duplicate → move it to
                             duplicates_dir + notify + skip its later stages
   6. multidisc fix        — patch disctotal + multidisc flex attr in beets DB
-  7. beet move            — relocate files to canonical library paths
+  7. beet move            — relocate files into the Processing area (NOT Pending):
+                            all remaining processing happens there so a mid-fetch
+                            mount-sync can't prune audio / strand late lyrics
   8. posttag              — strip beet alias tags, truncate DATE to year
-  9. fetch art + lyrics   — embed art, write .lrc sidecars
- 10. archive              — mv XLD .log to archive dir (.log mode only)
+  9. fetch art + lyrics   — embed art, write .lrc sidecars (in Processing)
+ 10. promote              — per album: if lyric-complete, beet-move it to Pending;
+                            else leave it in Processing (finalize catches it up)
+ 11. archive              — mv XLD .log to archive dir (.log mode only)
+
+Pending is complete-by-construction: an album lands there only once every track
+has a terminal .lrc/.nolrc marker, so sync/reconciler/prune stay untouched.
 """
 from __future__ import annotations
 
@@ -64,6 +71,7 @@ class ImportConfig:
     python: Path
     db: Path
     pending_dir: Path   # processed albums awaiting distribution (beets canonical dir)
+    processing_dir: Path  # in-flight processing area; albums promote to pending once lyric-complete
     import_dir: Path    # active import area (rips/downloads land here)
     archive: Path
     duplicates_dir: Path  # already-in-library rips moved here rather than stranded in Import
@@ -237,15 +245,18 @@ class ImportRunner:
 
         import_start = run_start
 
-        # Stage 7: beet move
+        # Stage 7: beet move → Processing (NOT Pending). All remaining work runs
+        # on the files in Processing; each album promotes to Pending in Stage 10
+        # only once it is lyric-complete.
         subprocess.run(
-            [str(cfg.beet), "move", f"added:{import_start}..", f"path:{cfg.pending_dir}/"],
+            [str(cfg.beet), "move", "-d", str(cfg.processing_dir),
+             f"added:{import_start}.."],
             capture_output=True,
             text=True,
         )
-        self._log("Moved files to correct paths", echo=False)
+        self._log("Moved files to Processing", echo=False)
 
-        # Get canonical paths of imported files (local library only)
+        # Get canonical paths of imported files (local processing area only)
         paths_proc = subprocess.run(
             [str(cfg.beet), "ls", "-f", "$path", f"added:{import_start}.."],
             capture_output=True,
@@ -265,10 +276,13 @@ class ImportRunner:
         else:
             result.stages.append(StageResult("posttag", success=True, skipped=True))
 
-        # Stage 9: fetch lyrics + art
+        # Stage 9 + 10: fetch art/lyrics per album, then promote lyric-complete
+        # albums to Pending. Albums stay in Processing (files under
+        # processing_dir) until every track has a terminal .lrc/.nolrc marker.
         if cfg.spindlebot_cfg is not None:
             from spindlebot.pipeline.stages.fetch_art import fetch_art as _fetch_art
             from spindlebot.pipeline.stages.fetch_lyrics import fetch_lyrics as _fetch_lyrics
+            from spindlebot.services.promote import promote_album
             album_dirs = sorted({str(Path(p).parent) for p in import_files})
             for d in album_dirs:
                 self._log(f"Fetching art for: {d}", echo=False)
@@ -284,7 +298,21 @@ class ImportRunner:
                     + (f" errors={lr.errors}" if lr.errors else "")
                 )
 
-        # Stage 10: archive XLD logs (.log-triggered runs only)
+                pr = promote_album(d, cfg.beet)
+                if pr.promoted:
+                    self._log(f"✅ {pr.label} → Pending")
+                    result.stages.append(
+                        StageResult("promote", success=True, message=f"{pr.label} → Pending")
+                    )
+                else:
+                    waiting = ", ".join(pr.waiting_on) or "album"
+                    self._log(f"⏳ {pr.label} waiting on lyrics: {waiting}")
+                    result.stages.append(
+                        StageResult("promote", success=True, skipped=True,
+                                    message=f"{pr.label} waiting: {waiting}")
+                    )
+
+        # Stage 11: archive XLD logs (.log-triggered runs only)
         if has_log:
             cfg.archive.mkdir(parents=True, exist_ok=True)
             for logfile in sorted(cfg.import_dir.glob("*.log")):

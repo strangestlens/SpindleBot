@@ -7,6 +7,7 @@ Usage:
     python -m spindlebot config get <key>              Print a single value (e.g. core.pending_dir)
     python -m spindlebot import <trigger> [--force]    Run import pipeline for an album
     python -m spindlebot import-staging [--dry-run]    Import everything currently in the Import area
+    python -m spindlebot finalize [--dry-run] [--json]  Retry lyrics + promote lyric-complete albums out of Processing into Pending
     python -m spindlebot inventory [--location <name>] [--rehash] [--json] [-v|--quiet]   Scan a location into the SpindleBot DB (read-only re: audio; --rehash re-hashes unchanged files)
     python -m spindlebot review --location <name> [--yes] [--json] [-v|--quiet]  Plan reconciliation (--yes also acknowledges); no bytes moved
     python -m spindlebot review --acknowledge-run <run_id>        Acknowledge every proposed action in a run
@@ -117,6 +118,7 @@ def cmd_config_shell(cfg) -> int:
     exports = {
         "SPINDLEBOT_PENDING_DIR":      str(cfg.core.pending_dir),
         "SPINDLEBOT_IMPORT_DIR":       str(cfg.core.import_dir),
+        "SPINDLEBOT_PROCESSING_DIR":   str(cfg.core.processing_dir),
         "SPINDLEBOT_LOG_DIR":          str(cfg.core.log_dir),
         "SPINDLEBOT_ARCHIVE_DIR":      str(cfg.core.archive_dir),
         "SPINDLEBOT_DUPLICATES_DIR":   str(cfg.core.duplicates_dir),
@@ -199,6 +201,57 @@ def cmd_import_staging(cfg, args: list[str]) -> int:
     if errors:
         print(f"\n{errors} import(s) reported errors — check the log.", file=sys.stderr)
         return 1
+    return 0
+
+
+# ── finalize ──────────────────────────────────────────────────────────────────
+
+def cmd_finalize(cfg, args: list[str]) -> int:
+    """
+    Sweep the Processing area: for each album still there, re-fetch lyrics to
+    resolve transient-error tracks, then promote it to Pending if now complete.
+
+    Idempotent — safe to re-run. This catches up albums the import left stuck in
+    Processing because a lyric fetch hit a transient error.
+    """
+    import json as _json
+
+    from spindlebot.services.promote import finalize_processing
+
+    want_json = "--json" in args
+    dry_run = "--dry-run" in args
+
+    result = finalize_processing(cfg.core.processing_dir, cfg, dry_run=dry_run)
+
+    if want_json:
+        print(_json.dumps({
+            "processing_dir": str(cfg.core.processing_dir),
+            "dry_run": dry_run,
+            "scanned": result.scanned,
+            "promoted": [
+                {"label": p.label, "album_dir": str(p.album_dir)}
+                for p in result.promoted
+            ],
+            "waiting": [
+                {"label": p.label, "album_dir": str(p.album_dir),
+                 "waiting_on": p.waiting_on}
+                for p in result.waiting
+            ],
+        }))
+        return 0
+
+    prefix = "[dry-run] " if dry_run else ""
+    if result.scanned == 0:
+        print(f"{prefix}Nothing in Processing.")
+        return 0
+
+    print(f"{prefix}Scanned {result.scanned} album(s) in Processing:")
+    for p in result.promoted:
+        arrow = "would promote →" if dry_run else "✅"
+        print(f"  {arrow} {p.label} → Pending")
+    for p in result.waiting:
+        waiting = ", ".join(p.waiting_on) or "album"
+        print(f"  ⏳ {p.label} waiting on lyrics: {waiting}")
     return 0
 
 
@@ -636,6 +689,7 @@ def main(argv: list[str] | None = None) -> int:
             python=cfg.tools.python,
             db=cfg.tools.beets_db,
             pending_dir=cfg.core.pending_dir,
+            processing_dir=cfg.core.processing_dir,
             import_dir=cfg.core.import_dir,
             archive=cfg.core.archive_dir,
             duplicates_dir=cfg.core.duplicates_dir,
@@ -656,6 +710,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "import-staging":
         return cmd_import_staging(cfg, args[1:])
+
+    if command == "finalize":
+        return cmd_finalize(cfg, args[1:])
 
     if command == "inventory":
         return cmd_inventory(cfg, args[1:])

@@ -44,6 +44,7 @@ CONFIG_DIR = Path(
 @dataclass
 class CoreConfig:
     import_dir: Path    # active import area (rips/downloads land here); formerly "staging"
+    processing_dir: Path  # in-flight import processing area; albums promote to pending once lyric-complete
     pending_dir: Path   # processed albums awaiting distribution; formerly "library"
     log_dir: Path
     archive_dir: Path
@@ -161,6 +162,13 @@ def load() -> SpindleBotConfig:
         import_dir=_expand(
             c.get("import_dir",
                   c.get("staging_dir", "~/Library/Application Support/SpindleBot/Import"))
+        ),
+        processing_dir=_expand(
+            os.environ.get(
+                "SPINDLEBOT_PROCESSING_DIR",
+                c.get("processing_dir",
+                      "~/Library/Application Support/SpindleBot/Processing"),
+            )
         ),
         pending_dir=_expand(
             c.get("pending_dir",

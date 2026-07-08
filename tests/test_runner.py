@@ -6,6 +6,7 @@ subprocess.run (external tools). Assert on ImportResult stages and watcher.log.
 """
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import struct
 from pathlib import Path
@@ -32,6 +33,7 @@ def _make_config(tmp_path: Path, *, force: bool = False, trigger: Path | None = 
     (tmp_path / "logs").mkdir(exist_ok=True)
     (tmp_path / "AllDiscs").mkdir(exist_ok=True)
     (tmp_path / "Library").mkdir(exist_ok=True)
+    (tmp_path / "Processing").mkdir(exist_ok=True)
     (tmp_path / "pipeline").mkdir(exist_ok=True)
     (tmp_path / "Duplicates").mkdir(exist_ok=True)
     db = tmp_path / "library.db"
@@ -44,6 +46,7 @@ def _make_config(tmp_path: Path, *, force: bool = False, trigger: Path | None = 
         python=tmp_path / "bin" / "python",
         db=db,
         pending_dir=tmp_path / "Library",
+        processing_dir=tmp_path / "Processing",
         import_dir=staging,
         archive=tmp_path / "AllDiscs",
         duplicates_dir=tmp_path / "Duplicates",
@@ -457,6 +460,172 @@ def test_mixed_import_per_album_disctotal_is_correct(tmp_path):
     # One fix call per album, with the correct per-album disc counts.
     assert sorted(seen_disc_counts) == [1, 2], \
         f"per-album disc counts wrong: {seen_disc_counts}"
+
+
+# ── Processing → promote flow ─────────────────────────────────────────────────
+#
+# NOTE: runner.subprocess.run and promote.subprocess.run are the SAME module
+# attribute (`subprocess.run`). A single _SUBPROCESS patch therefore intercepts
+# the promote service's `beet move` too — so _runner_beet_stub also models that
+# move (relocating the album dir into Pending). Patching both paths separately
+# would clobber each other.
+
+
+def _mark_lrc(flac: Path) -> None:
+    (flac.parent / (flac.stem + ".lrc")).write_text("[00:00.00] la\n")
+
+
+def _runner_beet_stub(processing_dir: Path, album_paths: list[Path], pending_dir: Path):
+    """subprocess.run side_effect for the runner in the Processing world.
+
+    * `beet ls -f $path added:..` (per-batch verification AND run-wide paths
+      query) → the real album file paths planted under processing_dir, so the
+      fetch/promote loop operates on genuine on-disk albums.
+    * `beet ls -f $albumartist - $album ...` → a label.
+    * `beet move path:<dir>/` (the promote) → relocate that album dir's files
+      into pending_dir/<album name>/, mirroring a real beets move to `directory`.
+    * import / modify / the run-wide `beet move -d` → benign no-ops.
+    """
+    def stub(argv, *args, **kwargs):
+        argv = list(argv)
+        cmd = argv[1] if len(argv) >= 2 else ""
+        if cmd == "ls":
+            is_name = any(a == "$albumartist - $album" for a in argv)
+            if is_name:
+                return MagicMock(returncode=0, stdout="Artist - Album\n", stderr="")
+            # Only report files that still live under processing_dir — once an
+            # album promotes to Pending its paths must drop out of the window.
+            present = [str(p) for p in album_paths if Path(p).exists()]
+            return MagicMock(returncode=0, stdout="\n".join(present) + "\n", stderr="")
+        if cmd == "move":
+            path_arg = next((a for a in argv if a.startswith("path:")), None)
+            if path_arg:  # the promote move (scoped to a single album)
+                src = Path(path_arg[len("path:"):].rstrip("/"))
+                if src.exists():
+                    dest = pending_dir / src.name
+                    dest.mkdir(parents=True, exist_ok=True)
+                    for f in list(src.iterdir()):
+                        shutil.move(str(f), str(dest / f.name))
+                    src.rmdir()
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    return stub
+
+
+def test_runner_promotes_complete_album_to_pending(tmp_path):
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+
+    # Plant a complete album under Processing (as if beet move landed it there).
+    album = cfg.processing_dir / "Artist" / "Album"
+    _write_flac(album / "01. Track.flac", tags={"albumartist": "Artist", "album": "Album"})
+    _write_flac(album / "02. Track.flac", tags={"albumartist": "Artist", "album": "Album"})
+    for flac in album.glob("*.flac"):
+        _mark_lrc(flac)
+    album_paths = sorted(album.glob("*.flac"))
+
+    with patch(_CHECK_WAIT, return_value=None), \
+         patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_COUNT_DISCS, return_value=1), \
+         patch("spindlebot.pipeline.runner.notify",
+               return_value=MagicMock(macos_error=None, telegram_error=None)), \
+         patch("spindlebot.pipeline.stages.fetch_art.fetch_art",
+               return_value=MagicMock(embedded=0, skipped=0, missing=0, errors=0)), \
+         patch("spindlebot.pipeline.stages.fetch_lyrics.fetch_lyrics",
+               return_value=MagicMock(synced=2, plain=0, missing=0, errors=[])), \
+         patch(_SUBPROCESS,
+               side_effect=_runner_beet_stub(cfg.processing_dir, album_paths, cfg.pending_dir)):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    # Files ended up under Pending, not Processing.
+    assert (cfg.pending_dir / "Album" / "01. Track.flac").exists()
+    assert not album.exists()
+    assert log_contains(cfg, "→ Pending")
+    promote_stage = next(s for s in result.stages if s.name == "promote")
+    assert promote_stage.success and not promote_stage.skipped
+
+
+def test_runner_leaves_incomplete_album_in_processing(tmp_path):
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+
+    album = cfg.processing_dir / "Artist" / "Album"
+    _write_flac(album / "01. Track.flac", tags={"albumartist": "Artist", "album": "Album"})
+    _write_flac(album / "02. Track.flac", tags={"albumartist": "Artist", "album": "Album"})
+    # Only the first track resolved — a transient error left 02 with no marker.
+    _mark_lrc(album / "01. Track.flac")
+    album_paths = sorted(album.glob("*.flac"))
+
+    with patch(_CHECK_WAIT, return_value=None), \
+         patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_COUNT_DISCS, return_value=1), \
+         patch("spindlebot.pipeline.runner.notify",
+               return_value=MagicMock(macos_error=None, telegram_error=None)), \
+         patch("spindlebot.pipeline.stages.fetch_art.fetch_art",
+               return_value=MagicMock(embedded=0, skipped=0, missing=0, errors=0)), \
+         patch("spindlebot.pipeline.stages.fetch_lyrics.fetch_lyrics",
+               return_value=MagicMock(synced=1, plain=0, missing=0, errors=["02. Track.flac"])), \
+         patch(_SUBPROCESS,
+               side_effect=_runner_beet_stub(cfg.processing_dir, album_paths, cfg.pending_dir)):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    # Album stayed in Processing, nothing under Pending.
+    assert (album / "02. Track.flac").exists()
+    assert not (cfg.pending_dir / "Album").exists()
+    assert log_contains(cfg, "waiting on lyrics: 02. Track.flac")
+    promote_stage = next(s for s in result.stages if s.name == "promote")
+    assert promote_stage.skipped
+
+
+def test_runner_mixed_run_promotes_complete_holds_incomplete(tmp_path):
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+
+    done = cfg.processing_dir / "Artist" / "Done"
+    _write_flac(done / "01. Track.flac", tags={"albumartist": "Artist", "album": "Done"})
+    _mark_lrc(done / "01. Track.flac")
+
+    stuck = cfg.processing_dir / "Artist" / "Stuck"
+    _write_flac(stuck / "01. Track.flac", tags={"albumartist": "Artist", "album": "Stuck"})
+    # No marker → incomplete.
+
+    album_paths = sorted(done.glob("*.flac")) + sorted(stuck.glob("*.flac"))
+
+    with patch(_CHECK_WAIT, return_value=None), \
+         patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_COUNT_DISCS, return_value=1), \
+         patch("spindlebot.pipeline.runner.notify",
+               return_value=MagicMock(macos_error=None, telegram_error=None)), \
+         patch("spindlebot.pipeline.stages.fetch_art.fetch_art",
+               return_value=MagicMock(embedded=0, skipped=0, missing=0, errors=0)), \
+         patch("spindlebot.pipeline.stages.fetch_lyrics.fetch_lyrics",
+               return_value=MagicMock(synced=0, plain=0, missing=0, errors=[])), \
+         patch(_SUBPROCESS,
+               side_effect=_runner_beet_stub(cfg.processing_dir, album_paths, cfg.pending_dir)):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    # Complete one promoted, incomplete one held.
+    assert (cfg.pending_dir / "Done" / "01. Track.flac").exists()
+    assert not done.exists()
+    assert (stuck / "01. Track.flac").exists()
+    assert not (cfg.pending_dir / "Stuck").exists()
+
+    promote_stages = [s for s in result.stages if s.name == "promote"]
+    assert sum(1 for s in promote_stages if not s.skipped) == 1
+    assert sum(1 for s in promote_stages if s.skipped) == 1
 
 
 # ── already-in-library duplicate handling ─────────────────────────────────────

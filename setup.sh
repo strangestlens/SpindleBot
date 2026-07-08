@@ -85,6 +85,10 @@ migrate_work_dirs \
   "$HOME/Music/Staging" \
   "$HOME/Music/Library"
 
+# Processing area has no legacy predecessor to migrate — just ensure it exists.
+PROCESSING_DIR="$(resolve_cfg core.processing_dir)"
+[ -n "$PROCESSING_DIR" ] && mkdir -p "$PROCESSING_DIR"
+
 # ── 5. Install tomli if needed ────────────────────────────────────────────────
 # (done before watcher install so bootstrap.sh is ready when watcher starts)
 PY_VERSION=$("$PYTHON" -c "import sys; print(sys.version_info[:2])")
