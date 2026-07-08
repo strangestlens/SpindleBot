@@ -79,8 +79,10 @@ def _incomplete_tracks(album_dir: Path) -> list[str]:
 def _default_label(album_dir: Path) -> str:
     """Path-derived "<albumartist> - <album>" label (beets nests that way).
 
-    Falls back to just the album dir name when there's no parent to read an
-    artist from (e.g. an album planted directly at processing_dir's root).
+    Reads the artist from the immediate parent directory name. Falls back to
+    just the album dir name only when there is no parent name to read — i.e. the
+    album dir sits at the filesystem root (parent name ""); a normal album under
+    processing_dir always has an artist parent dir.
     """
     parent = album_dir.parent.name
     return f"{parent} - {album_dir.name}" if parent else album_dir.name

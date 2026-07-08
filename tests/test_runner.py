@@ -483,7 +483,8 @@ def _runner_beet_stub(processing_dir: Path, album_paths: list[Path], pending_dir
       fetch/promote loop operates on genuine on-disk albums.
     * `beet ls -f $albumartist - $album ...` → a label.
     * `beet move path:<dir>/` (the promote) → relocate that album dir's files
-      into pending_dir/<album name>/, mirroring a real beets move to `directory`.
+      into the NESTED pending_dir/<albumartist>/<album>/ layout (the album dir's
+      parent is the artist), mirroring this repo's beets `paths.default`.
     * import / modify / the run-wide `beet move -d` → benign no-ops.
     """
     def stub(argv, *args, **kwargs):
@@ -502,7 +503,7 @@ def _runner_beet_stub(processing_dir: Path, album_paths: list[Path], pending_dir
             if path_arg:  # the promote move (scoped to a single album)
                 src = Path(path_arg[len("path:"):].rstrip("/"))
                 if src.exists():
-                    dest = pending_dir / src.name
+                    dest = pending_dir / src.parent.name / src.name
                     dest.mkdir(parents=True, exist_ok=True)
                     for f in list(src.iterdir()):
                         shutil.move(str(f), str(dest / f.name))
@@ -543,7 +544,7 @@ def test_runner_promotes_complete_album_to_pending(tmp_path):
 
     assert result.success
     # Files ended up under Pending, not Processing.
-    assert (cfg.pending_dir / "Album" / "01. Track.flac").exists()
+    assert (cfg.pending_dir / "Artist" / "Album" / "01. Track.flac").exists()
     assert not album.exists()
     assert log_contains(cfg, "→ Pending")
     promote_stage = next(s for s in result.stages if s.name == "promote")
@@ -580,10 +581,60 @@ def test_runner_leaves_incomplete_album_in_processing(tmp_path):
     assert result.success
     # Album stayed in Processing, nothing under Pending.
     assert (album / "02. Track.flac").exists()
-    assert not (cfg.pending_dir / "Album").exists()
+    assert not (cfg.pending_dir / "Artist" / "Album").exists()
     assert log_contains(cfg, "waiting on lyrics: 02. Track.flac")
     promote_stage = next(s for s in result.stages if s.name == "promote")
     assert promote_stage.skipped
+
+
+def test_runner_promote_move_failure_fails_the_run(tmp_path):
+    """A lyric-complete album whose promote move FAILS (DB locked / beets error)
+    makes the overall run fail — it's a real failure, unlike waiting-on-lyrics.
+    The album stays in Processing for `spindlebot finalize` to retry."""
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+    cfg.spindlebot_cfg = MagicMock()
+
+    album = cfg.processing_dir / "Artist" / "Album"
+    _write_flac(album / "01. Track.flac", tags={"albumartist": "Artist", "album": "Album"})
+    _mark_lrc(album / "01. Track.flac")  # complete
+    album_paths = sorted(album.glob("*.flac"))
+
+    def stub(argv, *args, **kwargs):
+        argv = list(argv)
+        cmd = argv[1] if len(argv) >= 2 else ""
+        if cmd == "move" and any(a.startswith("path:") for a in argv):
+            # The promote move fails.
+            return MagicMock(returncode=1, stdout="", stderr="database is locked")
+        if cmd == "ls":
+            if any(a == "$albumartist - $album" for a in argv):
+                return MagicMock(returncode=0, stdout="Artist - Album\n", stderr="")
+            present = [str(p) for p in album_paths if Path(p).exists()]
+            return MagicMock(returncode=0, stdout="\n".join(present) + "\n", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_CHECK_WAIT, return_value=None), \
+         patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_COUNT_DISCS, return_value=1), \
+         patch("spindlebot.pipeline.runner.notify",
+               return_value=MagicMock(macos_error=None, telegram_error=None)), \
+         patch("spindlebot.pipeline.stages.fetch_art.fetch_art",
+               return_value=MagicMock(embedded=0, skipped=0, missing=0, errors=0)), \
+         patch("spindlebot.pipeline.stages.fetch_lyrics.fetch_lyrics",
+               return_value=MagicMock(synced=1, plain=0, missing=0, errors=[])), \
+         patch(_SUBPROCESS, side_effect=stub):
+        result = ImportRunner(cfg).run()
+
+    assert not result.success, "a promote move failure must fail the run"
+    promote_stage = next(s for s in result.stages if s.name == "promote")
+    assert not promote_stage.success
+    assert "database is locked" in promote_stage.message
+    # Album stayed in Processing (the failing move didn't relocate it).
+    assert (album / "01. Track.flac").exists()
+    assert not (cfg.pending_dir / "Artist" / "Album").exists()
+    assert log_contains(cfg, "promote failed (stays in Processing)")
 
 
 def test_runner_mixed_run_promotes_complete_holds_incomplete(tmp_path):
@@ -618,10 +669,10 @@ def test_runner_mixed_run_promotes_complete_holds_incomplete(tmp_path):
 
     assert result.success
     # Complete one promoted, incomplete one held.
-    assert (cfg.pending_dir / "Done" / "01. Track.flac").exists()
+    assert (cfg.pending_dir / "Artist" / "Done" / "01. Track.flac").exists()
     assert not done.exists()
     assert (stuck / "01. Track.flac").exists()
-    assert not (cfg.pending_dir / "Stuck").exists()
+    assert not (cfg.pending_dir / "Artist" / "Stuck").exists()
 
     promote_stages = [s for s in result.stages if s.name == "promote"]
     assert sum(1 for s in promote_stages if not s.skipped) == 1

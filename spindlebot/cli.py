@@ -223,6 +223,12 @@ def cmd_finalize(cfg, args: list[str]) -> int:
 
     result = finalize_processing(cfg.core.processing_dir, cfg, dry_run=dry_run)
 
+    # A promote MOVE failure (DB locked / beets error) is a real failure → exit
+    # nonzero. Albums merely waiting on lyrics are expected (finalize will retry
+    # them next run) → exit 0. Dry-run never issues a move, so never fails.
+    move_failed = not dry_run and any(p.move_error for p in result.waiting)
+    exit_code = 1 if move_failed else 0
+
     if want_json:
         print(_json.dumps({
             "processing_dir": str(cfg.core.processing_dir),
@@ -238,7 +244,7 @@ def cmd_finalize(cfg, args: list[str]) -> int:
                 for p in result.waiting
             ],
         }))
-        return 0
+        return exit_code
 
     prefix = "[dry-run] " if dry_run else ""
     if result.scanned == 0:
@@ -251,11 +257,11 @@ def cmd_finalize(cfg, args: list[str]) -> int:
         print(f"  {arrow} {p.label} → Pending")
     for p in result.waiting:
         if p.move_error:
-            print(f"  ✗  {p.label} promote failed (stays in Processing): {p.move_error}")
+            print(f"  ✗  {p.label} promote failed (stays in Processing): {p.move_error}", file=sys.stderr)
         else:
             waiting = ", ".join(p.waiting_on) or "album"
             print(f"  ⏳ {p.label} waiting on lyrics: {waiting}")
-    return 0
+    return exit_code
 
 
 # ── progress ──────────────────────────────────────────────────────────────────

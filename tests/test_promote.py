@@ -44,13 +44,18 @@ def _write_flac(path: Path, *, tags: dict) -> None:
     f.save()
 
 
-def _make_album(root: Path, name: str, n_tracks: int = 2) -> Path:
-    """Create <root>/<name>/ with n FLAC tracks (no lyric markers yet)."""
-    album_dir = root / name
+def _make_album(root: Path, name: str, n_tracks: int = 2, *, artist: str = "Artist") -> Path:
+    """Create <root>/<artist>/<name>/ with n FLAC tracks (no lyric markers yet).
+
+    Nests <artist>/<album>/ to mirror this repo's beets `paths.default`
+    (`$albumartist/…/$track. $title`), so tests reflect where beets actually
+    lands files rather than a flat layout.
+    """
+    album_dir = root / artist / name
     for i in range(1, n_tracks + 1):
         _write_flac(
             album_dir / f"{i:02d}. Track.flac",
-            tags={"albumartist": "Artist", "album": name, "title": f"Track {i}"},
+            tags={"albumartist": artist, "album": name, "title": f"Track {i}"},
         )
     return album_dir
 
@@ -72,8 +77,10 @@ def _beet_move_stub(pending_dir: Path):
     """subprocess.run side_effect modeling `beet move path:<album_dir>/`.
 
     Parses the album dir out of the `path:...` argument and relocates that dir's
-    files (audio + sidecars) into pending_dir/<album name>/, mirroring how a real
-    beets move would land them under the configured `directory`.
+    files (audio + sidecars) into the NESTED pending_dir/<albumartist>/<album>/
+    layout — mirroring this repo's beets `paths.default`
+    (`$albumartist/…/$track. $title`), where the artist is the source album
+    dir's parent (VA albums use `Compilations`).
     """
     def stub(argv, *args, **kwargs):
         argv = list(argv)
@@ -82,7 +89,7 @@ def _beet_move_stub(pending_dir: Path):
             if path_arg:
                 src = Path(path_arg[len("path:"):].rstrip("/"))
                 if src.exists():
-                    dest = pending_dir / src.name
+                    dest = pending_dir / src.parent.name / src.name
                     dest.mkdir(parents=True, exist_ok=True)
                     for f in list(src.iterdir()):
                         shutil.move(str(f), str(dest / f.name))
@@ -112,7 +119,7 @@ def test_complete_album_promotes_to_pending(tmp_path):
     assert len(move_calls) == 1
     assert any(a == f"path:{album}/" for a in move_calls[0])
     # Files landed under Pending, no longer under Processing.
-    assert (pending / "Complete Album" / "01. Track.flac").exists()
+    assert (pending / "Artist" / "Complete Album" / "01. Track.flac").exists()
     assert not album.exists()
 
 
@@ -134,7 +141,7 @@ def test_incomplete_album_stays_in_processing(tmp_path):
     assert not any(c.args[0][1] == "move" for c in mock_sub.call_args_list)
     # Files stayed in Processing.
     assert (album / "02. Track.flac").exists()
-    assert not (pending / "Incomplete Album").exists()
+    assert not (pending / "Artist" / "Incomplete Album").exists()
 
 
 def test_nolrc_marker_counts_as_complete(tmp_path):
@@ -150,7 +157,7 @@ def test_nolrc_marker_counts_as_complete(tmp_path):
         result = promote_album(album, "/bin/beet")
 
     assert result.promoted
-    assert (pending / "Missy Album" / "02. Track.flac").exists()
+    assert (pending / "Artist" / "Missy Album" / "02. Track.flac").exists()
 
 
 def test_promote_move_failure_stays_in_processing(tmp_path):
@@ -175,7 +182,7 @@ def test_promote_move_failure_stays_in_processing(tmp_path):
     assert result.waiting_on == []  # complete — it's a move failure, not lyrics
     # Files stayed in Processing; nothing under Pending.
     assert (album / "01. Track.flac").exists()
-    assert not (pending / "Doomed Move").exists()
+    assert not (pending / "Artist" / "Doomed Move").exists()
 
 
 def test_promote_label_is_path_derived(tmp_path):
@@ -184,7 +191,7 @@ def test_promote_label_is_path_derived(tmp_path):
     processing = tmp_path / "Processing"
     pending = tmp_path / "Pending"
     pending.mkdir()
-    album = _make_album(processing / "Radiohead", "In Rainbows")
+    album = _make_album(processing, "In Rainbows", artist="Radiohead")
     _complete_all(album)
 
     with patch(_SUBPROCESS, side_effect=_beet_move_stub(pending)):
@@ -192,6 +199,24 @@ def test_promote_label_is_path_derived(tmp_path):
 
     assert result.promoted
     assert result.label == "Radiohead - In Rainbows"
+    assert (pending / "Radiohead" / "In Rainbows" / "01. Track.flac").exists()
+
+
+def test_promote_compilation_lands_under_compilations(tmp_path):
+    """A VA album nests under `Compilations` (its beets artist dir), and the
+    label reflects that — mirroring real beets output for compilations."""
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing, "Electronic Toys", artist="Compilations")
+    _complete_all(album)
+
+    with patch(_SUBPROCESS, side_effect=_beet_move_stub(pending)):
+        result = promote_album(album, "/bin/beet")
+
+    assert result.promoted
+    assert result.label == "Compilations - Electronic Toys"
+    assert (pending / "Compilations" / "Electronic Toys" / "01. Track.flac").exists()
 
 
 # ── finalize_processing ───────────────────────────────────────────────────────
@@ -223,7 +248,7 @@ def test_finalize_promotes_album_whose_lyrics_now_resolve(tmp_path):
     assert result.scanned == 1
     assert len(result.promoted) == 1
     assert result.promoted[0].album_dir == album
-    assert (pending / "Now Resolving" / "02. Track.flac").exists()
+    assert (pending / "Artist" / "Now Resolving" / "02. Track.flac").exists()
 
 
 def test_finalize_leaves_still_incomplete_album(tmp_path):
@@ -246,7 +271,7 @@ def test_finalize_leaves_still_incomplete_album(tmp_path):
     assert len(result.waiting) == 1
     assert result.waiting[0].waiting_on == ["02. Track.flac"]
     assert (album / "02. Track.flac").exists()
-    assert not (pending / "Still Broken").exists()
+    assert not (pending / "Artist" / "Still Broken").exists()
 
 
 def test_finalize_is_idempotent(tmp_path):
@@ -270,7 +295,7 @@ def test_finalize_is_idempotent(tmp_path):
         second = finalize_processing(processing, _cfg_stub())
 
     assert len(first.promoted) == 1
-    assert (pending / "Idem Album" / "01. Track.flac").exists()
+    assert (pending / "Artist" / "Idem Album" / "01. Track.flac").exists()
     assert second.scanned == 0
     assert second.promoted == []
     assert second.waiting == []
@@ -301,4 +326,88 @@ def test_finalize_reports_move_failure_as_waiting(tmp_path):
     assert len(result.waiting) == 1
     assert result.waiting[0].move_error == "beets error"
     assert (album / "01. Track.flac").exists()
-    assert not (pending / "Move Fails").exists()
+    assert not (pending / "Artist" / "Move Fails").exists()
+
+
+# ── cmd_finalize exit codes ───────────────────────────────────────────────────
+
+
+def _cli_cfg(processing: Path, beet: str = "/bin/beet"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        core=SimpleNamespace(processing_dir=processing),
+        tools=SimpleNamespace(beet=beet),
+        lyrics=SimpleNamespace(request_delay_seconds=0.0),
+    )
+
+
+def test_cmd_finalize_move_failure_exits_nonzero(tmp_path, capsys):
+    from spindlebot.cli import cmd_finalize
+
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    _complete_all(_make_album(processing, "Move Fails"))
+
+    def fake_fetch(album_dir, cfg, *, dry_run=False, force=False):
+        return MagicMock(synced=0, plain=0, missing=0, errors=[])
+
+    def failing_move(argv, *args, **kwargs):
+        if list(argv)[1] == "move":
+            return MagicMock(returncode=1, stdout="", stderr="database is locked")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_FETCH, side_effect=fake_fetch), \
+         patch(_SUBPROCESS, side_effect=failing_move):
+        rc = cmd_finalize(_cli_cfg(processing), [])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "promote failed" in err
+
+
+def test_cmd_finalize_waiting_only_exits_zero(tmp_path, capsys):
+    from spindlebot.cli import cmd_finalize
+
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing, "Waiting")
+    _mark_lrc(album, "01. Track.flac")  # 02 stays incomplete
+
+    def fake_fetch(album_dir, cfg, *, dry_run=False, force=False):
+        # Lyrics still don't resolve — the album stays waiting, no move issued.
+        return MagicMock(synced=0, plain=0, missing=0, errors=["02. Track.flac"])
+
+    with patch(_FETCH, side_effect=fake_fetch), \
+         patch(_SUBPROCESS, side_effect=_beet_move_stub(pending)):
+        rc = cmd_finalize(_cli_cfg(processing), [])
+
+    assert rc == 0  # waiting-on-lyrics is expected, not a failure
+    out = capsys.readouterr().out
+    assert "waiting on lyrics" in out
+
+
+def test_cmd_finalize_dry_run_never_fails(tmp_path, capsys):
+    from spindlebot.cli import cmd_finalize
+
+    processing = tmp_path / "Processing"
+    (tmp_path / "Pending").mkdir()
+    _complete_all(_make_album(processing, "Would Promote"))
+
+    def fake_fetch(album_dir, cfg, *, dry_run=False, force=False):
+        return MagicMock(synced=0, plain=0, missing=0, errors=[])
+
+    # No move is ever issued in dry-run, so even a would-fail beet can't matter.
+    def failing_move(argv, *args, **kwargs):
+        if list(argv)[1] == "move":
+            return MagicMock(returncode=1, stdout="", stderr="should not run")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_FETCH, side_effect=fake_fetch), \
+         patch(_SUBPROCESS, side_effect=failing_move) as mock_sub:
+        rc = cmd_finalize(_cli_cfg(processing), ["--dry-run"])
+
+    assert rc == 0
+    assert not any(c.args[0][1] == "move" for c in mock_sub.call_args_list)

@@ -301,6 +301,7 @@ class ImportRunner:
         # Stage 9 + 10: fetch art/lyrics per album, then promote lyric-complete
         # albums to Pending. Albums stay in Processing (files under
         # processing_dir) until every track has a terminal .lrc/.nolrc marker.
+        promote_move_failed = False
         if cfg.spindlebot_cfg is not None:
             from spindlebot.pipeline.stages.fetch_art import fetch_art as _fetch_art
             from spindlebot.pipeline.stages.fetch_lyrics import fetch_lyrics as _fetch_lyrics
@@ -333,6 +334,9 @@ class ImportRunner:
                 elif pr.move_error:
                     # Lyric-complete but the move to Pending failed — the album
                     # stays in Processing; `spindlebot finalize` will retry it.
+                    # This is a real failure (DB locked / beets error), unlike
+                    # waiting-on-lyrics: surface it in the run's success status.
+                    promote_move_failed = True
                     self._log(f"✗  {pr.label} promote failed (stays in Processing): {pr.move_error}")
                     result.stages.append(
                         StageResult("promote", success=False,
@@ -355,7 +359,11 @@ class ImportRunner:
                 self._log(f"Archived XLD log to: {dest}", echo=False)
             self._log("📦 log archived")
 
-        result.success = True
+        # A promote MOVE failure (DB locked / beets error) is a real failure and
+        # must be reflected in the run status. Waiting-on-lyrics is expected and
+        # does NOT fail the run — that album is simply caught up later by
+        # `spindlebot finalize`.
+        result.success = not promote_move_failed
         return result
 
     def _resolve_album_batches(self, album_dir: Path) -> list[_AlbumBatch]:
