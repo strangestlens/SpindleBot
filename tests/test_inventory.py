@@ -504,6 +504,28 @@ def test_inventory_orphan_sidecar_with_unknown_album_is_skipped(conn, tmp_path):
     assert sidecar_repo.count(conn) == 0
 
 
+def test_inventory_orphan_lrc_ambiguous_parent_is_skipped(conn, tmp_path):
+    # The same rel_path is present for two DISTINCT audio_ids (a re-rip to
+    # different decoded audio, present at that path on two locations). There is
+    # no single correct parent, so the orphan .lrc is skipped, never mis-attached.
+    from spindlebot.core.identity import ContentId
+    a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=1000)
+    b = audio_repo.upsert(conn, ContentId("audio_md5", "b" * 32), now=1000)
+    loc_a = location_repo.upsert(conn, uuid="la", name="LocA", kind="local_drive")
+    loc_b = location_repo.upsert(conn, uuid="lb", name="LocB", kind="local_drive")
+    for aud, loc in ((a, loc_a), (b, loc_b)):
+        presence_repo.set_presence(conn, audio_id=aud.id, location_id=loc.id,
+                                   present=True, observed_utc=1000,
+                                   rel_path="AA/Album/01.flac")
+
+    root = tmp_path / "Pending"
+    (root / "AA" / "Album").mkdir(parents=True)
+    (root / "AA" / "Album" / "01.lrc").write_text("[00:01.00]hi\n")
+    result, _ = _run(conn, root)
+    assert result.sidecars == 0
+    assert sidecar_repo.count(conn) == 0
+
+
 def test_registered_orphan_lrc_yields_a_reconciler_copy(conn, tmp_path):
     # End-to-end: the orphan .lrc registered against DwRugged's audio is now
     # visible to the reconciler, which proposes copying it back to retention.

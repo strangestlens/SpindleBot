@@ -84,20 +84,30 @@ def find_present_by_rel_paths(
     scanned location) to the audio_content already recorded elsewhere: the caller
     passes the sidecar's canonical rel_path stem paired with each audio extension.
     Returns None when no such content exists in the DB — nothing to link against.
+
+    Ambiguity guard: presence is keyed by (audio_id, location_id), not rel_path,
+    so the same path can be present for more than one distinct audio_id (e.g. a
+    track re-ripped to different decoded audio, present at that path on two
+    locations). When the matches span multiple audio_ids there is no single
+    correct parent, so this returns None rather than guessing.
     """
     if not rel_paths:
         return None
     placeholders = ",".join("?" * len(rel_paths))
-    row = conn.execute(
+    rows = conn.execute(
         f"""
         SELECT * FROM audio_presence
         WHERE present = 1 AND rel_path IN ({placeholders})
         ORDER BY observed_utc DESC
-        LIMIT 1
         """,
         rel_paths,
-    ).fetchone()
-    return AudioPresence.from_row(row) if row else None
+    ).fetchall()
+    if not rows:
+        return None
+    presences = [AudioPresence.from_row(r) for r in rows]
+    if len({p.audio_id for p in presences}) > 1:
+        return None  # ambiguous: same path, multiple distinct contents
+    return presences[0]
 
 
 def list_for_location(
