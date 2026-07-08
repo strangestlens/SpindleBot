@@ -13,6 +13,7 @@ Usage:
     python -m spindlebot review --acknowledge <id[,id...]>        Acknowledge specific proposed actions
     python -m spindlebot sync [--location <name>] [--json] [-v|--quiet]   Execute acknowledged copies (copy→verify→presence); --location scopes to one dest
     python -m spindlebot prune [--execute] [--json] [-v|--quiet]  Release Pending files verified on retention (DRY-RUN unless --execute)
+    python -m spindlebot delete [--execute] [--json] [-v|--quiet]  Execute acknowledged retention-copy deletes, gated on min_copies (DRY-RUN unless --execute)
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -543,6 +544,61 @@ def cmd_prune(cfg, args: list[str]) -> int:
     return 0 if not result.errors else 1
 
 
+# ── delete ────────────────────────────────────────────────────────────────────
+
+def cmd_delete(cfg, args: list[str]) -> int:
+    """
+    Execute acknowledged DELETE actions — remove a RETENTION copy. DESTRUCTIVE,
+    and GATED: a delete that would leave fewer than min_copies retention copies of
+    the content — or whose source is not a retention location at all — is REFUSED,
+    never performed. A refusal is safe/expected (warned, exit 0); only genuine
+    failures exit nonzero. DRY-RUN by default (only reports what it would delete);
+    pass --execute to actually delete. Run `review` + acknowledge first to queue
+    the work.
+    """
+    import json as _json
+    import time
+    from dataclasses import asdict
+
+    from spindlebot.db.connection import open_db
+    from spindlebot.services.locations import register_from_config
+    from spindlebot.services.sync import execute_deletes
+
+    want_json = "--json" in args
+    execute = "--execute" in args
+    now = int(time.time())
+    conn = open_db(cfg.core.db_path)
+    try:
+        register_from_config(conn, cfg, now)
+        progress_cb, reporter = _make_progress(args, "delete")
+        result = execute_deletes(conn, now=now, dry_run=not execute,
+                                 min_copies=cfg.core.min_copies, progress=progress_cb)
+        if reporter is not None:
+            reporter.close()
+        conn.commit()
+    finally:
+        conn.close()
+
+    if want_json:
+        print(_json.dumps(asdict(result)))
+    else:
+        verb = "Would delete" if result.dry_run else "Deleted"
+        print(f"{verb} {result.deleted} retention copy(ies) "
+              f"({result.bytes_freed / (1024 * 1024):.1f} MB), "
+              f"{result.refused} refused (kept safe), {result.skipped} skipped.")
+        for r in result.refused_reasons:
+            print(f"  ⚠ {r}", file=sys.stderr)
+        if result.dry_run and result.deleted:
+            print("Re-run with --execute to actually delete.")
+        for e in result.errors:
+            print(f"  ! {e}", file=sys.stderr)
+    # A refusal (below-floor, or a non-retention source) is a SAFE, expected
+    # outcome — warned via refused_reasons, exit 0 (Daniel's call, mirroring
+    # prune's below_floor). Nonzero is reserved for genuine failures in
+    # result.errors (unmounted/unidentified location, OSError).
+    return 0 if not result.errors else 1
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -610,6 +666,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "prune":
         return cmd_prune(cfg, args[1:])
+
+    if command == "delete":
+        return cmd_delete(cfg, args[1:])
 
     if command == "notify":
         if len(args) < 3:
