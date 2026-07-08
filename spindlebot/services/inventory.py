@@ -111,6 +111,12 @@ def _walk_tree(root: Path) -> tuple[list[Path], list[tuple[Path, SidecarRole]], 
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
+        # AppleDouble companion files (._Track01.flac, ._cover.jpg) that macOS
+        # writes onto exFAT/FAT volumes — e.g. DAP cards. They carry a real
+        # file's extension but are resource-fork metadata, never audio or a
+        # sidecar. Skip before classification so they never reach the DB.
+        if path.name.startswith("._"):
+            continue
         if path.suffix.lower().lstrip(".") in AUDIO_EXTENSIONS:
             audio.append(path)
             try:
@@ -142,14 +148,25 @@ def _resolve_album_for_dir(directory: Path, dir_albums: dict[Path, set[int]]) ->
     return next(iter(sub)) if len(sub) == 1 else None
 
 
+_EMPTY_TAGS = {
+    "artist": None, "albumartist": None, "album": None, "title": None,
+    "disc_no": None, "track_no": None, "duration_s": None, "mb_albumid": None,
+}
+
+
 def _read_tags(path: Path) -> dict:
-    """Best-effort advisory tags. Never raises; missing/unreadable → empty/None."""
+    """Best-effort advisory tags. Never raises; missing/unreadable → all keys None.
+
+    Callers index by key (tags["artist"]), so the returned dict must always carry
+    the full key set — an unreadable file yields every value None, never a dict
+    that's missing keys.
+    """
     try:
         mf = mutagen.File(str(path), easy=True)
     except Exception:
-        return {}
+        return dict(_EMPTY_TAGS)
     if mf is None:
-        return {}
+        return dict(_EMPTY_TAGS)
 
     def first(key):
         val = mf.get(key)
@@ -329,7 +346,10 @@ def inventory_location(
         for path in audio_files:
             result.scanned += 1
             try:
-                tags = _read_tags(path)
+                # Merge over the empty shape so indexing below can never KeyError,
+                # even if _read_tags ever regresses to a partial dict — without a
+                # broad KeyError catch that would mask unrelated bugs downstream.
+                tags = {**_EMPTY_TAGS, **_read_tags(path)}
                 rel_path = str(path.relative_to(root))
                 st = path.stat()
                 byte_size = st.st_size
