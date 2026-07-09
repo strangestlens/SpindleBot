@@ -1,0 +1,5 @@
+# Optional AI lyric-timing dependencies — NOT part of core spindlebot.
+# Installed into a dedicated venv by setup-ai.sh (heavy: torch + models).
+# whisperx requires Python >=3.10,<3.14 — setup-ai.sh picks the interpreter.
+demucs>=4.0
+whisperx>=3.8
