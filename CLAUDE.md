@@ -106,7 +106,9 @@ setup.sh                         — first-time environment setup: config files,
                                      music-watcher.sh → ~/.local/bin/, plists → ~/Library/LaunchAgents/
 com.strangestlens.music-watcher.plist       — launchd agent for the fswatch watcher daemon
 com.strangestlens.music-sync-rugged.plist   — launchd agent for DwRugged sync
-lrc-editor                       — standalone Flask/WaveSurfer.js lyrics timing editor (single executable)
+lrc-editor                       — standalone Flask/WaveSurfer.js lyrics timing editor (single
+                                     executable); its "AI Arrange" button POSTs /ai-arrange, which runs
+                                     lyric_timing retime as a background subprocess of the AI venv
 
 lyric_timing/                    — OPTIONAL AI lyric-timing subsystem (peer package; heavy deps
                                      NOT in core spindlebot). Plan: ~/.claude/plans/ai-lyric-timing-plan.md
@@ -152,6 +154,7 @@ tests/
   test_lyric_timing_cli.py       — audit + retime CLIs (mock backend)
   test_lyric_timing_whisperx.py  — real-backend integration; skipped unless
                                      LYRIC_TIMING_IT_AUDIO/LYRIC_TIMING_IT_LRC set (never in CI)
+  test_lrc_editor_ai.py          — lrc-editor /ai-arrange job orchestration (mock backend)
   shell/                         — bats shell tests (shellcheck + integration)
 ```
 
