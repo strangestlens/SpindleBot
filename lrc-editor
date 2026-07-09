@@ -12,6 +12,7 @@ import json
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import webbrowser
 from pathlib import Path
@@ -37,6 +38,44 @@ state = {
 
 DRAFT_PATH = Path("/tmp/lrc-editor-draft.lrc")
 MPV_BIN    = "/opt/homebrew/bin/mpv"
+
+# ── AI arrangement (lyric_timing subsystem) ──────────────────────────────────
+# Heavy deps live in a dedicated venv (see setup-ai.sh); alignment runs as a
+# subprocess of that venv's python, from the pipeline dir so `lyric_timing`
+# is importable.
+AI_VENV_PY = Path(os.environ.get(
+    "SPINDLEBOT_AI_VENV", Path.home() / ".local/share/spindlebot/ai-venv"
+)) / "bin" / "python"
+PIPELINE_DIR = Path(os.environ.get(
+    "SPINDLEBOT_PIPELINE_DIR", Path(__file__).resolve().parent
+))
+
+ai_job = {"thread": None, "result": None, "error": None}
+
+def _run_ai_arrange(audio_path, lines, backend):
+    """Background thread: shell out to `lyric_timing retime --json`."""
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("\n".join(lines))
+            tmp = fh.name
+        cmd = [str(AI_VENV_PY), "-m", "lyric_timing", "retime",
+               str(audio_path), tmp, "--json", "--backend", backend]
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=PIPELINE_DIR, timeout=1800,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip().splitlines()
+            ai_job["error"] = tail[-1] if tail else f"exit {proc.returncode}"
+        else:
+            ai_job["result"] = json.loads(proc.stdout)
+    except Exception as e:
+        ai_job["error"] = str(e)
+    finally:
+        if tmp:
+            os.unlink(tmp)
 
 def _init_draft():
     """Copy existing LRC → draft, or create an empty draft."""
@@ -146,6 +185,7 @@ HTML = r"""<!DOCTYPE html>
   button:disabled { opacity: .35; cursor: default; }
   #btn-open    { background: #1a3a2a; color: #7ecfa0; }
   #btn-import  { background: #2a1f3d; color: #b39ddb; }
+  #btn-ai      { background: #1f2a3d; color: #7ab8e8; }
   #btn-undo    { background: #2a2a4a; color: #aaa; }
   #btn-add     { background: #1b4332; color: #6fcf97; }
   #btn-delete  { background: #3b1a1a; color: #e94560; }
@@ -191,6 +231,7 @@ HTML = r"""<!DOCTYPE html>
     transition: background .1s;
     z-index: 10;
   }
+  .marker.low-conf { background: #ff9800; }
   .marker:hover, .marker.dragging { background: #ff7043; }
   .marker.active   { background: #ffeb3b; }
   .marker.selected { background: #00bcd4; }
@@ -390,6 +431,7 @@ HTML = r"""<!DOCTYPE html>
   <span class="file-name" id="file-label">No file loaded</span>
   <button id="btn-open">📂 Open</button>
   <button id="btn-import">📋 Lay Out Lyrics</button>
+  <button id="btn-ai">🪄 AI Arrange</button>
   <button id="btn-undo" disabled>↩ Undo</button>
   <button id="btn-add">➕ Add</button>
   <button id="btn-delete" disabled>🗑 Delete</button>
@@ -922,6 +964,60 @@ function doImport() {
   setStatus(`Laid out ${lines.length} lines ✓${duration > 0 ? "" : " (no track — times are placeholders)"}`);
 }
 
+// ── AI Arrange ───────────────────────────────────────────────────────────────
+const btnAI = document.getElementById("btn-ai");
+
+btnAI.addEventListener("click", async () => {
+  if (!fileLoaded) { setStatus("Load a track first", false); return; }
+  const lines = lyrics.map(l => l.text).filter(t => t && t.trim());
+  if (!lines.length) {
+    setStatus("No lyric text — use Lay Out Lyrics first", false);
+    return;
+  }
+  btnAI.disabled = true;
+  btnAI.textContent = "🪄 Aligning…";
+  const restore = () => { btnAI.disabled = false; btnAI.textContent = "🪄 AI Arrange"; };
+  try {
+    const r = await fetch("/ai-arrange", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ lines }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "request failed");
+  } catch (e) {
+    restore();
+    setStatus("AI arrange failed: " + e.message, false);
+    return;
+  }
+  setStatus("AI listening to the track — can take a few minutes…");
+  const poll = setInterval(async () => {
+    let s;
+    try { s = await (await fetch("/ai-arrange/status")).json(); }
+    catch (e) { return; }  // transient — keep polling
+    if (s.running) return;
+    clearInterval(poll);
+    restore();
+    if (s.error || !s.result) {
+      setStatus("AI arrange failed: " + (s.error || "no result"), false);
+      return;
+    }
+    pushUndo();
+    // Empty-text lines (deliberate markers) keep their manual times
+    const keep = lyrics.filter(l => !(l.text && l.text.trim()));
+    lyrics = s.result
+      .map(x => ({ time: x.time, text: x.text, conf: x.confidence }))
+      .concat(keep);
+    activeIdx = -1;
+    selectedMarkerIdx = -1;
+    sortAndRender();
+    updateDeleteBtn();
+    const low = s.result.filter(x => x.confidence < 0.5).length;
+    setStatus(`AI arranged ${s.result.length} lines` +
+              (low ? ` — ${low} low-confidence (orange), review those` : "") + " ✓");
+  }, 2000);
+});
+
 document.getElementById("btn-import").addEventListener("click", openImportModal);
 importOkBtn.addEventListener("click", doImport);
 importCancel.addEventListener("click", closeImportModal);
@@ -944,9 +1040,11 @@ function renderMarkers() {
     const pct = ln.time / duration * 100;
     const el = document.createElement("div");
     el.className = "marker";
+    if (ln.conf !== undefined && ln.conf < 0.5) el.classList.add("low-conf");
     el.style.left = pct + "%";
     el.dataset.idx = i;
-    el.title = `[${fmtTime(ln.time)}] ${ln.text}`;
+    el.title = `[${fmtTime(ln.time)}] ${ln.text}` +
+               (ln.conf !== undefined ? `  (AI conf ${ln.conf.toFixed(2)})` : "");
 
     const label = document.createElement("div");
     label.className = "marker-label";
@@ -1278,6 +1376,39 @@ def commit():
     shutil.copy2(DRAFT_PATH, state["lrc_path"])
     state["lrc_new"] = False
     return jsonify({"ok": True})
+
+@app.route("/ai-arrange", methods=["POST"])
+def ai_arrange():
+    if not state["flac_path"]:
+        return jsonify({"ok": False, "error": "No file loaded"})
+    if ai_job["thread"] is not None and ai_job["thread"].is_alive():
+        return jsonify({"ok": False, "error": "AI arrangement already running"}), 409
+    if not AI_VENV_PY.exists():
+        return jsonify({"ok": False,
+                        "error": "AI venv not found — run setup-ai.sh first"})
+    data = request.get_json(force=True)
+    lines = [ln.strip() for ln in data.get("lines", []) if ln and ln.strip()]
+    if not lines:
+        return jsonify({"ok": False, "error": "No lyric text to align"})
+    backend = data.get("backend", "whisperx")
+    ai_job["result"] = None
+    ai_job["error"] = None
+    t = threading.Thread(
+        target=_run_ai_arrange, args=(state["flac_path"], lines, backend),
+        daemon=True,
+    )
+    ai_job["thread"] = t
+    t.start()
+    return jsonify({"ok": True})
+
+@app.route("/ai-arrange/status")
+def ai_arrange_status():
+    running = ai_job["thread"] is not None and ai_job["thread"].is_alive()
+    return jsonify({
+        "running": running,
+        "result": None if running else ai_job["result"],
+        "error": None if running else ai_job["error"],
+    })
 
 @app.route("/preview", methods=["POST"])
 def preview():
