@@ -1,11 +1,11 @@
-"""Integration test for the real WhisperX backend — never runs in CI.
+"""Integration test for the real torchaudio backend — never runs in CI.
 
 Run manually from the AI venv against a real track:
 
     LYRIC_TIMING_IT_AUDIO=/path/to/song.flac \
     LYRIC_TIMING_IT_LRC=/path/to/song.lrc \
     ~/.local/share/spindlebot/ai-venv/bin/python -m pytest \
-        tests/test_lyric_timing_whisperx.py -v -s
+        tests/test_lyric_timing_torchaudio.py -v -s
 """
 
 import os
@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(
 
 def test_retime_real_track():
     from lyric_timing.aligner import align
-    from lyric_timing.backends.whisperx_backend import WhisperXBackend
+    from lyric_timing.backends.torchaudio_backend import TorchaudioBackend
     from lyric_timing.cli import _audio_duration, _lyric_line_texts
 
     audio_path = Path(AUDIO)
@@ -33,7 +33,7 @@ def test_retime_real_track():
 
     duration = _audio_duration(audio_path)
     timings = align(
-        audio_path, line_texts, WhisperXBackend(), duration=duration
+        audio_path, line_texts, TorchaudioBackend(), duration=duration
     )
 
     times = [t.time for t in timings]

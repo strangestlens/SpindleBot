@@ -61,10 +61,20 @@ def _run_ai_arrange(audio_path, lines, backend):
         ) as fh:
             fh.write("\n".join(lines))
             tmp = fh.name
-        cmd = [str(AI_VENV_PY), "-m", "lyric_timing", "retime",
+        # nice: keep the editor/browser responsive while torch churns.
+        # MPS watermark: hard-cap torch's unified-memory appetite at half the
+        # recommended working set — hitting the cap raises an OOM inside the
+        # subprocess (its backend then retries on CPU) instead of dragging
+        # the whole machine into swap.
+        cmd = ["/usr/bin/nice", "-n", "15",
+               str(AI_VENV_PY), "-m", "lyric_timing", "retime",
                str(audio_path), tmp, "--json", "--backend", backend]
+        env = {**os.environ,
+               "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.5",
+               "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.4"}
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, cwd=PIPELINE_DIR, timeout=1800,
+            cmd, capture_output=True, text=True, cwd=PIPELINE_DIR, env=env,
+            timeout=1800,
         )
         if proc.returncode != 0:
             tail = (proc.stderr or "").strip().splitlines()

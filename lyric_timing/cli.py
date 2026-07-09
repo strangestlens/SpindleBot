@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -101,22 +102,27 @@ def _lyric_line_texts(lrc_text: str) -> list[str]:
 
 
 def _make_backend(args: argparse.Namespace, duration: float | None):
+    # Cap torch's unified-memory appetite BEFORE torch is ever imported: at
+    # the cap it raises OOM (the backend retries on CPU) rather than pushing
+    # the whole machine into swap. setdefault so callers can override.
+    os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.5")
+    os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.4")
     if args.backend == "mock":
         from lyric_timing.backends.mock import MockBackend
 
         return MockBackend(duration=duration or 180.0)
     try:
-        from lyric_timing.backends.whisperx_backend import WhisperXBackend
+        from lyric_timing.backends.torchaudio_backend import TorchaudioBackend
     except ImportError as exc:
         print(
             f"error: the '{args.backend}' backend needs the AI dependencies "
-            f"(torch/demucs/whisperx): {exc}\n"
+            f"(torch/torchaudio/demucs): {exc}\n"
             "Install them with ./setup-ai.sh, then run via the AI venv:\n"
             "  ~/.local/share/spindlebot/ai-venv/bin/python -m lyric_timing retime ...",
             file=sys.stderr,
         )
         raise SystemExit(2) from exc
-    return WhisperXBackend(isolate_vocals=not args.no_vocal_sep)
+    return TorchaudioBackend(isolate_vocals=not args.no_vocal_sep)
 
 
 def cmd_retime(args: argparse.Namespace) -> int:
@@ -192,7 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip Demucs vocal isolation (faster, less accurate)",
     )
     retime.add_argument(
-        "--backend", choices=["whisperx", "mock"], default="whisperx"
+        "--backend", choices=["torchaudio", "mock"], default="torchaudio"
     )
     retime.add_argument("--language", default=None, help="ISO 639-1 code, e.g. en")
     retime.set_defaults(func=cmd_retime)

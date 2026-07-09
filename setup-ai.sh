@@ -12,7 +12,7 @@ VENV_DIR="${SPINDLEBOT_AI_VENV:-$HOME/.local/share/spindlebot/ai-venv}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REQUIREMENTS="$SCRIPT_DIR/requirements-ai.txt"
 
-# whisperx requires >=3.10,<3.14. Try newest compatible first; fall back if
+# torch wheels: try newest supported first; fall back if
 # dependency resolution fails (e.g. a transitive dep lacks wheels for that version).
 CANDIDATES=(python3.13 python3.12 python3.11 python3.10)
 

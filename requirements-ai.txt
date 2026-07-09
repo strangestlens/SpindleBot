@@ -1,8 +1,6 @@
 # Optional AI lyric-timing dependencies — NOT part of core spindlebot.
 # Installed into a dedicated venv by setup-ai.sh (heavy: torch + models).
-# whisperx requires Python >=3.10,<3.14 — setup-ai.sh picks the interpreter.
-demucs>=4.0
-whisperx>=3.8
-# torchaudio 2.8 ships no default save backend on macOS; demucs needs one to
-# write the vocal stem
+demucs>=4.0          # vocal isolation; pulls in torch + torchaudio (the aligner)
+# torchaudio 2.8 ships no default audio I/O backend on macOS; needed both to
+# write the demucs vocal stem and to load audio for alignment
 soundfile>=0.12
