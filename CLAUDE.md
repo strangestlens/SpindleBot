@@ -108,6 +108,22 @@ com.strangestlens.music-watcher.plist       — launchd agent for the fswatch wa
 com.strangestlens.music-sync-rugged.plist   — launchd agent for DwRugged sync
 lrc-editor                       — standalone Flask/WaveSurfer.js lyrics timing editor (single executable)
 
+lyric_timing/                    — OPTIONAL AI lyric-timing subsystem (peer package; heavy deps
+                                     NOT in core spindlebot). Plan: ~/.claude/plans/ai-lyric-timing-plan.md
+  lrc.py                         — parse_lrc (file-order-preserving) / format_lrc
+                                     (byte-compatible with lrc-editor)
+  detector.py                    — audit_lrc(): flag .lrc files needing re-timing
+                                     (all-identical / low-distinct / crammed-early / non-monotonic)
+  aligner.py                     — align(): word→line matching, interpolation, monotonicity,
+                                     confidence — the offline-testable core
+  backends/base.py               — AlignmentBackend Protocol + Word (swappable + mockable)
+  backends/mock.py               — deterministic fake for tests
+  backends/whisperx_backend.py   — real Demucs + WhisperX forced alignment (lazy heavy imports;
+                                     run from the AI venv)
+  cli.py                         — python -m lyric_timing audit|retime
+setup-ai.sh                      — creates the AI venv at ~/.local/share/spindlebot/ai-venv
+                                     (Python 3.13; whisperx needs >=3.10,<3.14) from requirements-ai.txt
+
 tests/
   test_config.py
   test_disc_check.py
@@ -130,6 +146,12 @@ tests/
   test_inventory.py              — inventory service (+ albums, sidecars, beets linkage, scan status)
   test_reconciler.py             — reconciler planner (copy/missing/conflict, min_copies, scan gate)
   test_review_cli.py             — spindlebot review CLI (plan + acknowledge)
+  test_lyric_timing_lrc.py       — lyric_timing/lrc parse/format
+  test_lyric_timing_detector.py  — audit heuristics
+  test_lyric_timing_aligner.py   — word→line assignment, interpolation, monotonicity (mock backend)
+  test_lyric_timing_cli.py       — audit + retime CLIs (mock backend)
+  test_lyric_timing_whisperx.py  — real-backend integration; skipped unless
+                                     LYRIC_TIMING_IT_AUDIO/LYRIC_TIMING_IT_LRC set (never in CI)
   shell/                         — bats shell tests (shellcheck + integration)
 ```
 
@@ -264,4 +286,9 @@ python3 -m spindlebot inventory [--location <name>] [--json]  # scan a location 
 python3 -m spindlebot review --location <name> [--json]       # plan reconciliation (run inventory first); no bytes moved
 python3 -m spindlebot review --acknowledge-run <run_id>       # acknowledge a run's proposed actions
 python3 -m spindlebot restart                                # restart launchd agents
+
+./setup-ai.sh                                                # one-time: install AI lyric-timing deps (heavy)
+python3 -m lyric_timing audit <dir-or-lrc...> [--json]       # flag .lrc files needing re-timing (no heavy deps)
+~/.local/share/spindlebot/ai-venv/bin/python -m lyric_timing retime <audio> <lrc> \
+    [--overwrite] [--json] [--no-vocal-sep]                  # AI re-time via forced alignment (run from repo root)
 ```
