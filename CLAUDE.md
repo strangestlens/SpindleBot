@@ -120,11 +120,12 @@ lyric_timing/                    — OPTIONAL AI lyric-timing subsystem (peer pa
                                      confidence — the offline-testable core
   backends/base.py               — AlignmentBackend Protocol + Word (swappable + mockable)
   backends/mock.py               — deterministic fake for tests
-  backends/whisperx_backend.py   — real Demucs + WhisperX forced alignment (lazy heavy imports;
-                                     run from the AI venv)
+  backends/torchaudio_backend.py — real backend: Demucs vocal sep + chunked wav2vec2 CTC forced
+                                     alignment (torchaudio; memory bounded by 30s windows, not track
+                                     length; lazy heavy imports; run from the AI venv)
   cli.py                         — python -m lyric_timing audit|retime
 setup-ai.sh                      — creates the AI venv at ~/.local/share/spindlebot/ai-venv
-                                     (Python 3.13; whisperx needs >=3.10,<3.14) from requirements-ai.txt
+                                     (Python 3.13) from requirements-ai.txt
 
 tests/
   test_config.py
@@ -152,7 +153,7 @@ tests/
   test_lyric_timing_detector.py  — audit heuristics
   test_lyric_timing_aligner.py   — word→line assignment, interpolation, monotonicity (mock backend)
   test_lyric_timing_cli.py       — audit + retime CLIs (mock backend)
-  test_lyric_timing_whisperx.py  — real-backend integration; skipped unless
+  test_lyric_timing_torchaudio.py— real-backend integration; skipped unless
                                      LYRIC_TIMING_IT_AUDIO/LYRIC_TIMING_IT_LRC set (never in CI)
   test_lrc_editor_ai.py          — lrc-editor /ai-arrange job orchestration (mock backend)
   shell/                         — bats shell tests (shellcheck + integration)
