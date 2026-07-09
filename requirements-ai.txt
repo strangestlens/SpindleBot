@@ -3,3 +3,6 @@
 # whisperx requires Python >=3.10,<3.14 — setup-ai.sh picks the interpreter.
 demucs>=4.0
 whisperx>=3.8
+# torchaudio 2.8 ships no default save backend on macOS; demucs needs one to
+# write the vocal stem
+soundfile>=0.12

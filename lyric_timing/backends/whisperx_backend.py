@@ -66,20 +66,27 @@ class WhisperXBackend:
                 return self._align(audio_path, transcript, language, "cpu")
 
     def _separate_vocals(self, audio_path: Path, tmp: Path, device: str) -> Path:
-        from demucs.api import Separator, save_audio
+        # demucs 4.0.1 (latest on PyPI) has no demucs.api module — that only
+        # exists in unreleased 4.1 alphas — so drive the CLI entry point.
+        from demucs.separate import main as demucs_main
+
+        def run(dev: str) -> None:
+            demucs_main(
+                ["--two-stems", "vocals", "-n", "htdemucs", "-d", dev,
+                 "-o", str(tmp), str(audio_path)]
+            )
 
         try:
-            separator = Separator(model="htdemucs", device=device)
-            _, stems = separator.separate_audio_file(str(audio_path))
+            run(device)
         except Exception:
             if device == "cpu":
                 raise
             log.warning("demucs failed on %s; retrying on cpu", device)
-            separator = Separator(model="htdemucs", device="cpu")
-            _, stems = separator.separate_audio_file(str(audio_path))
+            run("cpu")
 
-        vocals_path = tmp / "vocals.wav"
-        save_audio(stems["vocals"], str(vocals_path), samplerate=separator.samplerate)
+        vocals_path = tmp / "htdemucs" / audio_path.stem / "vocals.wav"
+        if not vocals_path.exists():
+            raise RuntimeError(f"demucs did not produce {vocals_path}")
         return vocals_path
 
     def _align(
