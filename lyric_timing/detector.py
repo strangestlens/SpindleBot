@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import median
 
 from lyric_timing.lrc import parse_lrc
 
@@ -21,6 +22,12 @@ MIN_LINES_FOR_RATIO = 4
 # If the last timestamp lands before this fraction of the track, every lyric
 # is crammed into the front of the song.
 EARLY_CRAM_FRACTION = 0.5
+
+# The crammed-early check only fires when lines are also bulk-stamped tightly
+# together (median gap between consecutive timestamps at or below this).
+# Well-spread timing that simply ends early is deliberate — a hand-timed song
+# with a long instrumental tail, or a lone [Instrumental] marker.
+MAX_BULK_GAP = 2.0
 
 ALL_TIMESTAMPS_IDENTICAL = "all-timestamps-identical"
 LOW_DISTINCT_TIMESTAMPS = "low-distinct-timestamps"
@@ -59,7 +66,13 @@ def audit_lrc_text(
         ):
             reasons.append(LOW_DISTINCT_TIMESTAMPS)
 
-        if duration and duration > 0 and max(times) < duration * EARLY_CRAM_FRACTION:
+        if (
+            duration
+            and duration > 0
+            and len(lines) >= 2
+            and max(times) < duration * EARLY_CRAM_FRACTION
+            and median(b - a for a, b in zip(times, times[1:])) <= MAX_BULK_GAP
+        ):
             reasons.append(TIMESTAMPS_CRAMMED_EARLY)
 
         if any(b < a for a, b in zip(times, times[1:])):

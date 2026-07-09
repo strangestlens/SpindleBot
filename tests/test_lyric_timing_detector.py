@@ -43,11 +43,25 @@ def test_ratio_check_skipped_for_tiny_files():
 
 
 def test_crammed_early_requires_duration():
-    text = "[00:05.00]One\n[00:20.00]Two\n[00:40.00]Three\n"
+    # bulk-stamped: distinct but tightly packed, all in the first quarter
+    text = "[00:05.00]One\n[00:06.00]Two\n[00:07.00]Three\n[00:08.00]Four\n"
     assert not audit_lrc_text(text).suspicious
     result = audit_lrc_text(text, duration=200.0)
     assert result.suspicious
     assert result.reasons == (TIMESTAMPS_CRAMMED_EARLY,)
+
+
+def test_early_but_well_spread_timing_is_deliberate():
+    # hand-timed song whose lyrics end at 5:00 of a 12:43 track (long
+    # instrumental tail) — real case: Spin Doctors "Shinbone Alley"
+    text = "\n".join(f"[{m:02d}:{s:02d}.00]Line" for m, s in
+                     [(0, 10), (0, 25), (1, 5), (1, 50), (2, 40), (3, 30), (4, 59)])
+    assert not audit_lrc_text(text, duration=763.0).suspicious
+
+
+def test_single_instrumental_marker_is_not_crammed():
+    # real case: The Dø "Omen" — one deliberate [Instrumental] line at 0:00
+    assert not audit_lrc_text("[00:00.00] [Instrumental]\n", duration=173.0).suspicious
 
 
 def test_spread_out_file_with_duration_is_fine():
