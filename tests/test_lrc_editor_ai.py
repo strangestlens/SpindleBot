@@ -104,6 +104,36 @@ def test_ai_arrange_single_job_guard(editor):
     assert status["result"] is None
 
 
+def test_ai_arrange_default_backend_is_a_valid_cli_choice(editor, monkeypatch):
+    # The route's default backend string must exist in the retime CLI —
+    # a backend rename that misses this default breaks the button silently
+    # (the frontend never sends an explicit backend).
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = "[]"
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(editor.subprocess, "run", fake_run)
+    client = editor.app.test_client()
+    assert client.post(
+        "/ai-arrange", json={"lines": SUSPICIOUS_LINES}
+    ).get_json()["ok"] is True
+    _wait_for_job(editor)
+
+    sent_backend = captured["cmd"][captured["cmd"].index("--backend") + 1]
+    from lyric_timing.cli import build_parser
+
+    parser = build_parser()
+    parser.parse_args(["retime", "a.flac", "a.lrc", "--backend", sent_backend])
+
+
 def test_ai_arrange_subprocess_failure_reported(editor, monkeypatch):
     # a python that exits nonzero for any invocation
     monkeypatch.setattr(editor, "AI_VENV_PY", Path("/usr/bin/false"))

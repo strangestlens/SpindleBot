@@ -1400,7 +1400,7 @@ def ai_arrange():
     lines = [ln.strip() for ln in data.get("lines", []) if ln and ln.strip()]
     if not lines:
         return jsonify({"ok": False, "error": "No lyric text to align"})
-    backend = data.get("backend", "whisperx")
+    backend = data.get("backend", "torchaudio")
     ai_job["result"] = None
     ai_job["error"] = None
     t = threading.Thread(
