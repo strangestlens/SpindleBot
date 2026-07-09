@@ -7,6 +7,7 @@ The only module allowed to print. Heavy backends are imported lazily so
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -143,9 +144,13 @@ def cmd_retime(args: argparse.Namespace) -> int:
 
     from lyric_timing.aligner import align
 
-    timings = align(
-        audio_path, line_texts, backend, language=args.language, duration=duration
-    )
+    # stdout carries ONLY our result (JSON or the new .lrc); anything the
+    # backend stack prints while aligning (demucs progress etc.) goes to
+    # stderr so consumers can parse stdout.
+    with contextlib.redirect_stdout(sys.stderr):
+        timings = align(
+            audio_path, line_texts, backend, language=args.language, duration=duration
+        )
 
     if args.json:
         print(

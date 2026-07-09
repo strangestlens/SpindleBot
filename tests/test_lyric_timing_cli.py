@@ -104,6 +104,31 @@ def test_retime_missing_audio(tmp_path, capsys):
     assert "no such file" in capsys.readouterr().err
 
 
+def test_retime_stdout_stays_parseable_despite_noisy_backend(
+    track, capsys, monkeypatch
+):
+    # demucs prints progress to stdout mid-alignment; --json consumers
+    # (the lrc-editor job) must still get pure JSON on stdout
+    from lyric_timing.backends.mock import MockBackend
+
+    original = MockBackend.word_timestamps
+
+    def noisy(self, audio_path, transcript, *, language=None):
+        print("Separating track... 100%|██████|")
+        return original(self, audio_path, transcript, language=language)
+
+    monkeypatch.setattr(MockBackend, "word_timestamps", noisy)
+    audio, lrc = track
+
+    assert main(["retime", str(audio), str(lrc), "--backend", "mock", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert [r["text"] for r in json.loads(out)] == ["One", "Two", "Three"]
+
+    assert main(["retime", str(audio), str(lrc), "--backend", "mock"]) == 0
+    out = capsys.readouterr().out
+    assert all(line.startswith("[") for line in out.strip().splitlines())
+
+
 def test_retime_empty_lrc(track, capsys):
     audio, lrc = track
     lrc.write_text("", encoding="utf-8")

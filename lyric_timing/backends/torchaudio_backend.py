@@ -14,7 +14,9 @@ First run downloads models to ~/.cache (htdemucs ~300 MB, wav2vec2 ~360 MB).
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import sys
 import tempfile
 import unicodedata
 from pathlib import Path
@@ -87,10 +89,13 @@ class TorchaudioBackend:
         from demucs.separate import main as demucs_main
 
         def run(dev: str) -> None:
-            demucs_main(
-                ["--two-stems", "vocals", "-n", "htdemucs", "-d", dev,
-                 "-o", str(tmp), str(audio_path)]
-            )
+            # demucs prints progress to stdout; route it to stderr so callers
+            # (e.g. `retime --json`) keep a parseable stdout
+            with contextlib.redirect_stdout(sys.stderr):
+                demucs_main(
+                    ["--two-stems", "vocals", "-n", "htdemucs", "-d", dev,
+                     "-o", str(tmp), str(audio_path)]
+                )
 
         try:
             run(device)
