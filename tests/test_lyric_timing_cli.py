@@ -45,3 +45,67 @@ def test_audit_single_file(library, capsys):
 def test_audit_missing_file(tmp_path, capsys):
     assert main(["audit", str(tmp_path / "nope.lrc")]) == 2
     assert "no such file" in capsys.readouterr().err
+
+
+# ── retime (mock backend) ────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def track(tmp_path):
+    audio = tmp_path / "song.flac"
+    audio.write_bytes(b"not real audio")
+    lrc = tmp_path / "song.lrc"
+    lrc.write_text(SUSPICIOUS, encoding="utf-8")
+    return audio, lrc
+
+
+def test_retime_prints_lrc_by_default(track, capsys):
+    audio, lrc = track
+    assert main(["retime", str(audio), str(lrc), "--backend", "mock"]) == 0
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    assert len(lines) == 3
+    assert lines[0].endswith("One")
+    assert "[00:00.00]" not in out  # timestamps actually spread out
+    assert lrc.read_text(encoding="utf-8") == SUSPICIOUS  # untouched
+
+
+def test_retime_overwrite_writes_file(track):
+    audio, lrc = track
+    assert main(["retime", str(audio), str(lrc), "--backend", "mock", "--overwrite"]) == 0
+    new = lrc.read_text(encoding="utf-8")
+    assert "One" in new and "[00:00.00]" not in new
+
+
+def test_retime_json_output(track, capsys):
+    audio, lrc = track
+    assert main(["retime", str(audio), str(lrc), "--backend", "mock", "--json"]) == 0
+    results = json.loads(capsys.readouterr().out)
+    assert [r["text"] for r in results] == ["One", "Two", "Three"]
+    times = [r["time"] for r in results]
+    assert times == sorted(times) and times[0] > 0
+    assert all(0.0 <= r["confidence"] <= 1.0 for r in results)
+
+
+def test_retime_plain_text_lyrics(tmp_path, capsys):
+    audio = tmp_path / "song.flac"
+    audio.write_bytes(b"x")
+    lrc = tmp_path / "song.lrc"
+    lrc.write_text("[ar:Artist]\nJust plain\nlyric lines\n", encoding="utf-8")
+    assert main(["retime", str(audio), str(lrc), "--backend", "mock", "--json"]) == 0
+    results = json.loads(capsys.readouterr().out)
+    assert [r["text"] for r in results] == ["Just plain", "lyric lines"]
+
+
+def test_retime_missing_audio(tmp_path, capsys):
+    lrc = tmp_path / "song.lrc"
+    lrc.write_text(SUSPICIOUS, encoding="utf-8")
+    assert main(["retime", str(tmp_path / "gone.flac"), str(lrc)]) == 2
+    assert "no such file" in capsys.readouterr().err
+
+
+def test_retime_empty_lrc(track, capsys):
+    audio, lrc = track
+    lrc.write_text("", encoding="utf-8")
+    assert main(["retime", str(audio), str(lrc), "--backend", "mock"]) == 2
+    assert "no lyric lines" in capsys.readouterr().err

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 from lyric_timing.detector import AuditResult, audit_lrc
+from lyric_timing.lrc import Line, format_lrc, parse_lrc
 
 try:
     # dot-less extensions, e.g. {"flac", "mp3", ...}
@@ -82,6 +84,84 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+_METADATA_TAG_RE = re.compile(r"^\[[a-zA-Z]+:.*\]$")
+
+
+def _lyric_line_texts(lrc_text: str) -> list[str]:
+    """Lyric lines in file order: timed lines if present, else plain text
+    lines (minus LRC metadata tags like [ar:...])."""
+    lines = parse_lrc(lrc_text)
+    if lines:
+        return [ln.text for ln in lines if ln.text]
+    return [
+        raw.strip()
+        for raw in lrc_text.splitlines()
+        if raw.strip() and not _METADATA_TAG_RE.match(raw.strip())
+    ]
+
+
+def _make_backend(args: argparse.Namespace, duration: float | None):
+    if args.backend == "mock":
+        from lyric_timing.backends.mock import MockBackend
+
+        return MockBackend(duration=duration or 180.0)
+    try:
+        from lyric_timing.backends.whisperx_backend import WhisperXBackend
+    except ImportError as exc:
+        print(
+            f"error: the '{args.backend}' backend needs the AI dependencies "
+            f"(torch/demucs/whisperx): {exc}\n"
+            "Install them with ./setup-ai.sh, then run via the AI venv:\n"
+            "  ~/.local/share/spindlebot/ai-venv/bin/python -m lyric_timing retime ...",
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from exc
+    return WhisperXBackend(isolate_vocals=not args.no_vocal_sep)
+
+
+def cmd_retime(args: argparse.Namespace) -> int:
+    audio_path = Path(args.audio).expanduser()
+    lrc_path = Path(args.lrc).expanduser()
+    for p in (audio_path, lrc_path):
+        if not p.exists():
+            print(f"error: no such file: {p}", file=sys.stderr)
+            return 2
+
+    line_texts = _lyric_line_texts(lrc_path.read_text(encoding="utf-8"))
+    if not line_texts:
+        print(f"error: no lyric lines found in {lrc_path}", file=sys.stderr)
+        return 2
+
+    duration = _audio_duration(audio_path)
+    backend = _make_backend(args, duration)
+
+    from lyric_timing.aligner import align
+
+    timings = align(
+        audio_path, line_texts, backend, language=args.language, duration=duration
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                [
+                    {"time": t.time, "text": t.text, "confidence": t.confidence}
+                    for t in timings
+                ],
+                indent=2,
+            )
+        )
+        return 0
+
+    new_lrc = format_lrc([Line(time=t.time, text=t.text) for t in timings])
+    if args.overwrite:
+        lrc_path.write_text(new_lrc, encoding="utf-8")
+        print(f"wrote {lrc_path}", file=sys.stderr)
+    else:
+        print(new_lrc, end="")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lyric_timing", description="AI lyric-timing tools"
@@ -94,6 +174,28 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("paths", nargs="+", help=".lrc files or directories to scan")
     audit.add_argument("--json", action="store_true")
     audit.set_defaults(func=cmd_audit)
+
+    retime = sub.add_parser(
+        "retime", help="re-time an .lrc against its audio via forced alignment"
+    )
+    retime.add_argument("audio", help="audio file the lyrics belong to")
+    retime.add_argument("lrc", help=".lrc file whose text to keep and re-time")
+    retime.add_argument(
+        "--overwrite", action="store_true", help="write result back to the .lrc"
+    )
+    retime.add_argument(
+        "--json", action="store_true", help="emit [{time,text,confidence}] JSON"
+    )
+    retime.add_argument(
+        "--no-vocal-sep",
+        action="store_true",
+        help="skip Demucs vocal isolation (faster, less accurate)",
+    )
+    retime.add_argument(
+        "--backend", choices=["whisperx", "mock"], default="whisperx"
+    )
+    retime.add_argument("--language", default=None, help="ISO 639-1 code, e.g. en")
+    retime.set_defaults(func=cmd_retime)
 
     return parser
 
