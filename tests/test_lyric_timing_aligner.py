@@ -6,6 +6,7 @@ from lyric_timing.aligner import (
     assign_words_to_lines,
     enforce_monotonic,
     interpolate_missing,
+    strip_parentheticals,
 )
 from lyric_timing.backends.base import Word
 from lyric_timing.backends.mock import MockBackend
@@ -138,6 +139,43 @@ def test_align_output_is_monotonic_and_clamped():
     times = [t.time for t in timings]
     assert times == sorted(times)
     assert all(0.0 <= t <= 60.0 for t in times)
+
+
+def test_strip_parentheticals():
+    assert strip_parentheticals("Walk away (walk away), stay (stay)").split() == [
+        "Walk", "away", ",", "stay",
+    ]
+    assert strip_parentheticals("(Ooh)").strip() == ""
+
+
+def test_align_ignores_backing_vocal_echoes():
+    # the echo "(lips sealed)" is not in the alignment transcript, so full
+    # coverage of the lead-vocal words gives high confidence
+    lines = ["Keep your lips sealed (lips sealed)", "Walk away now"]
+    backend = MockBackend(
+        words_for(
+            ("Keep", 10.0), ("your", 10.3), ("lips", 10.6), ("sealed", 11.0),
+            ("Walk", 20.0), ("away", 20.4), ("now", 20.8),
+        )
+    )
+    timings = align(AUDIO, lines, backend, duration=60.0)
+    assert timings[0].time == 10.0
+    assert timings[0].confidence > 0.8
+    assert timings[0].text == "Keep your lips sealed (lips sealed)"  # text kept
+    assert timings[1].time == 20.0
+
+
+def test_align_pure_adlib_line_is_interpolated():
+    lines = ["First line here", "(Ooh la la)", "Third line here"]
+    backend = MockBackend(
+        words_for(
+            ("First", 10.0), ("line", 10.3), ("here", 10.6),
+            ("Third", 30.0), ("line", 30.3), ("here", 30.6),
+        )
+    )
+    timings = align(AUDIO, lines, backend, duration=60.0)
+    assert 10.0 < timings[1].time < 30.0
+    assert timings[1].confidence == 0.0
 
 
 def test_align_with_generated_mock_words_is_ordered():

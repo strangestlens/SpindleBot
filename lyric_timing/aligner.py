@@ -32,6 +32,15 @@ FALLBACK_LINE_GAP = 3.0
 
 _TOKEN_RE = re.compile(r"[^\W_]+'?[^\W_]*", re.UNICODE)
 
+# Parenthesized fragments in lyrics are backing-vocal echoes/ad-libs
+# ("walk away (walk away)") that overlap the lead vocal; forcing the
+# alignment path through them distorts neighbouring line times.
+_PAREN_RE = re.compile(r"\([^)]*\)")
+
+
+def strip_parentheticals(text: str) -> str:
+    return _PAREN_RE.sub(" ", text)
+
 
 @dataclass(frozen=True)
 class LineTiming:
@@ -141,11 +150,17 @@ def align(
     duration: float | None = None,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
 ) -> list[LineTiming]:
-    """Produce a timestamp + confidence for every lyric line, in line order."""
-    transcript = "\n".join(line_texts)
+    """Produce a timestamp + confidence for every lyric line, in line order.
+
+    Alignment runs on the lines with parenthetical ad-libs stripped (the
+    output keeps each line's original text); a line that is *only* an ad-lib
+    gets its time by interpolation like any unmatched line.
+    """
+    alignment_texts = [strip_parentheticals(t) for t in line_texts]
+    transcript = "\n".join(alignment_texts)
     words = backend.word_timestamps(audio_path, transcript, language=language)
 
-    assigned = assign_words_to_lines(line_texts, words)
+    assigned = assign_words_to_lines(alignment_texts, words)
     raw_times = [
         t if t is not None and conf >= min_confidence else None
         for t, conf in assigned
