@@ -1,6 +1,7 @@
 """
 Tests for spindlebot.disc — disc-detection logic used by music-import.sh.
 """
+import contextlib
 import struct
 import unittest
 from pathlib import Path

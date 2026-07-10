@@ -13,7 +13,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import mutagen.flac
-import pytest
 
 from spindlebot.pipeline.runner import ImportConfig, ImportRunner
 

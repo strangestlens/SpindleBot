@@ -3,12 +3,10 @@ Tests for spindlebot.pipeline.stages.notify.
 """
 from __future__ import annotations
 
-import subprocess
 from unittest.mock import MagicMock, patch
 
-import pytest
 
-from spindlebot.pipeline.stages.notify import NotifyResult, _send_macos, _send_telegram, notify
+from spindlebot.pipeline.stages.notify import _send_macos, _send_telegram, notify
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

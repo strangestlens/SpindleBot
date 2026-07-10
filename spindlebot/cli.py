@@ -822,7 +822,6 @@ def main(argv: list[str] | None = None) -> int:
             "com.strangestlens.music-sync-rugged",
         ]
         uid = os.getuid()
-        any_failed = False
         for agent in agents:
             target = f"gui/{uid}/{agent}"
             result = subprocess.run(

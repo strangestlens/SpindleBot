@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import pytest
 
 from spindlebot.cli import cmd_review
 from spindlebot.config import LocationConfig

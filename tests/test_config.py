@@ -20,12 +20,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from spindlebot.config import (
     load,
-    CoreConfig,
-    ToolsConfig,
-    NotificationsConfig,
-    LyricsConfig,
-    ArtConfig,
-    Secrets,
     SpindleBotConfig,
 )
 

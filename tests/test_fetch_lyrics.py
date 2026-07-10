@@ -13,8 +13,6 @@ import mutagen.flac
 import pytest
 
 from spindlebot.pipeline.stages.fetch_lyrics import (
-    LyricsResult,
-    _fetch_from_lrclib,
     _get_tags,
     _plain_to_lrc,
     _query_lrclib,
@@ -85,7 +83,7 @@ class TestHelpers:
     def test_plain_to_lrc_empty_lines_not_stamped(self):
         lrc = _plain_to_lrc("Line one\n\nLine two")
         lines = lrc.splitlines()
-        assert any(l == "" for l in lines)
+        assert any(line == "" for line in lines)
 
     def test_title_from_filename_strips_track_number(self):
         assert _title_from_filename("/album/01. Song Title.flac") == "Song Title"
@@ -599,9 +597,6 @@ class TestFetchFromLrclibEnglishFallback:
             result = fetch_lyrics(tmp_path, _cfg())
 
         assert result.missing == 1
-        # All attempts used the original artist ("ベック"); sort artist still
-        # tried as a last-ditch variant, but never with a title_english we don't have
-        called_artists = {a for a, _ in call_log}
         called_titles = {t for _, t in call_log}
         # No title_english value means no English title queries
         assert "Hyperlife" not in called_titles

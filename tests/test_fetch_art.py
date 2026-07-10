@@ -10,16 +10,13 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import mutagen.flac
-import pytest
 
 from spindlebot.pipeline.stages.fetch_art import (
-    ArtResult,
     _detect_mime,
     _embed_art_in_file,
     _extract_embedded_art,
     _fetch_from_caa,
     _fetch_from_itunes,
-    _get_album_tags,
     _has_art,
     fetch_art,
 )

@@ -214,7 +214,7 @@ class ImportRunner:
 
         # Stage 4: pretag — per-file normalization over the whole directory.
         # Order-independent; running once matches prior behavior.
-        self._log(f"🏷  pretagging")
+        self._log("🏷  pretagging")
         self._log(f"Running pretag on: {album_dir}", echo=False)
         try:
             pretag(str(album_dir))
