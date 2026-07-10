@@ -9,7 +9,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import mutagen.flac
-import pytest
 
 from spindlebot.pipeline.stages.pretag import (
     BEETS_ALIAS_TAGS,

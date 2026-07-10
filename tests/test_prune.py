@@ -189,7 +189,7 @@ def test_prune_no_warning_when_at_min_copies(conn, tmp_path):
     dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "A/01.flac"
-    pf, rf, df = _put(pending, rel), _put(rugged, rel), _put(dap, rel)
+    pf, _, _ = _put(pending, rel), _put(rugged, rel), _put(dap, rel)
     sha = file_sha256(pf)
     for loc in (pending, rugged, dap):
         presence_repo.set_presence(conn, audio_id=a.id, location_id=loc.id, present=True,

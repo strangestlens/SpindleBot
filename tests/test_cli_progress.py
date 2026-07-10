@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 
-import pytest
 
 from spindlebot.cli_progress import ProgressReporter, _truncate_middle
 from spindlebot.core.progress import ProgressEvent
