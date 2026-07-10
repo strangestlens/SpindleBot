@@ -126,3 +126,17 @@ def test_load_track_without_audio(editor, tmp_path):
     lrc.write_text(SUSPICIOUS, encoding="utf-8")
     j = editor.app.test_client().post("/load", json={"lrc": str(lrc)}).get_json()
     assert j["ok"] is False and "no audio file" in j["error"]
+
+
+def test_load_rejects_non_lrc_and_missing_paths(editor, tmp_path):
+    # /commit writes to state["lrc_path"], so /load must never accept a
+    # path that isn't an existing .lrc
+    client = editor.app.test_client()
+    victim = tmp_path / "important.txt"
+    victim.write_text("do not overwrite", encoding="utf-8")
+    j = client.post("/load", json={"lrc": str(victim)}).get_json()
+    assert j["ok"] is False and "not an existing .lrc" in j["error"]
+
+    j = client.post("/load", json={"lrc": str(tmp_path / "ghost.lrc")}).get_json()
+    assert j["ok"] is False and "not an existing .lrc" in j["error"]
+    assert editor.state["lrc_path"] is None  # state untouched
