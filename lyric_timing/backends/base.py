@@ -1,10 +1,10 @@
 """Alignment backend contract.
 
 A backend takes audio plus the known lyric text and returns word-level
-timestamps. The heavy implementation (Demucs + WhisperX) is swappable and
-mockable behind this Protocol; all timing intelligence above the word level
-(line aggregation, interpolation, monotonicity) lives in aligner.py and is
-tested with the mock.
+timestamps. The heavy implementation (Demucs + torchaudio forced alignment)
+is swappable and mockable behind this Protocol; all timing intelligence above
+the word level (line aggregation, interpolation, monotonicity) lives in
+aligner.py and is tested with the mock.
 """
 
 from __future__ import annotations

@@ -36,6 +36,8 @@ def editor(monkeypatch, tmp_path):
 
     if saved_draft is not None:
         draft.write_bytes(saved_draft)
+    else:
+        draft.unlink(missing_ok=True)  # importing the script created it
 
 
 @pytest.fixture()
