@@ -76,6 +76,15 @@ def test_non_monotonic():
     assert NON_MONOTONIC in result.reasons
 
 
+def test_non_monotonic_but_spread_timing_is_not_crammed():
+    # out-of-order yet well-spread timestamps in the first half of a long
+    # track: non-monotonic yes, but the negative file-order gaps must not
+    # drag the median down and mislabel it bulk-stamped
+    text = "[01:00.00]B\n[00:20.00]A\n[02:00.00]D\n[01:40.00]C\n"
+    result = audit_lrc_text(text, duration=300.0)
+    assert result.reasons == (NON_MONOTONIC,)
+
+
 def test_untimed_content_is_suspicious():
     result = audit_lrc_text("These are lyrics\nwith no timestamps at all\n")
     assert result.suspicious

@@ -66,14 +66,17 @@ def audit_lrc_text(
         ):
             reasons.append(LOW_DISTINCT_TIMESTAMPS)
 
-        if (
-            duration
-            and duration > 0
-            and len(lines) >= 2
-            and max(times) < duration * EARLY_CRAM_FRACTION
-            and median(b - a for a, b in zip(times, times[1:])) <= MAX_BULK_GAP
-        ):
-            reasons.append(TIMESTAMPS_CRAMMED_EARLY)
+        if duration and duration > 0 and len(lines) >= 2:
+            # gaps in time order, not file order: a non-monotonic file's
+            # negative gaps would drag the median down and mislabel spread
+            # timing as bulk-stamped
+            ordered = sorted(times)
+            if (
+                max(times) < duration * EARLY_CRAM_FRACTION
+                and median(b - a for a, b in zip(ordered, ordered[1:]))
+                <= MAX_BULK_GAP
+            ):
+                reasons.append(TIMESTAMPS_CRAMMED_EARLY)
 
         if any(b < a for a, b in zip(times, times[1:])):
             reasons.append(NON_MONOTONIC)

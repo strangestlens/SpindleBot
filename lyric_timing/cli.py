@@ -58,7 +58,7 @@ def _collect_lrc_paths(paths: list[Path]) -> list[Path]:
 
 def _result_dict(r: AuditResult) -> dict:
     return {
-        "path": str(r.path),
+        "path": str(r.path) if r.path is not None else None,
         "suspicious": r.suspicious,
         "reasons": list(r.reasons),
         "stats": r.stats,
