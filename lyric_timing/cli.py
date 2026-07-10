@@ -134,7 +134,8 @@ def cmd_retime(args: argparse.Namespace) -> int:
             print(f"error: no such file: {p}", file=sys.stderr)
             return 2
 
-    line_texts = _lyric_line_texts(lrc_path.read_text(encoding="utf-8"))
+    lrc_text = lrc_path.read_text(encoding="utf-8")
+    line_texts = _lyric_line_texts(lrc_text)
     if not line_texts:
         print(f"error: no lyric lines found in {lrc_path}", file=sys.stderr)
         return 2
@@ -164,7 +165,11 @@ def cmd_retime(args: argparse.Namespace) -> int:
         )
         return 0
 
-    new_lrc = format_lrc([Line(time=t.time, text=t.text) for t in timings])
+    new_lines = [Line(time=t.time, text=t.text) for t in timings]
+    # deliberate empty-text markers (e.g. an end-of-lyrics timestamp bounding
+    # an instrumental outro) aren't aligned; they keep their manual times
+    new_lines += [ln for ln in parse_lrc(lrc_text) if not ln.text]
+    new_lrc = format_lrc(new_lines)
     if args.overwrite:
         lrc_path.write_text(new_lrc, encoding="utf-8")
         print(f"wrote {lrc_path}", file=sys.stderr)

@@ -97,6 +97,19 @@ def test_retime_plain_text_lyrics(tmp_path, capsys):
     assert [r["text"] for r in results] == ["Just plain", "lyric lines"]
 
 
+def test_retime_preserves_empty_text_markers(tmp_path, capsys):
+    # a hand-placed empty-text timestamp (bounding an instrumental outro)
+    # must survive a retime at its manual time
+    audio = tmp_path / "song.flac"
+    audio.write_bytes(b"x")
+    lrc = tmp_path / "song.lrc"
+    lrc.write_text(SUSPICIOUS + "\n[04:59.20] \n", encoding="utf-8")
+    assert main(["retime", str(audio), str(lrc), "--backend", "mock"]) == 0
+    out = capsys.readouterr().out
+    assert "[04:59.20]" in out
+    assert len(out.strip().splitlines()) == 4  # 3 aligned + 1 marker
+
+
 def test_retime_missing_audio(tmp_path, capsys):
     lrc = tmp_path / "song.lrc"
     lrc.write_text(SUSPICIOUS, encoding="utf-8")
