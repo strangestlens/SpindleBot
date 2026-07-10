@@ -108,7 +108,10 @@ com.strangestlens.music-watcher.plist       — launchd agent for the fswatch wa
 com.strangestlens.music-sync-rugged.plist   — launchd agent for DwRugged sync
 lrc-editor                       — standalone Flask/WaveSurfer.js lyrics timing editor (single
                                      executable); its "AI Arrange" button POSTs /ai-arrange, which runs
-                                     lyric_timing retime as a background subprocess of the AI venv
+                                     lyric_timing retime as a background subprocess of the AI venv;
+                                     /audit page runs lyric_timing audit, remembers paths in
+                                     ~/.config/spindlebot/lrc-editor-state.json, loads rows into
+                                     the editor via POST /load
 
 lyric_timing/                    — OPTIONAL AI lyric-timing subsystem (peer package; heavy deps
                                      NOT in core spindlebot). Plan: ~/.claude/plans/ai-lyric-timing-plan.md
@@ -156,6 +159,7 @@ tests/
   test_lyric_timing_torchaudio.py— real-backend integration; skipped unless
                                      LYRIC_TIMING_IT_AUDIO/LYRIC_TIMING_IT_LRC set (never in CI)
   test_lrc_editor_ai.py          — lrc-editor /ai-arrange job orchestration (mock backend)
+  test_lrc_editor_audit.py       — lrc-editor /audit page: run job, saved-state recall, /load
   shell/                         — bats shell tests (shellcheck + integration)
 ```
 

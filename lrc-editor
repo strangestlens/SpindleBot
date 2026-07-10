@@ -52,6 +52,52 @@ PIPELINE_DIR = Path(os.environ.get(
 
 ai_job = {"thread": None, "result": None, "error": None}
 
+# ── Persisted UI state (remembers audit paths across restarts) ───────────────
+UI_STATE_PATH = Path.home() / ".config" / "spindlebot" / "lrc-editor-state.json"
+
+def _load_ui_state():
+    try:
+        return json.loads(UI_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_ui_state(**updates):
+    merged = _load_ui_state()
+    merged.update(updates)
+    UI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UI_STATE_PATH.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+
+# ── Audit background job ─────────────────────────────────────────────────────
+audit_job = {"thread": None, "result": None, "error": None}
+
+def _run_audit(library_path, output_path):
+    """Background thread: shell out to `lyric_timing audit --json`."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "lyric_timing", "audit",
+             str(library_path), "--json"],
+            capture_output=True, text=True, cwd=PIPELINE_DIR, timeout=3600,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip().splitlines()
+            audit_job["error"] = tail[-1] if tail else f"exit {proc.returncode}"
+            return
+        Path(output_path).write_text(proc.stdout, encoding="utf-8")
+        audit_job["result"] = json.loads(proc.stdout)
+        _save_ui_state(audit_library=str(library_path),
+                       audit_json=str(output_path))
+    except Exception as e:
+        audit_job["error"] = str(e)
+
+AUDIO_SUFFIXES = (".flac", ".mp3", ".m4a", ".aac", ".wav", ".ogg")
+
+def _sibling_audio(lrc_path):
+    for suffix in AUDIO_SUFFIXES:
+        candidate = lrc_path.with_suffix(suffix)
+        if candidate.exists():
+            return candidate
+    return None
+
 def _run_ai_arrange(audio_path, lines, backend):
     """Background thread: shell out to `lyric_timing retime --json`."""
     tmp = None
@@ -194,6 +240,7 @@ HTML = r"""<!DOCTYPE html>
   button:hover { opacity: .85; }
   button:disabled { opacity: .35; cursor: default; }
   #btn-open    { background: #1a3a2a; color: #7ecfa0; }
+  #btn-audit-page { background: #1f2a3d; color: #d8b26e; }
   #btn-import  { background: #2a1f3d; color: #b39ddb; }
   #btn-ai      { background: #1f2a3d; color: #7ab8e8; }
   #btn-undo    { background: #2a2a4a; color: #aaa; }
@@ -440,6 +487,7 @@ HTML = r"""<!DOCTYPE html>
   <h1>🎵 LRC Editor</h1>
   <span class="file-name" id="file-label">No file loaded</span>
   <button id="btn-open">📂 Open</button>
+  <button id="btn-audit-page">🔍 Audit</button>
   <button id="btn-import">📋 Lay Out Lyrics</button>
   <button id="btn-ai">🪄 AI Arrange</button>
   <button id="btn-undo" disabled>↩ Undo</button>
@@ -974,6 +1022,9 @@ function doImport() {
   setStatus(`Laid out ${lines.length} lines ✓${duration > 0 ? "" : " (no track — times are placeholders)"}`);
 }
 
+document.getElementById("btn-audit-page").addEventListener("click",
+  () => location.href = "/audit");
+
 // ── AI Arrange ───────────────────────────────────────────────────────────────
 const btnAI = document.getElementById("btn-ai");
 
@@ -1264,6 +1315,193 @@ document.getElementById("btn-commit").addEventListener("click", async () => {
 </html>
 """
 
+# ── Audit page HTML ──────────────────────────────────────────────────────────
+AUDIT_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LRC Audit</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #1a1a2e; color: #e0e0e0;
+    min-height: 100vh; padding: 0 0 40px;
+  }
+  #toolbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; background: #16213e;
+    border-bottom: 1px solid #0f3460; flex-wrap: wrap;
+  }
+  #toolbar h1 { font-size: 15px; font-weight: 600; color: #e94560; margin-right: auto; }
+  button {
+    padding: 7px 16px; border: none; border-radius: 6px;
+    font-size: 13px; font-weight: 500; cursor: pointer; transition: opacity .15s;
+  }
+  button:hover { opacity: .85; }
+  button:disabled { opacity: .35; cursor: default; }
+  #btn-back { background: #2a2a4a; color: #aaa; }
+  #btn-run  { background: #e94560; color: #fff; }
+  .picker   { background: #1a3a2a; color: #7ecfa0; }
+  #status { font-size: 12px; color: #4caf50; }
+  #status.err { color: #e94560; }
+  #controls {
+    display: grid; grid-template-columns: 110px 1fr auto;
+    gap: 8px 10px; align-items: center;
+    padding: 16px; max-width: 900px;
+  }
+  #controls label { font-size: 12px; color: #8899aa; }
+  #controls input {
+    background: #0d1b2a; border: 1px solid #0f3460; border-radius: 6px;
+    color: #e0e0e0; font-size: 12px; padding: 7px 10px; width: 100%;
+    font-family: ui-monospace, monospace;
+  }
+  #run-row { padding: 0 16px 8px; display: flex; gap: 10px; align-items: center; }
+  #summary { padding: 8px 16px; font-size: 13px; color: #8899aa; }
+  table { border-collapse: collapse; margin: 8px 16px; width: calc(100% - 32px); }
+  th, td { text-align: left; padding: 7px 10px; font-size: 12.5px; }
+  th { color: #8899aa; font-weight: 600; border-bottom: 1px solid #0f3460; }
+  tr:nth-child(even) td { background: rgba(255,255,255,.025); }
+  td.path { font-family: ui-monospace, monospace; word-break: break-all; }
+  td.reasons { color: #ff9800; white-space: nowrap; }
+  td.edit button { background: #0f3460; color: #e0e0e0; padding: 4px 12px; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <h1>🔍 Lyric Timing Audit</h1>
+  <span id="status"></span>
+  <button id="btn-back">← Editor</button>
+</div>
+
+<div id="controls">
+  <label>Audit folder</label>
+  <input id="library" placeholder="/Volumes/DwRugged/Music/Library" spellcheck="false">
+  <button class="picker" id="pick-library">Browse…</button>
+  <label>Output JSON</label>
+  <input id="output" placeholder="~/Documents/lrc-audit.json" spellcheck="false">
+  <button class="picker" id="pick-output">Browse…</button>
+</div>
+<div id="run-row">
+  <button id="btn-run">Run Audit</button>
+</div>
+
+<div id="summary"></div>
+<table id="results" style="display:none">
+  <thead>
+    <tr><th>File</th><th>Reasons</th><th>Lines</th><th></th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<script>
+const statusEl = document.getElementById("status");
+const libraryEl = document.getElementById("library");
+const outputEl  = document.getElementById("output");
+const btnRun    = document.getElementById("btn-run");
+const summaryEl = document.getElementById("summary");
+const table     = document.getElementById("results");
+const tbody     = table.querySelector("tbody");
+
+function setStatus(msg, ok=true) {
+  statusEl.textContent = msg;
+  statusEl.className = ok ? "" : "err";
+}
+
+document.getElementById("btn-back").addEventListener("click", () => location.href = "/");
+
+async function pick(endpoint, input) {
+  const j = await (await fetch(endpoint, { method: "POST" })).json();
+  if (j.ok) input.value = j.path;
+}
+document.getElementById("pick-library").addEventListener("click",
+  () => pick("/audit/pick-folder", libraryEl));
+document.getElementById("pick-output").addEventListener("click",
+  () => pick("/audit/pick-output", outputEl));
+
+function render(results) {
+  const suspicious = results.filter(r => r.suspicious);
+  summaryEl.textContent =
+    `${suspicious.length} of ${results.length} files look mistimed`;
+  tbody.innerHTML = "";
+  const prefix = libraryEl.value.replace(/\/?$/, "/");
+  for (const r of suspicious) {
+    const tr = document.createElement("tr");
+    const shown = r.path.startsWith(prefix) ? r.path.slice(prefix.length) : r.path;
+
+    const pathTd = document.createElement("td");
+    pathTd.className = "path";
+    pathTd.textContent = shown;
+
+    const reasonsTd = document.createElement("td");
+    reasonsTd.className = "reasons";
+    reasonsTd.textContent = r.reasons.join(", ");
+
+    const linesTd = document.createElement("td");
+    linesTd.textContent = r.stats && r.stats.line_count != null ? r.stats.line_count : "";
+
+    const editTd = document.createElement("td");
+    editTd.className = "edit";
+    const btn = document.createElement("button");
+    btn.textContent = "Edit";
+    btn.addEventListener("click", async () => {
+      const j = await (await fetch("/load", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ lrc: r.path }),
+      })).json();
+      if (!j.ok) { setStatus(j.error, false); return; }
+      location.href = "/";
+    });
+    editTd.appendChild(btn);
+
+    tr.append(pathTd, reasonsTd, linesTd, editTd);
+    tbody.appendChild(tr);
+  }
+  table.style.display = suspicious.length ? "table" : "none";
+}
+
+btnRun.addEventListener("click", async () => {
+  if (!libraryEl.value.trim() || !outputEl.value.trim()) {
+    setStatus("Pick a folder to audit and an output file first", false);
+    return;
+  }
+  btnRun.disabled = true;
+  setStatus("Auditing…");
+  const j = await (await fetch("/audit/run", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ library: libraryEl.value.trim(),
+                           output: outputEl.value.trim() }),
+  })).json();
+  if (!j.ok) { btnRun.disabled = false; setStatus(j.error, false); return; }
+  const poll = setInterval(async () => {
+    let s;
+    try { s = await (await fetch("/audit/status")).json(); }
+    catch (e) { return; }
+    if (s.running) return;
+    clearInterval(poll);
+    btnRun.disabled = false;
+    if (s.error || !s.result) { setStatus("Audit failed: " + (s.error || "no result"), false); return; }
+    setStatus("Audit complete ✓");
+    render(s.result);
+  }, 1000);
+});
+
+(async () => {
+  const saved = await (await fetch("/audit/saved")).json();
+  if (saved.library) libraryEl.value = saved.library;
+  if (saved.json_path) outputEl.value = saved.json_path;
+  if (saved.results) {
+    render(saved.results);
+    setStatus("Loaded saved audit ✓");
+  }
+})();
+</script>
+</body>
+</html>
+"""
+
 # ── Flask app ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
@@ -1419,6 +1657,97 @@ def ai_arrange_status():
         "result": None if running else ai_job["result"],
         "error": None if running else ai_job["error"],
     })
+
+# ── Audit page ────────────────────────────────────────────────────────────────
+
+@app.route("/audit")
+def audit_page():
+    return AUDIT_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+@app.route("/audit/saved")
+def audit_saved():
+    ui = _load_ui_state()
+    out = {"library": ui.get("audit_library"), "json_path": ui.get("audit_json"),
+           "results": None}
+    json_path = ui.get("audit_json")
+    if json_path and Path(json_path).exists():
+        try:
+            out["results"] = json.loads(Path(json_path).read_text(encoding="utf-8"))
+        except Exception as e:
+            out["error"] = f"couldn't read {json_path}: {e}"
+    return jsonify(out)
+
+@app.route("/audit/run", methods=["POST"])
+def audit_run():
+    if audit_job["thread"] is not None and audit_job["thread"].is_alive():
+        return jsonify({"ok": False, "error": "audit already running"}), 409
+    data = request.get_json(force=True)
+    library = Path(data.get("library", "")).expanduser()
+    output = Path(data.get("output", "")).expanduser()
+    if not library.is_dir():
+        return jsonify({"ok": False, "error": f"not a directory: {library}"})
+    if not output.parent.is_dir():
+        return jsonify({"ok": False, "error": f"no such folder: {output.parent}"})
+    audit_job["result"] = None
+    audit_job["error"] = None
+    t = threading.Thread(target=_run_audit, args=(library, output), daemon=True)
+    audit_job["thread"] = t
+    t.start()
+    return jsonify({"ok": True})
+
+@app.route("/audit/status")
+def audit_status():
+    running = audit_job["thread"] is not None and audit_job["thread"].is_alive()
+    return jsonify({
+        "running": running,
+        "result": None if running else audit_job["result"],
+        "error": None if running else audit_job["error"],
+    })
+
+@app.route("/audit/pick-folder", methods=["POST"])
+def audit_pick_folder():
+    try:
+        result = subprocess.run(
+            ["osascript", "-e",
+             'POSIX path of (choose folder with prompt "Select folder to audit")'],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            return jsonify({"ok": False, "cancelled": True})
+        return jsonify({"ok": True, "path": result.stdout.strip()})
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "cancelled": True})
+
+@app.route("/audit/pick-output", methods=["POST"])
+def audit_pick_output():
+    try:
+        result = subprocess.run(
+            ["osascript", "-e",
+             'POSIX path of (choose file name with prompt "Save audit JSON as"'
+             ' default name "lrc-audit.json")'],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            return jsonify({"ok": False, "cancelled": True})
+        return jsonify({"ok": True, "path": result.stdout.strip()})
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "cancelled": True})
+
+@app.route("/load", methods=["POST"])
+def load_track():
+    """Load a track into the editor by its .lrc path (from the audit table)."""
+    data = request.get_json(force=True)
+    lrc_path = Path(data.get("lrc", "")).expanduser()
+    audio = _sibling_audio(lrc_path)
+    if audio is None:
+        return jsonify({"ok": False,
+                        "error": f"no audio file next to {lrc_path.name}"})
+    state["flac_path"] = audio
+    state["lrc_path"] = lrc_path
+    _init_draft()
+    print(f"\n    ↳ Audio : {audio}")
+    print(f"      LRC   : {lrc_path}", flush=True)
+    return jsonify({"ok": True})
 
 @app.route("/preview", methods=["POST"])
 def preview():
