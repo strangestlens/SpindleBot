@@ -63,8 +63,10 @@ finalize`.
 
 ## Commands
 
-Everything is `python3 -m spindlebot <command>`; all support `--json`. See
-[`HANDOFF.md`](HANDOFF.md#command-surface) for the full reference.
+Everything is `python3 -m spindlebot <command>`. The DB/sync commands
+(`finalize`, `inventory`, `review`, `sync`, `prune`, `delete`) support `--json`
+for structured output. See [`HANDOFF.md`](HANDOFF.md#command-surface) for the
+full reference.
 
 ```bash
 python3 -m spindlebot check                          # validate config + environment

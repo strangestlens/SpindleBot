@@ -168,9 +168,11 @@ Both must be green. CI runs the same two jobs on every push/PR.
 
 ## Command surface
 
-Every command is invoked as `python3 -m spindlebot <command>` and supports
-`--json`. The examples below abbreviate that to `spindlebot` — either substitute
-the full form, or add an alias (there is no `spindlebot` executable on PATH by
+Every command is invoked as `python3 -m spindlebot <command>`. The DB/sync
+commands (`finalize`, `inventory`, `review`, `sync`, `prune`, `delete`) support
+`--json` for structured output; the others print human-readable text only. The
+examples below abbreviate the invocation to `spindlebot` — either substitute the
+full form, or add an alias (there is no `spindlebot` executable on PATH by
 default; `setup.sh` does not install one):
 
 ```bash
