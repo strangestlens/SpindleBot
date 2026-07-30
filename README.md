@@ -16,7 +16,7 @@ and every **location** a copy lives.
 ```
 Import                                          Sync
 ────────────────────────────────               ──────────────────────────────
-CD → XLD → Import area                          DwRugged mounted
+CD → XLD → Import area                          Retention drive mounted
         │                                               │
   [.log written / folder dropped]                 launchd fires
         │                                       music-sync-rugged.sh
@@ -33,7 +33,7 @@ CD → XLD → Import area                          DwRugged mounted
   │ fetch art      │ CAA → iTunes fallback
   │ fetch lyrics   │ lrclib → .lrc / .nolrc
   │ promote        │ → Pending (only if lyric-complete)
-  │ archive log    │ → ~/Music/All Discs/
+  │ archive log    │ → archive dir (configurable)
   │ notify         │ macOS + Telegram
   └────────────────┘
 ```
@@ -52,14 +52,19 @@ finalize`.
 | `~/Library/Application Support/SpindleBot/Processing/` | In-flight albums; art + lyrics fetched here |
 | `~/Library/Application Support/SpindleBot/Pending/` | Lyric-complete albums awaiting distribution (formerly `~/Music/Library`) |
 | `~/Library/Application Support/SpindleBot/Duplicates/` | Rips already in the library are parked here, not stranded in Import |
-| `~/Music/All Discs/` | Archived XLD `.log` files |
-| `/Volumes/DwRugged/Music/Library/` | Retention library on the external drive |
+| *archive dir* | Archived XLD `.log` files — configurable via `core.archive_dir` |
+| *retention drive* | The permanent library — a configurable `[[destinations]]` target, e.g. `/Volumes/<RetentionDrive>/Music/Library/` |
 | `~/.config/spindlebot/config.toml` + `secrets.toml` | SpindleBot config + credentials |
 | `~/.config/spindlebot/spindlebot.db` | SpindleBot's content-identity + location DB |
 | `~/.config/beets/config.yaml` | beets config (`directory:` must match the Pending area) |
 | `~/.config/beets/library.db` | beets item DB |
 | `~/.config/beets/watcher.log` | import pipeline log |
 | `~/.config/beets/rugged-sync.log` | sync pipeline log |
+
+> The retention drive and archive dir are **configuration**, not fixed paths.
+> Set them in `config.toml` (`[[destinations]]` and `core.archive_dir`). Examples
+> throughout this repo use `DwRugged` — that's the author's specific external
+> drive; substitute your own.
 
 ## Commands
 
@@ -90,7 +95,7 @@ python3 -m spindlebot restart                        # restart the launchd agent
 |--------|------|
 | `music-watcher.sh` | fswatch daemon; fires `python3 -m spindlebot import` on a `.log` or folder drop (installed to `~/.local/bin/`) |
 | `music-import.sh` | shim → `python3 -m spindlebot import` |
-| `music-sync-rugged.sh` | content-addressed sync to DwRugged; fires on drive mount |
+| `music-sync-rugged.sh` | content-addressed sync to the retention drive; fires on drive mount |
 | `music-notify.sh` | legacy notify shim (superseded by `stages/notify.py`) |
 | `setup.sh` | one-time environment setup; installs the watcher and launchd agents |
 
@@ -127,7 +132,7 @@ The full, current gotcha list lives in [`CLAUDE.md`](CLAUDE.md#known-gotchas).
 `mpv` picks up `.lrc` sidecars automatically and shows them as subtitles over art:
 
 ```bash
-mpv "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
+mpv "/Volumes/<RetentionDrive>/Music/Library/Artist/Album/track.flac"
 ```
 
 ### lrc-editor — visual timestamp editor
@@ -135,7 +140,7 @@ mpv "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
 A standalone browser-based waveform editor for adjusting lyric timing:
 
 ```bash
-./lrc-editor "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
+./lrc-editor "/Volumes/<RetentionDrive>/Music/Library/Artist/Album/track.flac"
 ```
 
 - Loads the `.lrc` sidecar alongside the FLAC automatically (creates a working
