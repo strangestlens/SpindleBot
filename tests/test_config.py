@@ -461,6 +461,17 @@ class TestDestinations(unittest.TestCase):
             "export SPINDLEBOT_DESTINATION_PATH='/Volumes/DwRugged/Music/Library'",
             out.getvalue(),
         )
+        # Name + watch volume come from the SAME (first enabled local_drive)
+        # destination — the sync agent and its launchd trigger key off these,
+        # so nothing is hardcoded to a particular drive.
+        self.assertIn(
+            "export SPINDLEBOT_DESTINATION_NAME='DwRugged'",
+            out.getvalue(),
+        )
+        self.assertIn(
+            "export SPINDLEBOT_WATCH_VOLUME='/Volumes/DwRugged'",
+            out.getvalue(),
+        )
         self.assertNotIn("b2:my-bucket", out.getvalue())
 
     def test_retention_path_none_without_local_drive(self):

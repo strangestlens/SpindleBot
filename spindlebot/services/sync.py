@@ -75,8 +75,8 @@ def execute_pending(
     """Execute acknowledged COPY actions (copy → verify → record presence).
 
     Reads only acknowledged, not-yet-executed rows. `dest_location_id` scopes to
-    a single destination — so the DwRugged mount agent only executes the work
-    planned for DwRugged, not queued copies for an unmounted DAP. Touches bytes
+    a single destination — so the retention mount agent only executes the work
+    planned for that destination, not queued copies for an unmounted DAP. Touches bytes
     only via copy_fn, and never deletes anything. When `progress` is given, fires
     a ProgressEvent per action.
 

@@ -1380,7 +1380,7 @@ AUDIT_HTML = r"""<!DOCTYPE html>
 
 <div id="controls">
   <label>Audit folder</label>
-  <input id="library" placeholder="/Volumes/DwRugged/Music/Library" spellcheck="false">
+  <input id="library" placeholder="/Volumes/YourDrive/Music/Library" spellcheck="false">
   <button class="picker" id="pick-library">Browse…</button>
   <label>Output JSON</label>
   <input id="output" placeholder="~/Documents/lrc-audit.json" spellcheck="false">

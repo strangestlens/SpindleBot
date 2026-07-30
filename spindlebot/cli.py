@@ -44,6 +44,32 @@ def _retention_path(destinations) -> Path | None:
     )
 
 
+def _retention_name(destinations) -> str | None:
+    """Name of the first enabled local_drive destination (same selection as
+    `_retention_path`), or None. This is the `[[destinations]]` name the sync
+    script and `spindlebot review/sync --location` key off — nothing is
+    hardcoded to any one drive."""
+    return next(
+        (d.name for d in destinations
+         if d.enabled and d.type == "local_drive"),
+        None,
+    )
+
+
+def _watch_volume(path: Path | None) -> str | None:
+    """The volume mount point to watch for a retention path, e.g.
+    `/Volumes/RetentionDrive/Music/Library` → `/Volumes/RetentionDrive`. launchd fires the
+    sync agent when this path appears. Returns None for a path not under
+    /Volumes (nothing to watch). Best-effort: a mounted volume always sits at
+    `/Volumes/<name>`."""
+    if path is None:
+        return None
+    parts = path.parts
+    if len(parts) >= 3 and parts[1] == "Volumes":
+        return str(Path(parts[0], parts[1], parts[2]))
+    return None
+
+
 # ── check ─────────────────────────────────────────────────────────────────────
 
 def cmd_check(cfg) -> int:
@@ -126,13 +152,16 @@ def cmd_check(cfg) -> int:
 
 def cmd_config_shell(cfg) -> int:
     """Emit shell-safe exports for every config value needed by shell scripts."""
-    # Primary destination path — the first enabled LOCAL_DRIVE destination,
-    # the same selection as ImportConfig.retention_path. music-sync-rugged.sh
-    # uses this as REMOTE for its `[ ! -d "$REMOTE" ]` mount check, so an
-    # rclone remote here would make the script silently no-op even with the
-    # drive mounted.
+    # Primary destination path + name — the first enabled LOCAL_DRIVE
+    # destination, the same selection as ImportConfig.retention_path. music-sync.sh
+    # uses the path as REMOTE for its `[ ! -d "$REMOTE" ]` mount check (an rclone
+    # remote here would make the script silently no-op even with the drive
+    # mounted) and the name for `review/sync --location`. WATCH_VOLUME is the
+    # `/Volumes/<name>` mount setup.sh wires into the launchd agent's WatchPaths.
     retention = _retention_path(cfg.destinations)
     dest_path = str(retention) if retention is not None else ""
+    dest_name = _retention_name(cfg.destinations) or ""
+    watch_volume = _watch_volume(retention) or ""
 
     exports = {
         "SPINDLEBOT_PENDING_DIR":      str(cfg.core.pending_dir),
@@ -147,6 +176,8 @@ def cmd_config_shell(cfg) -> int:
         "SPINDLEBOT_BEETS_CONFIG":     str(cfg.tools.beets_config),
         "SPINDLEBOT_PIPELINE_DIR":     str(cfg.pipeline_dir),
         "SPINDLEBOT_DESTINATION_PATH": dest_path,
+        "SPINDLEBOT_DESTINATION_NAME": dest_name,
+        "SPINDLEBOT_WATCH_VOLUME":     watch_volume,
         "SPINDLEBOT_TELEGRAM_TOKEN":   cfg.secrets.telegram.bot_token,
         "SPINDLEBOT_TELEGRAM_CHAT_ID": cfg.secrets.telegram.chat_id,
         "SPINDLEBOT_LYRICS_DELAY":     str(cfg.lyrics.request_delay_seconds),
@@ -312,7 +343,7 @@ def cmd_inventory(cfg, args: list[str]) -> int:
     Read-only with respect to the audio files — it never moves or edits them.
 
     With no flag, scans the local Pending area. With `--location <name>`, scans
-    that registered location once it's mounted and identified (e.g. DwRugged).
+    that registered location once it's mounted and identified (e.g. the retention drive).
     """
     import json as _json
     import time
@@ -448,7 +479,7 @@ def cmd_review(cfg, args: list[str]) -> int:
         if target is None:
             return fail(f"Unknown location: {location_name}")
         # Any other location can source a copy — the authoring library or another
-        # retention location (so a DAP can be filled from DwRugged after prune).
+        # retention location (so a DAP can be filled from the retention drive after prune).
         sources = [loc for loc in location_repo.list_all(conn) if loc.id != target.id]
         progress_cb, reporter = _make_progress(args, f"review {target.name}")
         result = reconcile_location(
@@ -727,7 +758,8 @@ def main(argv: list[str] | None = None) -> int:
             spindlebot_cfg=cfg,
             auto_sync_on_import=cfg.core.auto_sync_on_import,
             retention_path=_retention_path(cfg.destinations),
-            sync_script=cfg.pipeline_dir / "music-sync-rugged.sh",
+            destination_name=_retention_name(cfg.destinations),
+            sync_script=cfg.pipeline_dir / "music-sync.sh",
         )
         print(f"💿 {Path(trigger).name}")
         runner = ImportRunner(import_cfg, echo=lambda msg: print(f"  {msg}"))
@@ -819,7 +851,7 @@ def main(argv: list[str] | None = None) -> int:
         import subprocess
         agents = [
             "com.strangestlens.music-watcher",
-            "com.strangestlens.music-sync-rugged",
+            "com.strangestlens.music-sync",
         ]
         uid = os.getuid()
         for agent in agents:

@@ -13,13 +13,13 @@
 import_dir     = "~/Library/Application Support/SpindleBot/Import"
 processing_dir = "~/Library/Application Support/SpindleBot/Processing"
 pending_dir    = "~/Library/Application Support/SpindleBot/Pending"
-log_dir     = "~/.config/beets"    # watcher.log and rugged-sync.log land here
+log_dir     = "~/.config/beets"    # watcher.log and music-sync.log land here
 archive_dir = "~/Library/Application Support/SpindleBot/Archive"  # XLD .log files archived here after import
 duplicates_dir = "~/Library/Application Support/SpindleBot/Duplicates"  # rips already in the library are moved here (never stranded in Import)
 # After a successful import, automatically run the content-addressed mount-sync
-# to push new albums to DwRugged. Default false: imports finish faster and just
+# to push new albums to the retention drive. Default false: imports finish faster and just
 # log a hint to sync manually. true trades slower imports for hands-off syncing
-# (only fires when DwRugged is mounted; the sync self-guards otherwise).
+# (only fires when the retention drive is mounted; the sync self-guards otherwise).
 # Env override: SPINDLEBOT_AUTO_SYNC_ON_IMPORT
 auto_sync_on_import = false
 
@@ -44,14 +44,14 @@ min_size_px = 500
 
 # -- Sync destinations ---------------------------------------------------------
 # Add as many [[destinations]] blocks as you like.
-# The first enabled destination is used by music-sync-rugged.sh.
+# The first enabled local_drive destination is the retention target used by music-sync.sh.
 # type = "local_drive"  -> rsync to a mounted volume
 # type = "rclone"       -> rclone to any configured remote (B2, S3, SFTP, etc.)
 
 [[destinations]]
-name    = "DwRugged"
+name    = "MyDrive"
 type    = "local_drive"
-path    = "/Volumes/DwRugged/Music/Library"
+path    = "/Volumes/MyDrive/Music/Library"
 enabled = true
 
 # [[destinations]]

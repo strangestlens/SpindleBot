@@ -85,10 +85,13 @@ class ImportConfig:
     spindlebot_cfg: Optional[object] = None
     # Auto-sync (opt-in): after a successful import, fire the mount-sync flow.
     auto_sync_on_import: bool = False
-    # The retention destination path (e.g. /Volumes/DwRugged/Music/Library);
+    # The retention destination path (e.g. the enabled local_drive dest);
     # its existence is the "is the drive mounted?" check. None → never mounted.
     retention_path: Optional[Path] = None
-    # The self-guarding sync script; defaults to pipeline_dir/music-sync-rugged.sh.
+    # The retention destination's configured name, used in user-facing sync
+    # messages. Falls back to "the retention drive" when unset.
+    destination_name: Optional[str] = None
+    # The self-guarding sync script; defaults to pipeline_dir/music-sync.sh.
     sync_script: Optional[Path] = None
 
 
@@ -248,7 +251,8 @@ class ImportRunner:
             title = "Rip complete" if has_log else "Import complete"
             notify_result = notify(
                 title,
-                f"{result.artist_album} — reply 'sync' to move to DwRugged",
+                f"{result.artist_album} — reply 'sync' to move to "
+                f"{cfg.destination_name or 'the retention drive'}",
                 cfg.spindlebot_cfg,
             )
             if notify_result.macos_error:
@@ -387,7 +391,7 @@ class ImportRunner:
     def _default_sync_runner(self, script: Path) -> int:
         """Fire the self-guarding mount-sync script; return its exit code.
 
-        The script logs to rugged-sync.log itself, but an early bootstrap or
+        The script logs to music-sync.log itself, but an early bootstrap or
         config error can die before that log is ever opened — so on a nonzero
         exit, the captured stderr (or stdout) tail is the only trace of why.
         Logged to the file only (echo=False) to keep the terminal uncluttered.
@@ -408,12 +412,13 @@ class ImportRunner:
         succeeded, so a sync problem here is logged, not promoted to a failure.
         """
         cfg = self.cfg
+        dest = cfg.destination_name or "the retention drive"
         # The same resolved entrypoint the auto-sync branch invokes — the hint
         # must point at it too, not a hard-coded shim path the user may not have.
-        script = cfg.sync_script or (Path(cfg.pipeline_dir) / "music-sync-rugged.sh")
+        script = cfg.sync_script or (Path(cfg.pipeline_dir) / "music-sync.sh")
         if not cfg.auto_sync_on_import:
             self._log(
-                f"ℹ️  Not auto-syncing. Run {script} to push to DwRugged now, "
+                f"ℹ️  Not auto-syncing. Run {script} to push to {dest} now, "
                 "or set core.auto_sync_on_import = true."
             )
             return
@@ -424,19 +429,19 @@ class ImportRunner:
         retention = cfg.retention_path
         if retention is None or not retention.exists():
             self._log(
-                "auto-sync on, but DwRugged isn't mounted — run the sync when "
+                f"auto-sync on, but {dest} isn't mounted — run the sync when "
                 "you reconnect it."
             )
             return
 
-        self._log("🔄 auto-syncing to DwRugged…")
+        self._log(f"🔄 auto-syncing to {dest}…")
         try:
             rc = self._sync_runner(script)
         except Exception as exc:
             self._log(f"auto-sync could not start: {exc}")
             return
         if rc != 0:
-            self._log(f"auto-sync exited {rc} — check rugged-sync.log")
+            self._log(f"auto-sync exited {rc} — check music-sync.log")
         else:
             self._log("auto-sync finished ✓", echo=False)
 
