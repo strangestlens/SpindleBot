@@ -5,9 +5,9 @@
 #   1. Creates ~/.config/spindlebot/
 #   2. Copies config/secrets example files if they don't already exist
 #   3. Writes ~/.config/spindlebot/bootstrap.sh (pipeline dir baked in)
-#   4. Migrates legacy ~/Music/Staging + ~/Music/Library into the new
+#   4. Installs tomli if Python < 3.11 (needed before config loads)
+#   5. Migrates legacy ~/Music/Staging + ~/Music/Library into the new
 #      Import/Pending working areas (safe + idempotent; never deletes old dirs)
-#   5. Installs tomli if Python < 3.11
 #   6. Installs music-watcher.sh to ~/.local/bin/
 #   7. Installs launchd plists to ~/Library/LaunchAgents/
 #   8. Runs `python -m spindlebot check` so you can see what needs filling in
@@ -69,7 +69,22 @@ BOOTSTRAP
 chmod +x "$CONFIG_DIR/bootstrap.sh"
 echo "Wrote $CONFIG_DIR/bootstrap.sh"
 
-# ── 4. Migrate legacy working dirs into the new Import/Pending areas ──────────
+# ── 4. Install tomli if needed (Python < 3.11) ───────────────────────────────
+# MUST run before any `python -m spindlebot ...` below: config loading imports
+# tomllib, which is stdlib only on 3.11+. Without tomli on older Python,
+# resolve_cfg would fail silently and the migrate + mkdir steps would no-op,
+# leaving `spindlebot check` failing on a fresh setup.
+# Numeric version test via Python's exit code — a shell string compare like
+# `"(3, 9)" < "(3, 11)"` sorts lexicographically and would wrongly skip tomli
+# on 3.8/3.9.
+if ! "$PYTHON" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"; then
+  if ! "$PYTHON" -c "import tomli" 2>/dev/null; then
+    echo "Installing tomli for Python < 3.11..."
+    "$PYTHON" -m pip install tomli --quiet --break-system-packages
+  fi
+fi
+
+# ── 5. Migrate legacy working dirs + ensure the working areas exist ──────────
 # Safe + idempotent: creates the new dirs, relocates any contents out of the old
 # default locations, reconciles beets DB paths for the moved Pending area, and
 # never deletes the old top-level dirs. Logic lives in a sourceable lib so it is
@@ -85,19 +100,13 @@ migrate_work_dirs \
   "$HOME/Music/Staging" \
   "$HOME/Music/Library"
 
-# Processing area has no legacy predecessor to migrate — just ensure it exists.
+# Processing + Archive have no legacy dir to migrate — just ensure they exist so
+# `spindlebot check` passes on a fresh setup. (Archive's prior default was
+# ~/Music/All Discs; that old location is intentionally NOT auto-migrated.)
 PROCESSING_DIR="$(resolve_cfg core.processing_dir)"
 [ -n "$PROCESSING_DIR" ] && mkdir -p "$PROCESSING_DIR"
-
-# ── 5. Install tomli if needed ────────────────────────────────────────────────
-# (done before watcher install so bootstrap.sh is ready when watcher starts)
-PY_VERSION=$("$PYTHON" -c "import sys; print(sys.version_info[:2])")
-if [[ "$PY_VERSION" < "(3, 11)" ]]; then
-  if ! "$PYTHON" -c "import tomli" 2>/dev/null; then
-    echo "Installing tomli for Python < 3.11..."
-    "$PYTHON" -m pip install tomli --quiet --break-system-packages
-  fi
-fi
+ARCHIVE_DIR="$(resolve_cfg core.archive_dir)"
+[ -n "$ARCHIVE_DIR" ] && mkdir -p "$ARCHIVE_DIR"
 
 # ── 6. Install music-watcher.sh ───────────────────────────────────────────────
 mkdir -p "$HOME/.local/bin"

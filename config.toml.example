@@ -14,7 +14,7 @@ import_dir     = "~/Library/Application Support/SpindleBot/Import"
 processing_dir = "~/Library/Application Support/SpindleBot/Processing"
 pending_dir    = "~/Library/Application Support/SpindleBot/Pending"
 log_dir     = "~/.config/beets"    # watcher.log and rugged-sync.log land here
-archive_dir = "~/Music/All Discs"  # XLD .log files archived here after import
+archive_dir = "~/Library/Application Support/SpindleBot/Archive"  # XLD .log files archived here after import
 duplicates_dir = "~/Library/Application Support/SpindleBot/Duplicates"  # rips already in the library are moved here (never stranded in Import)
 # After a successful import, automatically run the content-addressed mount-sync
 # to push new albums to DwRugged. Default false: imports finish faster and just

@@ -184,7 +184,10 @@ def load() -> SpindleBotConfig:
                   c.get("library_dir", "~/Library/Application Support/SpindleBot/Pending"))
         ),
         log_dir=_expand(c.get("log_dir", "~/.config/beets")),
-        archive_dir=_expand(c.get("archive_dir", "~/Music/All Discs")),
+        archive_dir=_expand(
+            c.get("archive_dir",
+                  "~/Library/Application Support/SpindleBot/Archive")
+        ),
         duplicates_dir=_expand(
             os.environ.get(
                 "SPINDLEBOT_DUPLICATES_DIR",
