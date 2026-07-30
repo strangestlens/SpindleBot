@@ -113,25 +113,51 @@ def test_audit_run_validates_paths(editor, tmp_path):
 
 def test_load_track_from_audit_row(editor, library):
     client = editor.app.test_client()
+    editor._save_ui_state(audit_library=str(library))
     lrc = library / "Artist" / "Album" / "01 Bad.lrc"
     assert client.post("/load", json={"lrc": str(lrc)}).get_json()["ok"] is True
-    assert editor.state["flac_path"] == lrc.with_suffix(".flac")
-    assert editor.state["lrc_path"] == lrc
+    assert editor.state["flac_path"] == lrc.resolve().with_suffix(".flac")
+    assert editor.state["lrc_path"] == lrc.resolve()
     meta = client.get("/meta").get_json()
     assert meta["filename"] == "01 Bad.flac"
 
 
 def test_load_track_without_audio(editor, tmp_path):
+    editor._save_ui_state(audit_library=str(tmp_path))
     lrc = tmp_path / "orphan.lrc"
     lrc.write_text(SUSPICIOUS, encoding="utf-8")
     j = editor.app.test_client().post("/load", json={"lrc": str(lrc)}).get_json()
     assert j["ok"] is False and "no audio file" in j["error"]
 
 
+def test_load_requires_an_audited_library(editor, library):
+    # without a recorded audit root there is nothing to validate against
+    lrc = library / "Artist" / "Album" / "01 Bad.lrc"
+    j = editor.app.test_client().post("/load", json={"lrc": str(lrc)}).get_json()
+    assert j["ok"] is False and "run an audit first" in j["error"]
+
+
+def test_load_rejects_paths_outside_audited_library(editor, tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    editor._save_ui_state(audit_library=str(lib))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "song.lrc").write_text(SUSPICIOUS, encoding="utf-8")
+    (elsewhere / "song.flac").write_bytes(b"fake audio")
+
+    j = editor.app.test_client().post(
+        "/load", json={"lrc": str(elsewhere / "song.lrc")}
+    ).get_json()
+    assert j["ok"] is False and "outside the audited library" in j["error"]
+    assert editor.state["lrc_path"] is None
+
+
 def test_load_rejects_non_lrc_and_missing_paths(editor, tmp_path):
     # /commit writes to state["lrc_path"], so /load must never accept a
     # path that isn't an existing .lrc
     client = editor.app.test_client()
+    editor._save_ui_state(audit_library=str(tmp_path))
     victim = tmp_path / "important.txt"
     victim.write_text("do not overwrite", encoding="utf-8")
     j = client.post("/load", json={"lrc": str(victim)}).get_json()
@@ -144,6 +170,7 @@ def test_load_rejects_non_lrc_and_missing_paths(editor, tmp_path):
 
 def test_load_rejects_symlinked_lrc(editor, tmp_path):
     # a symlinked .lrc would redirect the /commit write to the link target
+    editor._save_ui_state(audit_library=str(tmp_path))
     victim = tmp_path / "important.txt"
     victim.write_text("do not overwrite", encoding="utf-8")
     link = tmp_path / "sneaky.lrc"

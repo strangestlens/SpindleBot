@@ -1638,7 +1638,7 @@ def ai_arrange():
     if not AI_VENV_PY.exists():
         return jsonify({"ok": False,
                         "error": "AI venv not found — run setup-ai.sh first"})
-    data = request.get_json(force=True)
+    data = request.get_json()
     lines = [ln.strip() for ln in data.get("lines", []) if ln and ln.strip()]
     if not lines:
         return jsonify({"ok": False, "error": "No lyric text to align"})
@@ -1685,7 +1685,7 @@ def audit_saved():
 def audit_run():
     if audit_job["thread"] is not None and audit_job["thread"].is_alive():
         return jsonify({"ok": False, "error": "audit already running"}), 409
-    data = request.get_json(force=True)
+    data = request.get_json()
     library = Path(data.get("library", "")).expanduser()
     output = Path(data.get("output", "")).expanduser()
     if not library.is_dir():
@@ -1740,17 +1740,25 @@ def audit_pick_output():
 @app.route("/load", methods=["POST"])
 def load_track():
     """Load a track into the editor by its .lrc path (from the audit table)."""
-    data = request.get_json(force=True)
+    data = request.get_json()
     lrc_path = Path(data.get("lrc", "")).expanduser()
     # /commit later writes to state["lrc_path"] — never accept a path that
-    # isn't an existing .lrc, and never write through a symlink (it would
-    # redirect the commit to wherever the link points)
+    # isn't an existing .lrc, never write through a symlink (it would
+    # redirect the commit to wherever the link points), and only accept
+    # files inside the audited library (the audit table is the sole caller)
+    library = _load_ui_state().get("audit_library")
+    if not library:
+        return jsonify({"ok": False,
+                        "error": "no audited library on record — run an audit first"})
     if lrc_path.suffix != ".lrc" or not lrc_path.exists():
         return jsonify({"ok": False, "error": f"not an existing .lrc: {lrc_path}"})
     if lrc_path.is_symlink() or not lrc_path.is_file():
         return jsonify({"ok": False,
                         "error": f"refusing symlinked or non-regular .lrc: {lrc_path}"})
     lrc_path = lrc_path.resolve()
+    if not lrc_path.is_relative_to(Path(library).expanduser().resolve()):
+        return jsonify({"ok": False,
+                        "error": f"path outside the audited library: {lrc_path}"})
     audio = _sibling_audio(lrc_path)
     if audio is None:
         return jsonify({"ok": False,
