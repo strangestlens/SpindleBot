@@ -134,7 +134,7 @@ spindlebot/
 ### CLI
 
 ```bash
-spindlebot start          # Start all watchers (replaces music-pipeline start)
+spindlebot start          # Start all watchers
 spindlebot stop
 spindlebot status
 
@@ -164,7 +164,7 @@ Target: 80%+ coverage on the `stages/` and `lyrics/` modules. The watchers and C
 
 ### Shell Scripts → Wrappers Only
 
-`music-pipeline`, `music-import.sh`, `music-sync-rugged.sh` become thin stubs that call `python -m spindlebot`. Keep them during the transition so launchd plists don't need to change immediately.
+`music-import.sh`, `music-sync-rugged.sh` become thin stubs that call `python -m spindlebot`. Keep them during the transition so launchd plists don't need to change immediately.
 
 ---
 
