@@ -41,6 +41,9 @@ class LyricObservation:
     uuid: str            # STABLE vclock actor key — survives a location rename
     name: str            # human-readable, for messaging/logs only (never causality)
     sha: str
+    observed_utc: int    # when THIS location's copy was last confirmed by a scan
+                         # (its sidecar_presence.observed_utc) — not the reconcile
+                         # run time; the target is fresh, other locations may be old
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,11 @@ def reconcile_doc(
     no heads (every sha already matches a recorded version). Deterministic: the
     observations are processed in location_id order so head assignment for a fresh
     divergence is reproducible.
+
+    `now` stamps versions minted this pass (when SpindleBot recorded them). Each
+    location's version-presence, by contrast, is stamped with that observation's
+    own `observed_utc` (when its .lrc was last confirmed by a scan) — consistent
+    with the other presence tables and honest for cached, non-target locations.
     """
     doc = lyric_repo.ensure_doc(conn, audio_id, now)
 
@@ -137,7 +145,7 @@ def reconcile_doc(
 
         lyric_version_presence_repo.upsert(
             conn, doc_id=doc.id, location_id=obs.location_id,
-            version_id=version.id, observed_utc=now,
+            version_id=version.id, observed_utc=obs.observed_utc,
         )
         resolved.append((obs, version.id))
 

@@ -268,13 +268,13 @@ def test_reconcile_records_a_finished_run(conn):
 
 # ── lyric divergence detection ────────────────────────────────────────────────
 
-def _lrc(conn, audio_id, loc_id, file_sha):
+def _lrc(conn, audio_id, loc_id, file_sha, *, observed_utc=0):
     """Attach the track's .lrc sidecar present at a location with a per-copy sha."""
     sc = sidecar_repo.upsert(conn, parent_kind=SidecarParentKind.TRACK,
                              parent_id=audio_id, role=SidecarRole.LRC,
                              sha256="canon", now=0)
     sidecar_presence_repo.set_presence(conn, sidecar_id=sc.id, location_id=loc_id,
-                                       present=True, observed_utc=0,
+                                       present=True, observed_utc=observed_utc,
                                        file_sha256=file_sha, rel_path=f"{audio_id}.lrc")
     return sc
 
@@ -420,6 +420,24 @@ def test_behind_location_is_not_a_conflict(conn):
     # rugged's held version is strictly older than the head → behind, not conflict
     rugged_v = lyric_version_presence_repo.get(conn, doc.id, rugged.id)
     assert rugged_v.version_id != head.id
+
+
+def test_version_presence_records_source_scan_time_not_reconcile_now(conn):
+    # A source location's .lrc was last confirmed by a scan long before this
+    # reconcile runs. Its lyric_version_presence.observed_utc must reflect that
+    # real scan time (from sidecar_presence), not the reconcile `now` — otherwise
+    # a cached, stale copy would look freshly confirmed.
+    from spindlebot.db.repositories import lyric_version_presence_repo
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, rugged.id, "sha-1", observed_utc=2000)  # target, fresh
+    _lrc(conn, x.id, pending.id, "sha-1", observed_utc=100)  # source, long stale
+    _scan(conn, rugged.id)
+    reconcile_location(conn, target=rugged, source_locations=[pending], now=2000)
+
+    doc = lyric_repo.get_doc(conn, x.id)
+    assert lyric_version_presence_repo.get(conn, doc.id, rugged.id).observed_utc == 2000
+    assert lyric_version_presence_repo.get(conn, doc.id, pending.id).observed_utc == 100
 
 
 def test_conflict_not_proposed_for_target_not_party_to_divergence(conn):

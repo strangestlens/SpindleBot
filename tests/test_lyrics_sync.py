@@ -33,10 +33,10 @@ def _audio(conn, identity="a" * 32):
 _UUID_BY_ID = {1: "a", 2: "b"}  # matches the locations created in the `conn` fixture
 
 
-def _obs(location_id, name, sha):
+def _obs(location_id, name, sha, observed_utc=0):
     """A vclock actor keyed on the STABLE uuid; `name` is display-only."""
     return LyricObservation(location_id=location_id, uuid=_UUID_BY_ID[location_id],
-                            name=name, sha=sha)
+                            name=name, sha=sha, observed_utc=observed_utc)
 
 
 def _held(lineage, location_id):
@@ -201,3 +201,20 @@ def test_rename_between_edits_stays_linear_not_concurrent(conn):
                                      vclock.from_json(old.vclock_json))
     # actor key is the stable uuid "a", never the mutable display name
     assert set(vclock.from_json(head.vclock_json)) == {"a"}
+
+
+# ── version-presence records the per-location scan time, not the reconcile run ──
+
+def test_presence_observed_utc_is_per_observation_not_reconcile_now(conn):
+    # A is fresh (observed at 900), B is a cached copy last confirmed long ago
+    # (observed at 100); the reconcile itself runs at 900. Each location's
+    # presence must carry ITS OWN scan time — consistent with other presence
+    # tables — so B's staleness isn't overstated as "confirmed at 900".
+    a = _audio(conn)
+    lineage = lyrics_sync.reconcile_doc(
+        conn, audio_id=a.id, now=900,
+        observations=[_obs(1, "A", "s1", observed_utc=900),
+                      _obs(2, "B", "s1", observed_utc=100)],
+    )
+    assert lyric_version_presence_repo.get(conn, lineage.doc_id, 1).observed_utc == 900
+    assert lyric_version_presence_repo.get(conn, lineage.doc_id, 2).observed_utc == 100

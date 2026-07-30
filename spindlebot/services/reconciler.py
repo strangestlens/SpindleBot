@@ -57,14 +57,17 @@ class ReconcileResult:
     target_scanned: bool = True  # False → target never inventoried; planning skipped
 
 
-def _present_lrc(conn, location_id: int) -> dict[int, tuple[str | None, int]]:
-    """Present .lrc sidecars at a location: sidecar_id -> (this copy's sha, audio_id)."""
-    out: dict[int, tuple[str | None, int]] = {}
+def _present_lrc(conn, location_id: int) -> dict[int, tuple[str | None, int, int]]:
+    """Present .lrc sidecars at a location.
+
+    sidecar_id -> (this copy's sha, audio_id, when this copy was last scanned).
+    """
+    out: dict[int, tuple[str | None, int, int]] = {}
     for p in sidecar_presence_repo.list_for_location(conn, location_id, present=True):
         sc = sidecar_repo.get_by_id(conn, p.sidecar_id)
         if (sc is not None and sc.role == SidecarRole.LRC
                 and sc.parent_kind == SidecarParentKind.TRACK):
-            out[p.sidecar_id] = (p.file_sha256, sc.parent_id)
+            out[p.sidecar_id] = (p.file_sha256, sc.parent_id, p.observed_utc)
     return out
 
 
@@ -79,12 +82,12 @@ def _lyric_observations(
     """
     obs: dict[int, list[LyricObservation]] = {}
     for loc in locations:
-        for _sid, (sha, audio_id) in _present_lrc(conn, loc.id).items():
+        for _sid, (sha, audio_id, observed_utc) in _present_lrc(conn, loc.id).items():
             if not sha:
                 continue
             obs.setdefault(audio_id, []).append(
                 LyricObservation(location_id=loc.id, uuid=loc.uuid,
-                                 name=loc.name, sha=sha)
+                                 name=loc.name, sha=sha, observed_utc=observed_utc)
             )
     return obs
 
