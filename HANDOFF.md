@@ -105,7 +105,7 @@ via Navidrome, a Mac app) lives in [`ROADMAP.md`](ROADMAP.md).
 ### 1. Clone and run setup
 
 ```bash
-git clone spindlebot:strangestlens/SpindleBot.git ~/Music/music-pipeline
+git clone https://github.com/strangestlens/SpindleBot.git ~/Music/music-pipeline
 cd ~/Music/music-pipeline
 ./setup.sh
 ```
@@ -120,7 +120,7 @@ cd ~/Music/music-pipeline
 3. Creates the Import / Processing / Pending working directories.
 4. Installs `music-watcher.sh` → `~/.local/bin/`.
 5. Installs and (re)loads the two launchd agents into `~/Library/LaunchAgents/`.
-6. Runs `spindlebot check`.
+6. Runs `python3 -m spindlebot check`.
 
 ### 2. Fill in config and secrets
 
@@ -168,7 +168,14 @@ Both must be green. CI runs the same two jobs on every push/PR.
 
 ## Command surface
 
-Everything is `python3 -m spindlebot <command>`. Every command supports `--json`.
+Every command is invoked as `python3 -m spindlebot <command>` and supports
+`--json`. The examples below abbreviate that to `spindlebot` — either substitute
+the full form, or add an alias (there is no `spindlebot` executable on PATH by
+default; `setup.sh` does not install one):
+
+```bash
+alias spindlebot='python3 -m spindlebot'
+```
 
 ```bash
 # --- inspection / setup ---
@@ -266,9 +273,9 @@ These are the ones most likely to trip up a new operator. The full list is in
   report `disctotal=2` for single-disc DualDiscs/deluxe editions; the runner
   patches this from the actual ripped disc count. Use `import --force` to bypass
   the wait for a genuinely partial set.
-- **`multidisc` flex attribute** must be INSERTed via `sqlite3` directly — `beet
-  modify multidisc=` deletes the row and makes the template render the literal
-  string `"$multidisc"`. Handled in `runner.py`; don't change the approach.
+- **`multidisc` flex attribute** must be INSERTed via `sqlite3` directly — `beet modify multidisc=`
+  deletes the row and makes the template render the literal string `"$multidisc"`.
+  Handled in `runner.py`; don't change the approach.
 - **Identity is decoded-audio MD5** (FLAC STREAMINFO `md5_signature`), falling back
   to whole-file sha256. Per-copy sha256 is integrity, never identity.
 

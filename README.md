@@ -86,14 +86,14 @@ python3 -m spindlebot restart                        # restart the launchd agent
 
 | Script | Role |
 |--------|------|
-| `music-watcher.sh` | fswatch daemon; fires `spindlebot import` on a `.log` or folder drop (installed to `~/.local/bin/`) |
-| `music-import.sh` | shim → `spindlebot import` |
+| `music-watcher.sh` | fswatch daemon; fires `python3 -m spindlebot import` on a `.log` or folder drop (installed to `~/.local/bin/`) |
+| `music-import.sh` | shim → `python3 -m spindlebot import` |
 | `music-sync-rugged.sh` | content-addressed sync to DwRugged; fires on drive mount |
 | `music-notify.sh` | legacy notify shim (superseded by `stages/notify.py`) |
 | `setup.sh` | one-time environment setup; installs the watcher and launchd agents |
 
 The daemons run under launchd: `com.strangestlens.music-watcher` (import) and
-`com.strangestlens.music-sync-rugged` (sync). Bounce them with `spindlebot restart`.
+`com.strangestlens.music-sync-rugged` (sync). Bounce them with `python3 -m spindlebot restart`.
 
 ## Beet path template
 
@@ -109,10 +109,10 @@ Multi-disc is determined by the **actual ripped disc count**, not MusicBrainz
 
 - **Apostrophes in paths** break BSD `xargs` — always use `while IFS= read -r`.
 - **posttag must run last** — beet re-adds alias tags on write; posttag cleans them.
-- **`multidisc` flex attr** must be INSERTed via `sqlite3`; `beet modify
-  multidisc=` deletes the row and breaks the template. Handled in `runner.py`.
+- **`multidisc` flex attr** must be INSERTed via `sqlite3`; `beet modify multidisc=`
+  deletes the row and breaks the template. Handled in `runner.py`.
 - **Partial disc imports** (only disc 1 of 2) wait forever for disc 2 — use
-  `spindlebot import --force` to bypass, or patch `disctotal` in the FLACs first.
+  `python3 -m spindlebot import --force` to bypass, or patch `disctotal` in the FLACs first.
 - **FLAC lyrics tags** are lowercase and ignored by some DAPs (e.g. Snowsky) — the
   pipeline writes `.lrc` sidecar files instead.
 
