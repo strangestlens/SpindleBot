@@ -218,3 +218,32 @@ def test_presence_observed_utc_is_per_observation_not_reconcile_now(conn):
     )
     assert lyric_version_presence_repo.get(conn, lineage.doc_id, 1).observed_utc == 900
     assert lyric_version_presence_repo.get(conn, lineage.doc_id, 2).observed_utc == 100
+
+
+# ── classification is by true vclock relation, not `not is_behind` ─────────────
+
+def test_version_dominating_a_stale_head_is_not_flagged_concurrent(conn):
+    # Craft the inconsistent state the head invariants normally prevent: a doc
+    # whose head points at an OLDER version while a location holds one that
+    # strictly dominates it. Classification must decide by vclock.concurrent, so
+    # a dominating ("ahead") version reads as neither behind nor concurrent —
+    # never a spurious conflict.
+    a = _audio(conn)
+    doc = lyric_repo.ensure_doc(conn, a.id, now=0)
+    v_old = lyric_repo.add_version(conn, doc_id=doc.id, sha256="old",
+                                   vclock_json=vclock.to_json({"a": 1}),
+                                   source="scan", now=0)
+    v_new = lyric_repo.add_version(conn, doc_id=doc.id, sha256="new",
+                                   vclock_json=vclock.to_json({"a": 1, "b": 1}),
+                                   source="scan", now=0)
+    assert vclock.strictly_dominates(vclock.from_json(v_new.vclock_json),
+                                     vclock.from_json(v_old.vclock_json))
+    lyric_repo.set_head(conn, doc.id, v_old.id, now=0)  # head deliberately stale
+
+    lineage = lyrics_sync.reconcile_doc(
+        conn, audio_id=a.id, now=100, observations=[_obs(1, "A", "new")],
+    )
+    held = _held(lineage, 1)
+    assert held.version_id == v_new.id
+    assert not held.is_concurrent and not held.is_behind
+    assert lineage.concurrent == []

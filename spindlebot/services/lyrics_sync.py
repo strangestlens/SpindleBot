@@ -161,8 +161,12 @@ def reconcile_doc(
         else:
             v = lyric_repo.get_version(conn, version_id)
             v_vc = vclock.from_json(v.vclock_json) if v is not None else {}
+            # Decide by the true vclock relation (the lineage model's definition),
+            # not `not is_behind`: a version that DOMINATES a stale head — an
+            # inconsistent state the head invariants normally prevent — is neither
+            # behind nor concurrent, and must not read as a spurious conflict.
             is_behind = head is not None and vclock.dominates(head_vc, v_vc)
-            is_concurrent = not is_behind
+            is_concurrent = head is not None and vclock.concurrent(head_vc, v_vc)
         held.append(HeldVersion(
             location_id=obs.location_id, location_name=obs.name,
             version_id=version_id, is_head=is_head,
