@@ -1,303 +1,287 @@
-# SpindleBot — Claude Code Handoff
+# SpindleBot — Handoff & Getting Started
 
-This document captures everything needed to continue development of SpindleBot from
-where Cowork left off. Read this before touching any code.
+*Last updated: July 2026*
 
----
+This is the doc to read first if you're picking up SpindleBot to run or test it.
+It covers what the system is, how to get it running on a fresh Mac, the command
+surface, and where to go for deeper detail.
 
-## What SpindleBot Is
-
-An event-driven music pipeline for ripping, tagging, and managing a lossless FLAC
-library on macOS. Two-phase architecture:
-
-**Phase A — Import** (triggered by XLD finishing a CD rip):
-```
-XLD rips CD → .log file written to Staging → fswatch fires music-import.sh →
-pretag → beet import → posttag (DB fixes) → fetch-lyrics → macOS + Telegram notify
-```
-
-**Phase B — Sync** (triggered by DwRugged external drive mounting):
-```
-launchd detects mount → music-sync-rugged.sh → fetch-art → posttag → rsync →
-beets DB path reconciliation → fetch-lyrics (safety net) → notify
-```
-
-Key tools: `beets` (MusicBrainz matching, SQLite library DB), `XLD` (CD ripper),
-`fswatch` (file watcher), `launchd` (macOS daemon), `lrc-editor` (Flask/WaveSurfer.js
-lyrics timing editor).
+> **For AI agents:** the authoritative, always-current source of truth is
+> [`CLAUDE.md`](CLAUDE.md) at the repo root. It documents the architecture,
+> layering rules, conventions, active epic status, and known gotchas in far more
+> detail than this file. Read it before touching code. This HANDOFF is the
+> human on-ramp; CLAUDE.md is the contract.
 
 Repo: `github.com/strangestlens/SpindleBot`
-Local: `~/Music/music-pipeline`
 
 ---
 
-## Current State (as of end of Cowork session, March 2026)
+## What SpindleBot is
 
-### Phase 1 (Configuration & Portability) — COMPLETE
+An event-driven pipeline for ripping, tagging, and managing a lossless (FLAC)
+music library on macOS. It watches for new rips/downloads, matches and tags them
+against MusicBrainz via beets, fetches art and synced lyrics, and distributes the
+result to a retention drive — with a SQLite database that is the system of record
+for content **identity** and every **location** a copy lives.
 
-Everything that was hardcoded is now config-driven. The full wiring:
+Two primary flows:
 
-1. **`setup.sh`** — run once; creates `~/.config/spindlebot/`, copies example files,
-   generates `~/.config/spindlebot/bootstrap.sh` with Python path and pipeline dir
-   baked in, installs `tomli` if Python < 3.11, runs `spindlebot check`.
+**Import** (a CD rip finishes, or a folder is dropped into the Import area):
 
-2. **`~/.config/spindlebot/bootstrap.sh`** (generated) — sourced by every shell script:
-   ```bash
-   eval "$(PYTHONPATH="$PIPELINE_DIR" "$PYTHON" -m spindlebot config shell)"
-   ```
-   Exports all 15 `$SPINDLEBOT_*` env vars into the shell's environment.
-
-3. **`spindlebot/` Python package**:
-   - `config.py` — loads `config.toml` + `secrets.toml`, typed dataclasses, env var
-     overrides, auto-detected `pipeline_dir`
-   - `cli.py` — `check`, `config shell`, `config get` commands
-   - `__main__.py` — entry point for `python -m spindlebot`
-
-4. **Shell scripts** — all rewritten to source bootstrap.sh and use `$SPINDLEBOT_*`:
-   - `music-import.sh` — full import pipeline
-   - `music-sync-rugged.sh` — sync to DwRugged
-   - `music-notify.sh` — macOS + Telegram notifications
-
-5. **`music-fetch-lyrics.py`** — `REQUEST_DELAY` now reads `$SPINDLEBOT_LYRICS_DELAY`
-
-6. **`config.yaml` / `beets-config.yaml`** — absolute paths replaced with `~/...`
-
-7. **`config.toml.example`** / **`secrets.toml.example`** — templates for the user's
-   `~/.config/spindlebot/` directory
-
-8. **`requirements.txt`**, **`.gitignore`**, **`tests/test_config.py`** — added
-
-### Validated
-
-`python3 -m spindlebot check` passes all checks on Daniel's machine as of this session.
-
-### NOT yet pushed to remote
-
-The sandbox had no outbound TCP. Daniel needs to push manually:
-```bash
-cd ~/Music/music-pipeline
-git add -A
-git commit -m "Phase 1: configuration & portability"
-git push origin main
+```
+XLD rips a CD → writes a .log to the Import area
+  → fswatch (music-watcher.sh) fires `spindlebot import`
+  → pretag → beet import → multidisc fix → beet move → Processing
+  → posttag → fetch-art → fetch-lyrics
+  → per-album promote to Pending (only once the album is lyric-complete)
+  → archive the .log → notify (macOS + Telegram)
 ```
 
+**Sync** (the DwRugged external drive is mounted):
+
+```
+launchd detects the mount → music-sync-rugged.sh
+  → content-addressed sync: inventory → review → copy→verify→record → prune
+  → notify
+```
+
+The three working areas an album moves through:
+
+| Area | Path | Role |
+|------|------|------|
+| **Import** | `~/Library/Application Support/SpindleBot/Import` | XLD rips / downloads land here for processing |
+| **Processing** | `~/Library/Application Support/SpindleBot/Processing` | In-flight work; art + lyrics are fetched here |
+| **Pending** | `~/Library/Application Support/SpindleBot/Pending` | Lyric-complete albums awaiting distribution |
+| **Duplicates** | `~/Library/Application Support/SpindleBot/Duplicates` | Rips already in the library are parked here, not stranded in Import |
+
+An album is promoted from Processing to Pending **only once every track has a
+terminal `.lrc`/`.nolrc` marker** (lyric-complete). This makes Pending
+complete-by-construction, so a mount-sync can never prune audio out from under a
+still-running lyric fetch. Albums that get stuck in Processing (transient lyric
+errors) are swept up later by `spindlebot finalize`.
+
+Retention destination: `/Volumes/DwRugged/Music/Library`.
+
+Key external tools: **beets** (MusicBrainz matching + its own SQLite item DB),
+**XLD** (CD ripper), **fswatch** (file watcher), **launchd** (macOS daemons),
+**mpv** (playback/preview), and the standalone **lrc-editor** (Flask/WaveSurfer.js
+lyric-timing editor).
+
 ---
 
-## File Map
+## Current state (July 2026)
+
+The original portability + modularization work is **done**, and the project is
+mid-way through a larger content-addressed refactor.
+
+- **Phase 1 — Config & portability:** complete. Everything is config-driven via
+  `~/.config/spindlebot/config.toml` + `secrets.toml`; every shell script sources
+  a generated `bootstrap.sh` and reads `$SPINDLEBOT_*` env vars.
+- **Phase 2 — Modular architecture:** complete. All import-pipeline logic lives in
+  the `spindlebot/` Python package (`pipeline/runner.py` + `pipeline/stages/`).
+  The shell scripts are thin shims. Full test coverage (28 test modules).
+- **Content-addressed library refactor (active epic):** a SpindleBot-owned SQLite
+  DB (`~/.config/spindlebot/spindlebot.db`) tracks content identity, locations,
+  and copies. Phases A, 0, 1, sidecars, 2, and 3 (destructive sync incl.
+  copy→verify→record, prune, and gated delete) are merged. The `music-sync-rugged.sh`
+  cutover to content-addressed sync (no more `rsync --remove-source-files`) has
+  landed. See [`CLAUDE.md`](CLAUDE.md) → "Content-addressed library refactor" for
+  the precise per-phase status.
+
+The forward-looking roadmap (lyrics bidirectional sync, AI re-timer, remote access
+via Navidrome, a Mac app) lives in [`ROADMAP.md`](ROADMAP.md).
+
+---
+
+## Getting started on a fresh Mac
+
+### Prerequisites
+
+- macOS on Apple Silicon
+- Homebrew, with: `brew install python beets fswatch mpv`
+- XLD (for actual CD ripping; not needed to exercise the pipeline on existing files)
+- Python 3.11+ (`setup.sh` installs `tomli` automatically if you're on older 3.x)
+
+### 1. Clone and run setup
+
+```bash
+git clone spindlebot:strangestlens/SpindleBot.git ~/Music/music-pipeline
+cd ~/Music/music-pipeline
+./setup.sh
+```
+
+`setup.sh` is idempotent and does the following:
+
+1. Creates `~/.config/spindlebot/` and copies `config.toml.example` →
+   `config.toml` and `secrets.toml.example` → `secrets.toml` (skips either if it
+   already exists).
+2. Writes `~/.config/spindlebot/bootstrap.sh` with your Python path and pipeline
+   dir baked in — every shell script sources this to get `$SPINDLEBOT_*` vars.
+3. Creates the Import / Processing / Pending working directories.
+4. Installs `music-watcher.sh` → `~/.local/bin/`.
+5. Installs and (re)loads the two launchd agents into `~/Library/LaunchAgents/`.
+6. Runs `spindlebot check`.
+
+### 2. Fill in config and secrets
+
+```bash
+$EDITOR ~/.config/spindlebot/config.toml    # paths, tool locations, destinations
+$EDITOR ~/.config/spindlebot/secrets.toml   # Telegram token, Genius API key
+```
+
+`config.toml.example` is heavily commented — read it. The key sections:
+
+- `[core]` — the Import / Processing / Pending / archive / duplicates dirs, and
+  `auto_sync_on_import` (default `false`).
+- `[tools]` — absolute paths to `beet`, `python`, `mpv`, plus the beets DB and
+  beets config location.
+- `[notifications]` — toggle macOS and Telegram independently.
+- `[lyrics]` / `[art]` — source order and tuning.
+- `[[destinations]]` — one block per sync target. `type = "local_drive"` (rsync to
+  a mounted volume) or `type = "rclone"` (any rclone remote). The **first enabled
+  `local_drive`** is the retention destination and the mount probe.
+
+Secrets can also come from env vars, which override the file:
+`SPINDLEBOT_TELEGRAM_TOKEN`, `SPINDLEBOT_TELEGRAM_CHAT_ID`, `SPINDLEBOT_GENIUS_KEY`.
+
+### 3. Validate
+
+```bash
+cd ~/Music/music-pipeline
+python3 -m spindlebot check
+```
+
+`check` verifies the working dirs exist, the tool binaries are executable, the
+beets DB is present, each enabled destination is reachable, and the credentials
+are set — printing a concrete fix suggestion for anything that fails.
+
+### 4. Run the tests
+
+```bash
+python3 -m pytest tests/ --ignore=tests/shell    # Python suite
+bats tests/shell/                                 # shell suite (needs bats + shellcheck)
+```
+
+Both must be green. CI runs the same two jobs on every push/PR.
+
+---
+
+## Command surface
+
+Everything is `python3 -m spindlebot <command>`. Every command supports `--json`.
+
+```bash
+# --- inspection / setup ---
+spindlebot check                          # validate config + environment
+spindlebot config shell                   # emit config as shell exports (what bootstrap.sh evals)
+spindlebot config get core.pending_dir    # print a single value
+
+# --- import ---
+spindlebot import <trigger> [--force]     # run the import pipeline for one album
+                                          #   trigger = an album dir OR an XLD .log
+                                          #   --force skips the multi-disc wait
+spindlebot import-staging [--dry-run]     # import everything currently in the Import area
+spindlebot finalize [--dry-run]           # retry lyrics + promote lyric-complete albums
+                                          #   out of Processing → Pending
+
+# --- content-addressed DB / sync ---
+spindlebot inventory [--location <name>] [--rehash]   # scan a location into the DB (read-only re: audio)
+spindlebot review --location <name> [--yes]           # plan reconciliation; --yes acknowledges
+spindlebot review --acknowledge-run <run_id>          # acknowledge every action in a run
+spindlebot sync [--location <name>]                   # execute acknowledged copies (copy→verify→record)
+spindlebot prune [--execute]                          # release Pending copies verified on retention (DRY-RUN unless --execute)
+spindlebot delete [--execute]                         # execute acknowledged retention-copy deletes (gated on min_copies)
+
+# --- per-album utilities ---
+spindlebot fetch-lyrics <dir> [--dry-run] [--force]
+spindlebot fetch-art <dir> [--dry-run] [--force]
+spindlebot notify <title> <message>       # send a test notification on all channels
+spindlebot restart                        # restart the launchd agents
+```
+
+> **Destructive ops default to dry-run.** `prune` and `delete` only touch bytes
+> with `--execute`. `prune` releases a *non-retention* Pending copy once a
+> retention copy is verified — it never lowers the retention count, so `min_copies`
+> is only a warning there. `delete` (removing a *retention* copy) IS gated: it
+> never drops retention below `min_copies`.
+
+The daemons — the fswatch import watcher and the DwRugged mount sync — run under
+launchd (`com.strangestlens.music-watcher`, `com.strangestlens.music-sync-rugged`)
+and are installed by `setup.sh`. Use `spindlebot restart` to bounce them.
+
+---
+
+## Where things live
 
 ```
 music-pipeline/
-├── spindlebot/                  # NEW: Python package (Phase 1)
-│   ├── __init__.py
-│   ├── __main__.py
-│   ├── config.py                # All config loading lives here
-│   └── cli.py                   # check / config shell / config get
-├── tests/                       # NEW
-│   ├── __init__.py
-│   └── test_config.py           # 17 unittest-compatible tests
-├── music-import.sh              # UPDATED: sources bootstrap.sh
-├── music-sync-rugged.sh         # UPDATED: sources bootstrap.sh
-├── music-notify.sh              # UPDATED: credentials from env vars
-├── music-fetch-lyrics.py        # UPDATED: REQUEST_DELAY from env var
-├── music-pretag.py              # UNCHANGED
-├── music-fetch-art.py           # UNCHANGED
-├── lrc-editor.py                # UNCHANGED (1,315-line Flask/WaveSurfer app)
-├── config.yaml                  # UPDATED: ~/... paths (live beets config)
-├── beets-config.yaml            # UPDATED: ~/... paths (duplicate; can be removed)
-├── config.toml.example          # NEW: template for ~/.config/spindlebot/
-├── secrets.toml.example         # NEW: credentials template
-├── setup.sh                     # NEW: one-time setup script
-├── requirements.txt             # NEW: tomli>=2.0; python_version < "3.11"
-├── .gitignore                   # UPDATED: __pycache__, *.pyc, config.toml, secrets.toml
-├── ROADMAP.md                   # Development plan (6 phases)
-└── HANDOFF.md                   # This file
+├── spindlebot/                  # the Python package (see CLAUDE.md for full layering)
+│   ├── cli.py                   # CLI entry point; the ONLY place that prints
+│   ├── config.py                # typed config; loads config.toml + secrets.toml + env
+│   ├── disc.py, staging.py      # audio discovery, Import-area scan
+│   ├── pipeline/
+│   │   ├── runner.py            # ImportRunner: orchestrates all import stages
+│   │   └── stages/              # pretag, posttag, fetch_art, fetch_lyrics, notify
+│   ├── core/                    # pure, side-effect-free (identity, albums, vclock, enums, models)
+│   ├── db/                      # SpindleBot's own SQLite system-of-record
+│   │   ├── connection.py        # open_db(): WAL + foreign_keys + migrate
+│   │   ├── schema*.sql          # versioned DDL (user_version 1–5)
+│   │   └── repositories/        # the ONLY SQL layer
+│   └── services/                # orchestration over repos+core
+│       ├── inventory.py, locations.py, volumes.py
+│       ├── reconciler.py        # planner: diff DB vs observed → pending_action
+│       ├── promote.py           # Processing → Pending promotion
+│       └── sync.py              # copy→verify→record, prune, delete
+├── music-watcher.sh             # fswatch daemon (installed to ~/.local/bin)
+├── music-import.sh              # shim → spindlebot import
+├── music-sync-rugged.sh         # content-addressed sync to DwRugged
+├── music-notify.sh              # legacy notify shim
+├── music-*.py                   # legacy root scripts (superseded by stages/, kept for reference)
+├── setup.sh                     # one-time environment setup
+├── migrate-work-dirs.sh         # sourceable helpers for the Staging→Import / Library→Pending rename
+├── com.strangestlens.*.plist    # launchd agents
+├── lrc-editor                   # standalone Flask/WaveSurfer.js lyric-timing editor
+├── config.toml.example          # config template
+├── secrets.toml.example         # credentials template
+├── tests/                       # pytest suite + tests/shell/ (bats)
+├── CLAUDE.md                    # ← source of truth: architecture, conventions, gotchas
+├── ROADMAP.md                   # forward-looking plans
+└── HANDOFF.md                   # this file
 ```
 
 ---
 
-## Env Vars Exported by `bootstrap.sh`
+## Gotchas worth knowing up front
 
-| Variable | Source |
-|---|---|
-| `SPINDLEBOT_LIBRARY_DIR` | `core.library_dir` |
-| `SPINDLEBOT_STAGING_DIR` | `core.staging_dir` |
-| `SPINDLEBOT_LOG_DIR` | `core.log_dir` |
-| `SPINDLEBOT_ARCHIVE_DIR` | `core.archive_dir` |
-| `SPINDLEBOT_BEET` | `tools.beet` |
-| `SPINDLEBOT_PYTHON` | `tools.python` |
-| `SPINDLEBOT_BEETS_DB` | `tools.beets_db` |
-| `SPINDLEBOT_BEETS_CONFIG` | `tools.beets_config` |
-| `SPINDLEBOT_PIPELINE_DIR` | auto-detected from `config.py` location |
-| `SPINDLEBOT_DESTINATION_PATH` | first enabled destination's `path` |
-| `SPINDLEBOT_TELEGRAM_TOKEN` | `secrets.telegram.bot_token` |
-| `SPINDLEBOT_TELEGRAM_CHAT_ID` | `secrets.telegram.chat_id` |
-| `SPINDLEBOT_LYRICS_DELAY` | `lyrics.request_delay_seconds` |
-| `SPINDLEBOT_MACOS_NOTIFY` | `notifications.macos_notify` (0 or 1) |
-| `SPINDLEBOT_TELEGRAM_ENABLED` | `notifications.telegram_enabled` (0 or 1) |
+These are the ones most likely to trip up a new operator. The full list is in
+[`CLAUDE.md`](CLAUDE.md) → "Known gotchas".
 
-Env vars also override secrets: `SPINDLEBOT_TELEGRAM_TOKEN`, `SPINDLEBOT_TELEGRAM_CHAT_ID`,
-`SPINDLEBOT_GENIUS_KEY`.
+- **`SPINDLEBOT_IMPORT_DIR`, not `SPINDLEBOT_IMPORT`.** The `_DIR` suffix matters;
+  without it the var resolves empty and fswatch silently watches the wrong
+  directory. `music-watcher.sh` guards against this at startup.
+- **bootstrap.sh is load-bearing.** Every shell script sources it, and it evals
+  `python -m spindlebot config shell`. If Python or the config is broken, all
+  `$SPINDLEBOT_*` vars come back empty. Scripts fail loudly by design.
+- **Multi-disc detection** waits for all discs before importing. MusicBrainz can
+  report `disctotal=2` for single-disc DualDiscs/deluxe editions; the runner
+  patches this from the actual ripped disc count. Use `import --force` to bypass
+  the wait for a genuinely partial set.
+- **`multidisc` flex attribute** must be INSERTed via `sqlite3` directly — `beet
+  modify multidisc=` deletes the row and makes the template render the literal
+  string `"$multidisc"`. Handled in `runner.py`; don't change the approach.
+- **Identity is decoded-audio MD5** (FLAC STREAMINFO `md5_signature`), falling back
+  to whole-file sha256. Per-copy sha256 is integrity, never identity.
 
 ---
 
-## Things That Still Need Doing
-
-### Immediate / Small
-
-- **`beets-config.yaml` is a duplicate** of `config.yaml`. The live beets config is
-  `config.yaml`. `beets-config.yaml` can be deleted, or the names should be reconciled.
-- **`music-fetch-lyrics.py` shebang** is `#!/opt/homebrew/bin/python3`. It's always
-  called via `$PYTHON "$FETCH_LYRICS"` so it doesn't matter in practice, but `#!/usr/bin/env python3` would be cleaner.
-- **Genius API key** is still hardcoded in `config.yaml` (beets reads it directly).
-  Long-term it should move to `secrets.toml`, which requires either generating beets
-  config from SpindleBot config or using a beets config `include:` trick.
-- **`python3 -m pytest tests/`** — the sandbox couldn't install pytest. Tests are
-  written in unittest style and will run with pytest fine on Daniel's Mac (Python 3.11).
-  Verify: `cd ~/Music/music-pipeline && python3 -m pytest tests/ -v`
-
-### Phase 2 — Modular Architecture & Testing (next major effort)
-
-This is the biggest and most valuable phase. See `ROADMAP.md` for full detail.
-
-The goal: replace the two monolithic shell scripts with a proper Python package of
-discrete, testable stages. Target structure:
-
-```
-spindlebot/
-├── config.py          # already done
-├── cli.py             # already done (extend with start/stop/import/sync commands)
-├── pipeline/
-│   ├── runner.py      # stage orchestrator
-│   └── stages/
-│       ├── pretag.py        # absorb music-pretag.py
-│       ├── beet_import.py   # subprocess wrapper around beet
-│       ├── posttag.py       # DB fixes, disctotal patching
-│       ├── fetch_art.py     # absorb music-fetch-art.py
-│       ├── fetch_lyrics.py  # absorb music-fetch-lyrics.py
-│       ├── sync.py          # rsync + DB reconciliation
-│       └── notify.py        # absorb music-notify.sh
-├── watchers/
-│   ├── staging.py     # fswatch wrapper → triggers import pipeline
-│   └── destination.py # mount event → triggers sync pipeline
-├── lyrics/
-│   ├── lrclib.py      # already partially done in music-fetch-lyrics.py
-│   ├── shazam.py      # new: plain text fallback
-│   └── aligner.py     # new: proportional timestamp estimation
-└── destinations/
-    ├── base.py
-    ├── local_drive.py  # rsync
-    └── rclone.py       # rclone to B2/S3/NAS
-```
-
-Shell scripts become thin wrappers:
-```bash
-# music-import.sh after Phase 2
-source "$HOME/.config/spindlebot/bootstrap.sh"
-exec "$SPINDLEBOT_PYTHON" -m spindlebot import "$1"
-```
-
-Key design decisions already made:
-- Use `subprocess` (not shell) for beet and rsync calls — easier to test and capture
-- Each stage takes a typed input and returns a typed result — no global state
-- `runner.py` handles stage sequencing, logging, and failure capture
-- Tests use `pytest` + `tmp_path` + `unittest.mock` for external calls
-
-### Phase 3 — Destination Flexibility
-
-Config already supports `[[destinations]]` arrays. Phase 2's `sync.py` should iterate
-all enabled destinations rather than just the first one.
-
-### Phase 4 — Error Recovery & Resilience
-
-- `retry_with_backoff()` helper wrapping all external API calls
-- `~/.config/spindlebot/failed.jsonl` failure journal
-- `spindlebot retry-failed` command
-- Pre-flight checks before import and sync
-
-### Phase 5 — Input Sources
-
-Digital download watcher (`~/Music/Downloads`). Runs same pipeline as CD rip but in
-"gentle mode" (normalize rather than strip tags, since downloads usually have good
-metadata).
-
-### Phase 6 — Remote Library Access
-
-Don't build. Deploy **Navidrome** (Go, single binary, Subsonic API, native `.lrc`
-support, ~200 MB RAM for 40k tracks). Point it at the DwRugged library. Expose via
-Tailscale or Caddy reverse proxy. Client: Symfonium on iOS.
-
----
-
-## Known Quirks / Gotchas
-
-- **Multi-disc detection**: The import script waits until all discs are present before
-  importing. It checks `disctotal` tags in FLAC files. MusicBrainz sometimes reports
-  `disctotal=2` for single-disc deluxe editions — the posttag step patches this by
-  counting actual ripped disc numbers and updating the beets DB directly via sqlite3.
-
-- **`multidisc` flex attribute**: beets caches inline values at import time. The
-  `multidisc` inline computes `"1"` (truthy) or `""` (falsy for `%if{}`). Setting it
-  via `beet modify multidisc=` *deletes* the row, making `$multidisc` render as the
-  literal string `"$multidisc"` (truthy!) in templates. Fix: always INSERT the row
-  directly via sqlite3. This is already done in music-import.sh.
-
-- **beets `path:` query syntax**: Use `path:/full/path/` with trailing slash in beet
-  queries to match items under a directory. Without trailing slash it may not match.
-
-- **DwRugged path**: After rsync, the beets DB still has local paths. The sync script
-  updates them with `sqlite3 UPDATE items SET path = replace(...)`. This must happen
-  before fetching lyrics on DwRugged (which uses the DB to find tracks).
-
-- **lrc-editor**: A self-contained 1,315-line Python/Flask app serving WaveSurfer.js.
-  Not integrated with the pipeline config system yet. Runs standalone:
-  `python3 lrc-editor.py`. Stores state in-memory; no DB.
-
-- **Sandbox constraints (Cowork)**: The Cowork sandbox is a Linux ARM64 VM with no
-  outbound TCP (pip/npm/git push all blocked). Claude Code proper should not have
-  this limitation.
-
----
-
-## Useful Commands
-
-```bash
-# Validate everything
-python3 -m spindlebot check
-
-# Emit all config as env vars (what bootstrap.sh evals)
-python3 -m spindlebot config shell
-
-# Get a single value
-python3 -m spindlebot config get core.library_dir
-
-# Run tests
-python3 -m pytest tests/ -v
-
-# Manually trigger import for a staging folder
-./music-import.sh /path/to/staging/Album\ Dir/album.log
-
-# Manually trigger sync
-./music-sync-rugged.sh
-
-# Fetch lyrics for an album
-python3 music-fetch-lyrics.py ~/Music/Library/Artist/Album/
-
-# Start lrc-editor
-python3 lrc-editor.py
-# then open http://localhost:5000
-```
-
----
-
-## Daniel's Setup
+## Daniel's machine (reference config)
 
 - macOS, Apple Silicon
-- Python: `/opt/homebrew/bin/python3` (3.11+)
-- beet: `/opt/homebrew/bin/beet`
-- mpv: `/opt/homebrew/bin/mpv`
-- Music library: `~/Music/Library` (local) → `/Volumes/DwRugged/Music/Library` (external)
-- Staging: `~/Music/Staging`
-- beets DB: `~/.config/beets/library.db`
-- Config: `~/.config/spindlebot/config.toml` + `secrets.toml`
-- Telegram notifications: configured and working
-- Genius API: configured in `config.yaml` (beets plugin) and `secrets.toml`
+- Python: `/opt/homebrew/bin/python3` (3.11+; currently resolves to 3.14)
+- beet: `/opt/homebrew/bin/beet`; mpv: `/opt/homebrew/bin/mpv`
+- beets DB: `~/.config/beets/library.db`; beets config: `~/.config/beets/config.yaml`
+- SpindleBot DB: `~/.config/spindlebot/spindlebot.db`
+- SpindleBot config: `~/.config/spindlebot/config.toml` + `secrets.toml`
+- Logs: `~/.config/beets/watcher.log` (import), `~/.config/beets/rugged-sync.log` (sync)
+- Retention: `/Volumes/DwRugged/Music/Library`
+- launchd agents: `com.strangestlens.music-watcher`, `com.strangestlens.music-sync-rugged`
