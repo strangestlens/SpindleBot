@@ -180,9 +180,9 @@ Config drives the list:
 
 ```toml
 [[destinations]]
-name    = "DwRugged"
+name    = "MyDrive"
 type    = "local_drive"
-path    = "/Volumes/DwRugged/Music/Library"
+path    = "/Volumes/MyDrive/Music/Library"
 enabled = true
 
 [[destinations]]
@@ -294,7 +294,7 @@ Don't build this. Navidrome already exists and does exactly what's needed.
 - The Subsonic ecosystem is wide enough that there's a good client for every platform.
 
 **Deployment for remote access:**
-1. Run Navidrome locally pointing at the library on DwRugged (or NAS).
+1. Run Navidrome locally pointing at the library on the retention drive (or NAS).
 2. Expose via Tailscale or a reverse proxy (Caddy + DDNS) for remote access.
 3. No data leaves your infrastructure. No subscription fee.
 

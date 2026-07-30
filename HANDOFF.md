@@ -37,7 +37,7 @@ XLD rips a CD → writes a .log to the Import area
   → archive the .log → notify (macOS + Telegram)
 ```
 
-**Sync** (the DwRugged external drive is mounted):
+**Sync** (the retention drive is mounted):
 
 ```
 launchd detects the mount → music-sync-rugged.sh
@@ -60,7 +60,10 @@ complete-by-construction, so a mount-sync can never prune audio out from under a
 still-running lyric fetch. Albums that get stuck in Processing (transient lyric
 errors) are swept up later by `spindlebot finalize`.
 
-Retention destination: `/Volumes/DwRugged/Music/Library`.
+Retention destination: a configurable `[[destinations]]` target on an external
+drive — e.g. `/Volumes/<RetentionDrive>/Music/Library`. (The author's is named
+`DwRugged`; examples that use that name are his specific drive — substitute your
+own. See "Daniel's machine" at the bottom for the real values.)
 
 Key external tools: **beets** (MusicBrainz matching + its own SQLite item DB),
 **XLD** (CD ripper), **fswatch** (file watcher), **launchd** (macOS daemons),
@@ -216,7 +219,7 @@ spindlebot restart                        # restart the launchd agents
 > is only a warning there. `delete` (removing a *retention* copy) IS gated: it
 > never drops retention below `min_copies`.
 
-The daemons — the fswatch import watcher and the DwRugged mount sync — run under
+The daemons — the fswatch import watcher and the retention-drive mount sync — run under
 launchd (`com.strangestlens.music-watcher`, `com.strangestlens.music-sync-rugged`)
 and are installed by `setup.sh`. Use `spindlebot restart` to bounce them.
 
@@ -246,7 +249,7 @@ music-pipeline/
 │       └── sync.py              # copy→verify→record, prune, delete
 ├── music-watcher.sh             # fswatch daemon (installed to ~/.local/bin)
 ├── music-import.sh              # shim → spindlebot import
-├── music-sync-rugged.sh         # content-addressed sync to DwRugged
+├── music-sync-rugged.sh         # content-addressed sync to the retention drive
 ├── music-notify.sh              # legacy notify shim
 ├── music-*.py                   # legacy root scripts (superseded by stages/, kept for reference)
 ├── setup.sh                     # one-time environment setup
