@@ -85,7 +85,9 @@ mid-way through a larger content-addressed refactor.
   and copies. Phases A, 0, 1, sidecars, 2, and 3 (destructive sync incl.
   copy→verify→record, prune, and gated delete) are merged. The `music-sync-rugged.sh`
   cutover to content-addressed sync (no more `rsync --remove-source-files`) has
-  landed. See [`CLAUDE.md`](CLAUDE.md) → "Content-addressed library refactor" for
+  landed. **Phase 4 (lyrics bidirectional sync) is underway** — 4.0, the causal-lineage
+  substrate (schema v7 `lyric_version_presence` + `services/lyrics_sync.py`), is in
+  review. See [`CLAUDE.md`](CLAUDE.md) → "Content-addressed library refactor" for
   the precise per-phase status.
 
 The forward-looking roadmap (lyrics bidirectional sync, AI re-timer, remote access
@@ -234,12 +236,13 @@ music-pipeline/
 │   ├── core/                    # pure, side-effect-free (identity, albums, vclock, enums, models)
 │   ├── db/                      # SpindleBot's own SQLite system-of-record
 │   │   ├── connection.py        # open_db(): WAL + foreign_keys + migrate
-│   │   ├── schema*.sql          # versioned DDL (user_version 1–5)
+│   │   ├── schema*.sql          # versioned DDL (user_version 1–7)
 │   │   └── repositories/        # the ONLY SQL layer
 │   └── services/                # orchestration over repos+core
 │       ├── inventory.py, locations.py, volumes.py
 │       ├── reconciler.py        # planner: diff DB vs observed → pending_action
 │       ├── promote.py           # Processing → Pending promotion
+│       ├── lyrics_sync.py       # per-doc lyric causal lineage (Phase 4.0)
 │       └── sync.py              # copy→verify→record, prune, delete
 ├── music-watcher.sh             # fswatch daemon (installed to ~/.local/bin)
 ├── music-import.sh              # shim → spindlebot import

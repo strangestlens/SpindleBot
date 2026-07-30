@@ -268,13 +268,13 @@ def test_reconcile_records_a_finished_run(conn):
 
 # ── lyric divergence detection ────────────────────────────────────────────────
 
-def _lrc(conn, audio_id, loc_id, file_sha):
+def _lrc(conn, audio_id, loc_id, file_sha, *, observed_utc=0):
     """Attach the track's .lrc sidecar present at a location with a per-copy sha."""
     sc = sidecar_repo.upsert(conn, parent_kind=SidecarParentKind.TRACK,
                              parent_id=audio_id, role=SidecarRole.LRC,
                              sha256="canon", now=0)
     sidecar_presence_repo.set_presence(conn, sidecar_id=sc.id, location_id=loc_id,
-                                       present=True, observed_utc=0,
+                                       present=True, observed_utc=observed_utc,
                                        file_sha256=file_sha, rel_path=f"{audio_id}.lrc")
     return sc
 
@@ -368,6 +368,115 @@ def test_conflict_row_deduped_but_action_reproposed_each_run(conn):
     latest = [a for a in action_repo.list_for_run(conn, second.run_id)
               if a.action_kind == ActionKind.RESOLVE_CONFLICT]
     assert len(latest) == 1 and latest[0].content_id == x.id
+
+
+def test_linear_edit_advances_head_without_a_conflict(conn):
+    # A location improving a lyric (newer bytes off the current head) fast-forwards
+    # the head and is NOT a conflict — 4.1 will propagate it to the behind side.
+    from spindlebot.db.repositories import lyric_version_presence_repo
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "sha-1")
+    _lrc(conn, x.id, rugged.id, "sha-1")   # agree first
+    _scan(conn, rugged.id)
+    first = reconcile_location(conn, target=rugged,
+                               source_locations=[pending], now=1000)
+    assert first.conflicts == 0
+
+    _lrc(conn, x.id, pending.id, "sha-2")  # pending improves the lyric
+    second = reconcile_location(conn, target=rugged,
+                                source_locations=[pending], now=2000)
+
+    assert second.conflicts == 0
+    assert conflict_repo.list_open(conn) == []
+    doc = lyric_repo.get_doc(conn, x.id)
+    versions = lyric_repo.list_versions(conn, doc.id)
+    assert len(versions) == 2
+    head = lyric_repo.head_version(conn, doc.id)
+    old = next(v for v in versions if v.id != head.id)
+    assert vclock.strictly_dominates(vclock.from_json(head.vclock_json),
+                                     vclock.from_json(old.vclock_json))
+    # pending now holds the new head; rugged is behind (still the old version)
+    assert lyric_version_presence_repo.get(conn, doc.id, pending.id).version_id == head.id
+    assert lyric_version_presence_repo.get(conn, doc.id, rugged.id).version_id == old.id
+
+
+def test_behind_location_is_not_a_conflict(conn):
+    # rugged (target) holds an OLD version while the head advanced on pending.
+    from spindlebot.db.repositories import lyric_version_presence_repo
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "sha-1")
+    _lrc(conn, x.id, rugged.id, "sha-1")
+    _scan(conn, rugged.id)
+    reconcile_location(conn, target=rugged, source_locations=[pending], now=1000)
+    _lrc(conn, x.id, pending.id, "sha-2")  # head advances on pending
+    result = reconcile_location(conn, target=rugged,
+                                source_locations=[pending], now=2000)
+
+    assert result.conflicts == 0
+    doc = lyric_repo.get_doc(conn, x.id)
+    head = lyric_repo.head_version(conn, doc.id)
+    # rugged's held version is strictly older than the head → behind, not conflict
+    rugged_v = lyric_version_presence_repo.get(conn, doc.id, rugged.id)
+    assert rugged_v.version_id != head.id
+
+
+def test_version_presence_records_source_scan_time_not_reconcile_now(conn):
+    # A source location's .lrc was last confirmed by a scan long before this
+    # reconcile runs. Its lyric_version_presence.observed_utc must reflect that
+    # real scan time (from sidecar_presence), not the reconcile `now` — otherwise
+    # a cached, stale copy would look freshly confirmed.
+    from spindlebot.db.repositories import lyric_version_presence_repo
+    pending, rugged = _pending(conn), _rugged(conn)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, rugged.id, "sha-1", observed_utc=2000)  # target, fresh
+    _lrc(conn, x.id, pending.id, "sha-1", observed_utc=100)  # source, long stale
+    _scan(conn, rugged.id)
+    reconcile_location(conn, target=rugged, source_locations=[pending], now=2000)
+
+    doc = lyric_repo.get_doc(conn, x.id)
+    assert lyric_version_presence_repo.get(conn, doc.id, rugged.id).observed_utc == 2000
+    assert lyric_version_presence_repo.get(conn, doc.id, pending.id).observed_utc == 100
+
+
+def test_conflict_not_proposed_for_target_not_party_to_divergence(conn):
+    # pending<->rugged diverge; dap (the target) agrees with the head side. The
+    # dap review must NOT attach that conflict to itself — it isn't a party.
+    pending, rugged = _pending(conn), _rugged(conn)
+    dap = _loc(conn, "dap", "DAP", is_retention=True)
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "sha-AAA")   # becomes head (lowest location id)
+    _lrc(conn, x.id, rugged.id, "sha-BBB")    # concurrent with head
+    _lrc(conn, x.id, dap.id, "sha-AAA")       # dap holds the head version
+    _scan(conn, dap.id)
+
+    result = reconcile_location(conn, target=dap,
+                                source_locations=[pending, rugged], now=1000)
+
+    assert result.conflicts == 0
+    actions = [a for a in action_repo.list_for_run(conn, result.run_id)
+               if a.action_kind == ActionKind.RESOLVE_CONFLICT]
+    assert actions == []
+    # no conflict row opened during a review dap isn't party to
+    assert conflict_repo.find_open_for_audio(conn, x.id) is None
+
+
+def test_resolve_action_names_head_and_concurrent_sides(conn):
+    pending, rugged = _pending(conn), _rugged(conn)   # pending id < rugged id
+    x = _audio(conn, "x" * 32)
+    _lrc(conn, x.id, pending.id, "sha-AAA")   # head side (winner)
+    _lrc(conn, x.id, rugged.id, "sha-BBB")    # target holds the concurrent version
+    _scan(conn, rugged.id)
+    result = reconcile_location(conn, target=rugged,
+                                source_locations=[pending], now=1000)
+    action = next(a for a in action_repo.list_for_run(conn, result.run_id)
+                  if a.action_kind == ActionKind.RESOLVE_CONFLICT)
+    # source = a head-holder (winner), dest = the target (concurrent/loser side)
+    assert action.source_location_id == pending.id
+    assert action.dest_location_id == rugged.id
+    assert "head on Pending" in action.reason
+    assert "concurrent on DwRugged" in action.reason
 
 
 def test_run_note_records_below_floor(conn):
