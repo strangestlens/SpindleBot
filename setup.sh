@@ -74,8 +74,10 @@ echo "Wrote $CONFIG_DIR/bootstrap.sh"
 # tomllib, which is stdlib only on 3.11+. Without tomli on older Python,
 # resolve_cfg would fail silently and the migrate + mkdir steps would no-op,
 # leaving `spindlebot check` failing on a fresh setup.
-PY_VERSION=$("$PYTHON" -c "import sys; print(sys.version_info[:2])")
-if [[ "$PY_VERSION" < "(3, 11)" ]]; then
+# Numeric version test via Python's exit code — a shell string compare like
+# `"(3, 9)" < "(3, 11)"` sorts lexicographically and would wrongly skip tomli
+# on 3.8/3.9.
+if ! "$PYTHON" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"; then
   if ! "$PYTHON" -c "import tomli" 2>/dev/null; then
     echo "Installing tomli for Python < 3.11..."
     "$PYTHON" -m pip install tomli --quiet --break-system-packages
