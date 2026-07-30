@@ -1,6 +1,23 @@
 # SpindleBot — Development Roadmap
 
-*Last updated: March 2026*
+*Last updated: July 2026*
+
+> **Status banner.** This document is the *original 6-phase roadmap* (numbered
+> 1–6). It has been partly delivered and partly superseded:
+> - **Phase 1 (Config & portability)** and **Phase 2 (Modular architecture +
+>   testing)** are **complete** — all import logic is now a tested Python package.
+> - The project has since pivoted to a **content-addressed library refactor**
+>   (a SpindleBot-owned SQLite DB tracking content identity + every copy's
+>   location), which uses its own phase labels (A, 0, 1, 2, 3…) and is the
+>   **active** line of work. That epic — not the numbering below — is the current
+>   plan of record. See [`CLAUDE.md`](CLAUDE.md) → "Content-addressed library
+>   refactor" for its detailed status, and [`HANDOFF.md`](HANDOFF.md) for the
+>   overall current state.
+>
+> The forward-looking sections here (destinations, remote access via Navidrome,
+> the Mac app vision, the Shazam lyric source) remain valid and are kept as
+> strategic reference. Don't conflate the "Phase N" labels here with the DB
+> epic's labels.
 
 ---
 
@@ -14,12 +31,12 @@ SpindleBot is a personal music intelligence system. The immediate goal is a clea
 
 | Priority | Area | Current State |
 |----------|------|---------------|
-| **1** | Configuration & portability | Hardcoded paths and credentials everywhere |
-| **2** | Modular architecture + testing | Two monolithic shell scripts with duplicated logic |
-| **3** | Destination flexibility | Single external drive, wired into the code |
-| **4** | Error recovery & resilience | Log-and-continue, no retries |
-| **5** | Input sources | XLD/CD only |
-| **6** | Remote library access | Not yet addressed |
+| **1** | Configuration & portability | **Done** — `config.toml`/`secrets.toml`, `bootstrap.sh`, `spindlebot check` |
+| **2** | Modular architecture + testing | **Done** — import logic is a tested Python package (`runner.py` + `stages/`) |
+| **3** | Destination flexibility | Config supports `[[destinations]]`; content-addressed sync (copy/verify/prune) landed via the DB epic |
+| **4** | Error recovery & resilience | Partial — lyric-completeness gating + finalize sweep; failure journal still TODO |
+| **5** | Input sources | XLD/CD + folder drops; digital-download "gentle mode" still TODO |
+| **6** | Remote library access | Not yet addressed — Navidrome recommendation below |
 | — | macOS-only architecture | Acceptable; future Mac App potential |
 
 ---

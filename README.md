@@ -1,65 +1,101 @@
-# Music Pipeline
+# SpindleBot — Music Pipeline
 
-Automated CD ripping pipeline for Daniel's music library.
+Event-driven pipeline for ripping, tagging, and managing a lossless (FLAC) music
+library on macOS. It matches rips against MusicBrainz via beets, fetches album art
+and synced lyrics, and distributes lyric-complete albums to a retention drive,
+backed by a SQLite database that is the system of record for content **identity**
+and every **location** a copy lives.
+
+- **New here?** Read [`HANDOFF.md`](HANDOFF.md) for setup and the command surface.
+- **Working on the code (human or agent)?** [`CLAUDE.md`](CLAUDE.md) is the source
+  of truth for architecture, layering, and conventions.
+- **Where it's going?** [`ROADMAP.md`](ROADMAP.md).
 
 ## Flow
 
 ```
-CD → XLD → Import area
-                    │
-              [XLD writes .log]
-                    │
-              fswatch detects .log
-                    │
-          music-import.sh fires
-                    │
-          ┌─────────┴──────────┐
-          │  1. pretag         │  music-pretag.py (feat., artist cleanup)
-          │  2. beet import    │  MusicBrainz match → Pending area
-          │  3. multidisc fix  │  based on actual ripped discs, not MB metadata
-          │  4. beet move      │  rename files to match path template
-          │  5. fetch lyrics   │  music-fetch-lyrics.py → .lrc sidecar files
-          │  6. notify         │  macOS + Telegram
-          │  7. archive log    │  → ~/Music/All Discs/
-          └────────────────────┘
-                    │
-            [DwRugged mounted]
-                    │
-          music-sync-rugged.sh fires
-                    │
-          ┌─────────┴──────────┐
-          │  1. fetch art      │  music-fetch-art.py (CAA → iTunes fallback)
-          │  2. posttag        │  music-pretag.py --post (date trunc, alias cleanup)
-          │  3. rsync          │  --remove-source-files → /Volumes/DwRugged/Music/Library/
-          │  4. update DB      │  sqlite: Pending-area paths → DwRugged paths
-          │  5. fetch lyrics   │  catch anything import missed (race condition safety net)
-          │  6. notify         │  macOS + Telegram
-          └────────────────────┘
+Import                                          Sync
+────────────────────────────────               ──────────────────────────────
+CD → XLD → Import area                          DwRugged mounted
+        │                                               │
+  [.log written / folder dropped]                 launchd fires
+        │                                       music-sync-rugged.sh
+  fswatch → music-watcher.sh                            │
+        │                                       ┌───────┴──────────┐
+  spindlebot import                             │ inventory        │ scan into DB
+        │                                       │ review           │ plan copies
+  ┌─────┴──────────┐                            │ sync             │ copy→verify→record
+  │ pretag         │ feat./artist cleanup       │ prune            │ release verified
+  │ beet import    │ MusicBrainz match          │ notify           │ macOS + Telegram
+  │ multidisc fix  │ actual disc count          └──────────────────┘
+  │ beet move      │ → Processing
+  │ posttag        │ date trunc, alias cleanup
+  │ fetch art      │ CAA → iTunes fallback
+  │ fetch lyrics   │ lrclib → .lrc / .nolrc
+  │ promote        │ → Pending (only if lyric-complete)
+  │ archive log    │ → ~/Music/All Discs/
+  │ notify         │ macOS + Telegram
+  └────────────────┘
 ```
 
-## Key paths
+An album is promoted from **Processing** to **Pending** only once every track has
+a terminal `.lrc`/`.nolrc` marker (lyric-complete). Pending is therefore
+complete-by-construction, so a mount-sync can never prune audio out from under a
+running lyric fetch. Albums stuck in Processing are swept up by `spindlebot
+finalize`.
+
+## Working areas
 
 | Path | Purpose |
 |------|---------|
-| `~/Library/Application Support/SpindleBot/Import/` | Import area: XLD rips / downloads land here; cleared after import (formerly `~/Music/Staging`) |
-| `~/Library/Application Support/SpindleBot/Pending/` | Pending area: beet's canonical dir; transient, emptied after sync (formerly `~/Music/Library`) |
-| `~/Music/All Discs/` | Archived XLD .log files |
-| `/Volumes/DwRugged/Music/Library/` | Permanent library on external drive |
-| `~/.config/beets/config.yaml` | Beet config (directory: must match the Pending area) |
-| `~/.config/beets/watcher.log` | Import pipeline log |
-| `~/.config/beets/rugged-sync.log` | Sync pipeline log |
+| `~/Library/Application Support/SpindleBot/Import/` | XLD rips / downloads land here for processing (formerly `~/Music/Staging`) |
+| `~/Library/Application Support/SpindleBot/Processing/` | In-flight albums; art + lyrics fetched here |
+| `~/Library/Application Support/SpindleBot/Pending/` | Lyric-complete albums awaiting distribution (formerly `~/Music/Library`) |
+| `~/Library/Application Support/SpindleBot/Duplicates/` | Rips already in the library are parked here, not stranded in Import |
+| `~/Music/All Discs/` | Archived XLD `.log` files |
+| `/Volumes/DwRugged/Music/Library/` | Retention library on the external drive |
+| `~/.config/spindlebot/config.toml` + `secrets.toml` | SpindleBot config + credentials |
+| `~/.config/spindlebot/spindlebot.db` | SpindleBot's content-identity + location DB |
+| `~/.config/beets/config.yaml` | beets config (`directory:` must match the Pending area) |
+| `~/.config/beets/library.db` | beets item DB |
+| `~/.config/beets/watcher.log` | import pipeline log |
+| `~/.config/beets/rugged-sync.log` | sync pipeline log |
+
+## Commands
+
+Everything is `python3 -m spindlebot <command>`. The DB/sync commands
+(`finalize`, `inventory`, `review`, `sync`, `prune`, `delete`) support `--json`
+for structured output. See [`HANDOFF.md`](HANDOFF.md#command-surface) for the
+full reference.
+
+```bash
+python3 -m spindlebot check                          # validate config + environment
+python3 -m spindlebot import <dir|.log> [--force]    # import one album (--force skips disc wait)
+python3 -m spindlebot import-staging [--dry-run]     # import everything in the Import area
+python3 -m spindlebot finalize [--dry-run]           # retry lyrics + promote lyric-complete albums
+python3 -m spindlebot inventory [--location <name>]  # scan a location into the DB
+python3 -m spindlebot review --location <name>       # plan reconciliation (no bytes moved)
+python3 -m spindlebot sync [--location <name>]       # execute acknowledged copies
+python3 -m spindlebot prune [--execute]              # release Pending copies verified on retention
+python3 -m spindlebot fetch-art  <dir> [--dry-run] [--force]
+python3 -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]
+python3 -m spindlebot restart                        # restart the launchd agents
+```
+
+`prune` and `delete` default to **dry-run** — pass `--execute` to touch bytes.
 
 ## Scripts
 
 | Script | Role |
 |--------|------|
-| `music-import.sh` | Main import pipeline; triggered by fswatch on the Import area |
-| `music-sync-rugged.sh` | Sync to DwRugged; triggered on drive mount or `sync` command |
-| `music-pretag.py` | Tag cleanup pre-import (`--post` mode for final cleanup before sync) |
-| `music-fetch-art.py` | Album art fetcher (runs before sync) |
-| `music-fetch-lyrics.py` | LRC sidecar fetcher (lrclib.net, falls back to embedded tag) |
-| `music-notify.sh` | macOS + Telegram notifications |
-| `music-pipeline` | start/stop/restart/status for fswatch watcher daemon |
+| `music-watcher.sh` | fswatch daemon; fires `python3 -m spindlebot import` on a `.log` or folder drop (installed to `~/.local/bin/`) |
+| `music-import.sh` | shim → `python3 -m spindlebot import` |
+| `music-sync-rugged.sh` | content-addressed sync to DwRugged; fires on drive mount |
+| `music-notify.sh` | legacy notify shim (superseded by `stages/notify.py`) |
+| `setup.sh` | one-time environment setup; installs the watcher and launchd agents |
+
+The daemons run under launchd: `com.strangestlens.music-watcher` (import) and
+`com.strangestlens.music-sync-rugged` (sync). Bounce them with `python3 -m spindlebot restart`.
 
 ## Beet path template
 
@@ -68,80 +104,68 @@ Single disc:  Artist/Album/NN. Title.flac
 Multi-disc:   Artist/Album [Disk N]/NN. Title.flac
 ```
 
-Multi-disc is determined by actual ripped disc count, NOT MusicBrainz `disctotal`
-(avoids false positives from DualDiscs, deluxe editions, etc.).
+Multi-disc is determined by the **actual ripped disc count**, not MusicBrainz
+`disctotal` — this avoids false positives from DualDiscs and deluxe editions.
 
 ## Known gotchas
 
-- **Apostrophes in paths** break BSD xargs — always use `while IFS= read -r` instead
-- **posttag must run last** — beet writes re-add alias tags, posttag cleans them
-- **beet fetchart** fails after sync (DB paths point to DwRugged, art script can't find files) — use `music-fetch-art.py` instead, runs before sync
-- **FLAC lyrics tags** are lowercase (`lyrics`/`unsyncedlyrics`) — Snowsky Disc ignores them; use `.lrc` sidecar files
-- **Partial disc imports** (only have disc 1 of 2): patch `disctotal=1` in the Import-area FLACs before pipeline runs, otherwise it waits forever for disc 2
-- **Hidden track albums** (e.g. Tool/Undertow): beet will import silence tracks — see RERIP.md for cleanup procedure
+- **Apostrophes in paths** break BSD `xargs` — always use `while IFS= read -r`.
+- **posttag must run last** — beet re-adds alias tags on write; posttag cleans them.
+- **`multidisc` flex attr** must be INSERTed via `sqlite3`; `beet modify multidisc=`
+  deletes the row and breaks the template. Handled in `runner.py`.
+- **Partial disc imports** (only disc 1 of 2) wait forever for disc 2 — use
+  `python3 -m spindlebot import --force` to bypass, or patch `disctotal` in the FLACs first.
+- **FLAC lyrics tags** are lowercase and ignored by some DAPs (e.g. Snowsky) — the
+  pipeline writes `.lrc` sidecar files instead.
 
-## Sync command
+The full, current gotcha list lives in [`CLAUDE.md`](CLAUDE.md#known-gotchas).
 
-```bash
-bash ~/.local/bin/music-sync-rugged.sh
-```
-
-Or just say "sync" — Ash knows what to do.
-
-## Lyrics editing workflow
+## Lyrics playback and editing
 
 ### Quick playback check
-mpv picks up `.lrc` sidecar files automatically and displays them as subtitles over album art.
+
+`mpv` picks up `.lrc` sidecars automatically and shows them as subtitles over art:
 
 ```bash
 mpv "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
 ```
 
-Or just tell Ash "pull up [song] by [artist]" and it'll find the path and launch mpv.
-
 ### lrc-editor — visual timestamp editor
 
-Full browser-based waveform editor for adjusting lyric timestamps.
+A standalone browser-based waveform editor for adjusting lyric timing:
 
 ```bash
-lrc-editor "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
+./lrc-editor "/Volumes/DwRugged/Music/Library/Artist/Album/track.flac"
 ```
 
-- Looks for a `.lrc` sidecar alongside the FLAC automatically
-- If no `.lrc` exists, a working copy is created on open; Commit writes the new file
-- Opens in the browser with a waveform and draggable timestamp markers
-- Drag markers left/right to adjust timing
-- Toolbar: **Save Draft** → **Preview in mpv** → **Commit** (overwrites/creates `.lrc`)
+- Loads the `.lrc` sidecar alongside the FLAC automatically (creates a working
+  copy if none exists; **Commit** writes the file).
+- Opens in the browser with a waveform and draggable timestamp markers.
+- Toolbar flow: **Save Draft** → **Preview in mpv** → **Commit**.
 
-#### Editing lyrics
+#### Editing
 
 | Action | How |
 |--------|-----|
-| Select line | Click row or marker; use `[`/`]` to step through |
-| Edit text | `e` or `Enter` on selected line, or double-click |
-| Add line | `a` — inserts at current playback position, opens text editor |
-| Delete line | `Delete`/`Backspace` — confirm dialog, then gone |
-| Adjust timestamp | Drag marker on waveform, or nudge with `,`/`.` |
-| Undo | `Ctrl+Z` — all edits (add, delete, text change, nudge, drag) |
+| Select line | Click row or marker; `[`/`]` to step |
+| Edit text | `e` or `Enter`, or double-click |
+| Add line | `a` — inserts at current playback position |
+| Delete line | `Delete`/`Backspace` — confirm, then gone |
+| Adjust timestamp | Drag the marker, or nudge with `,`/`.` |
+| Undo | `Ctrl+Z` |
 
 #### Keyboard shortcuts
 
-| Key | Action |
-|-----|--------|
-| `Space` | Play / Pause |
-| `m` | Mute toggle |
-| `Home` | Jump to start |
-| `←` / `→` | Seek ±1s |
-| `Ctrl+←` / `Ctrl+→` | Seek ±5s |
-| `Shift+←` / `Shift+→` | Fine seek ±0.1s |
-| `[` / `]` | Prev / Next marker |
-| `,` / `.` | Nudge selected marker ±0.1s |
-| `Shift+,` / `Shift+.` | Nudge selected marker ±1s |
-| `a` | Add line at current position |
-| `e` / `Enter` | Edit selected line text |
-| `Delete` / `Backspace` | Delete selected line |
-| `Ctrl+Z` | Undo |
-| `?` | Keyboard shortcut reference |
+| Key | Action | Key | Action |
+|-----|--------|-----|--------|
+| `Space` | Play / Pause | `[` / `]` | Prev / Next marker |
+| `m` | Mute toggle | `,` / `.` | Nudge marker ±0.1s |
+| `Home` | Jump to start | `Shift+,` / `Shift+.` | Nudge marker ±1s |
+| `←` / `→` | Seek ±1s | `a` | Add line at position |
+| `Ctrl+←` / `Ctrl+→` | Seek ±5s | `e` / `Enter` | Edit selected line |
+| `Shift+←` / `Shift+→` | Fine seek ±0.1s | `Delete` / `Backspace` | Delete selected line |
+| | | `Ctrl+Z` | Undo |
+| | | `?` | Shortcut reference |
 
-**In confirm dialogs:** `Enter`/`y` to confirm, `Escape`/`n` to cancel.  
-**In help modal:** `Escape`, `Space`, `Enter`, or `?` to close.
+**Confirm dialogs:** `Enter`/`y` confirm, `Escape`/`n` cancel.
+**Help modal:** `Escape`, `Space`, `Enter`, or `?` to close.
