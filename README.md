@@ -52,7 +52,7 @@ finalize`.
 | `~/Library/Application Support/SpindleBot/Processing/` | In-flight albums; art + lyrics fetched here |
 | `~/Library/Application Support/SpindleBot/Pending/` | Lyric-complete albums awaiting distribution (formerly `~/Music/Library`) |
 | `~/Library/Application Support/SpindleBot/Duplicates/` | Rips already in the library are parked here, not stranded in Import |
-| *archive dir* | Archived XLD `.log` files — `core.archive_dir` (default `~/Music/All Discs`) |
+| *archive dir* | Archived XLD `.log` files — configurable via `core.archive_dir` |
 | *retention drive* | The permanent library — a configurable `[[destinations]]` target, e.g. `/Volumes/<RetentionDrive>/Music/Library/` |
 | `~/.config/spindlebot/config.toml` + `secrets.toml` | SpindleBot config + credentials |
 | `~/.config/spindlebot/spindlebot.db` | SpindleBot's content-identity + location DB |
