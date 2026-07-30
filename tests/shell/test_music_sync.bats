@@ -127,3 +127,12 @@ MOCK
   # the phrase may appear in a comment; assert no actual rsync command runs
   ! grep -qE '^[[:space:]]*rsync' "$SCRIPT"
 }
+
+@test "hard-fails (no inventory/sync/prune) when no destination is configured" {
+  echo x > "$BATS_TMPDIR/Pending/track.flac"        # there IS work to sync
+  # Blank the configured destination name; a later export overrides the fixture's.
+  echo 'export SPINDLEBOT_DESTINATION_NAME=""' >> "$HOME/.config/spindlebot/bootstrap.sh"
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]        # fail loud rather than prune against an empty target
+  [ ! -f "$MOCK_LOG" ]       # bailed before any spindlebot call (no prune)
+}
