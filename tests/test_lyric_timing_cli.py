@@ -147,3 +147,14 @@ def test_retime_empty_lrc(track, capsys):
     lrc.write_text("", encoding="utf-8")
     assert main(["retime", str(audio), str(lrc), "--backend", "mock"]) == 2
     assert "no lyric lines" in capsys.readouterr().err
+
+
+def test_retime_missing_ai_deps_returns_int_not_systemexit(
+    track, capsys, monkeypatch
+):
+    import lyric_timing.cli as cli
+
+    monkeypatch.setattr(cli, "_ai_deps_available", lambda: False)
+    audio, lrc = track
+    assert main(["retime", str(audio), str(lrc)]) == 2  # returns, never raises
+    assert "setup-ai.sh" in capsys.readouterr().err

@@ -32,8 +32,12 @@ for py in "${CANDIDATES[@]}"; do
     fi
     echo "==> Trying $py ($(command -v "$py"))"
     rm -rf "$VENV_DIR"
-    "$py" -m venv "$VENV_DIR"
-    "$VENV_DIR/bin/pip" install --upgrade pip >/dev/null
+    # guard every step: under `set -e` an unguarded failure would exit the
+    # script, skipping both the remaining candidates and the backup restore
+    if ! "$py" -m venv "$VENV_DIR" || ! "$VENV_DIR/bin/pip" install --upgrade pip >/dev/null; then
+        echo "==> venv bootstrap failed under $py; trying next candidate" >&2
+        continue
+    fi
     if "$VENV_DIR/bin/pip" install -r "$REQUIREMENTS"; then
         [ -n "$BACKUP" ] && rm -rf "$BACKUP"
         echo "==> AI venv ready: $VENV_DIR (python: $py)"

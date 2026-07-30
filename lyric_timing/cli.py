@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.util
 import json
 import os
 import re
@@ -102,7 +103,16 @@ def _lyric_line_texts(lrc_text: str) -> list[str]:
     ]
 
 
+def _ai_deps_available() -> bool:
+    # the backend module itself imports only stdlib (torch is lazy inside
+    # methods), so probe for the actual heavy dep instead of catching an
+    # ImportError that would otherwise surface mid-alignment
+    return importlib.util.find_spec("torch") is not None
+
+
 def _make_backend(args: argparse.Namespace, duration: float | None):
+    """Build the requested backend, or return None (with a stderr hint) when
+    the AI dependencies are missing."""
     # Cap torch's unified-memory appetite BEFORE torch is ever imported: at
     # the cap it raises OOM (the backend retries on CPU) rather than pushing
     # the whole machine into swap. setdefault so callers can override.
@@ -112,17 +122,17 @@ def _make_backend(args: argparse.Namespace, duration: float | None):
         from lyric_timing.backends.mock import MockBackend
 
         return MockBackend(duration=duration or 180.0)
-    try:
-        from lyric_timing.backends.torchaudio_backend import TorchaudioBackend
-    except ImportError as exc:
+    if not _ai_deps_available():
         print(
             f"error: the '{args.backend}' backend needs the AI dependencies "
-            f"(torch/torchaudio/demucs): {exc}\n"
+            "(torch/torchaudio/demucs).\n"
             "Install them with ./setup-ai.sh, then run via the AI venv:\n"
             "  ~/.local/share/spindlebot/ai-venv/bin/python -m lyric_timing retime ...",
             file=sys.stderr,
         )
-        raise SystemExit(2) from exc
+        return None
+    from lyric_timing.backends.torchaudio_backend import TorchaudioBackend
+
     return TorchaudioBackend(isolate_vocals=not args.no_vocal_sep)
 
 
@@ -142,6 +152,8 @@ def cmd_retime(args: argparse.Namespace) -> int:
 
     duration = _audio_duration(audio_path)
     backend = _make_backend(args, duration)
+    if backend is None:
+        return 2
 
     from lyric_timing.aligner import align
 
