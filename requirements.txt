@@ -6,4 +6,4 @@ mutagen>=1.47                          # FLAC tag reading
 
 # Development / testing
 pytest>=7.0
-ruff>=0.4
+ruff==0.15.20                          # pinned: unpinned ruff drifts and breaks CI on new default rules (e.g. 0.16 I001)
