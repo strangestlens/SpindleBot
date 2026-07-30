@@ -133,7 +133,9 @@ def _make_backend(args: argparse.Namespace, duration: float | None):
         return None
     from lyric_timing.backends.torchaudio_backend import TorchaudioBackend
 
-    return TorchaudioBackend(isolate_vocals=not args.no_vocal_sep)
+    return TorchaudioBackend(
+        isolate_vocals=not args.no_vocal_sep, model=args.model
+    )
 
 
 def cmd_retime(args: argparse.Namespace) -> int:
@@ -191,6 +193,9 @@ def cmd_retime(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # module-level imports here are stdlib-only; torch is lazy inside methods
+    from lyric_timing.backends.torchaudio_backend import DEFAULT_MODEL, MODELS
+
     parser = argparse.ArgumentParser(
         prog="lyric_timing", description="AI lyric-timing tools"
     )
@@ -221,6 +226,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retime.add_argument(
         "--backend", choices=["torchaudio", "mock"], default="torchaudio"
+    )
+    retime.add_argument(
+        "--model",
+        choices=list(MODELS),
+        default=DEFAULT_MODEL,
+        help="acoustic model: English (default, most accurate on English "
+        "singing) or the multilingual forced-alignment model",
     )
     retime.add_argument("--language", default=None, help="ISO 639-1 code, e.g. en")
     retime.set_defaults(func=cmd_retime)
