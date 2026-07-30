@@ -22,10 +22,23 @@ class Word:
     confidence: float = 1.0
 
 
+@dataclass(frozen=True)
+class BackendResult:
+    """Everything a backend heard in one track.
+
+    vocal_activity is the (start, end) stretches where someone is singing,
+    or None when the backend cannot tell — which is different from an empty
+    list, meaning "listened, heard no vocal".
+    """
+
+    words: list[Word]
+    vocal_activity: list[tuple[float, float]] | None = None
+
+
 class AlignmentBackend(Protocol):
-    def word_timestamps(
+    def align_audio(
         self, audio_path: Path, transcript: str, *, language: str | None = None
-    ) -> list[Word]:
+    ) -> BackendResult:
         """Return word timings for the known transcript, in transcript order.
 
         Words the backend could not place may be omitted; the aligner

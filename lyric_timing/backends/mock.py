@@ -4,20 +4,34 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lyric_timing.backends.base import Word
+from lyric_timing.backends.base import BackendResult, Word
 
 
 class MockBackend:
     """Returns canned words if given, else spreads the transcript's tokens
-    evenly across [5%, 95%] of the configured duration."""
+    evenly across [5%, 95%] of the configured duration. Vocal activity is
+    whatever the caller canned, or None ("this backend cannot tell")."""
 
-    def __init__(self, words: list[Word] | None = None, *, duration: float = 180.0):
+    def __init__(
+        self,
+        words: list[Word] | None = None,
+        *,
+        duration: float = 180.0,
+        vocal_activity: list[tuple[float, float]] | None = None,
+    ):
         self._words = words
         self._duration = duration
+        self._vocal_activity = vocal_activity
 
-    def word_timestamps(
+    def align_audio(
         self, audio_path: Path, transcript: str, *, language: str | None = None
-    ) -> list[Word]:
+    ) -> BackendResult:
+        return BackendResult(
+            words=self._word_timestamps(transcript),
+            vocal_activity=self._vocal_activity,
+        )
+
+    def _word_timestamps(self, transcript: str) -> list[Word]:
         if self._words is not None:
             return list(self._words)
         from lyric_timing.aligner import tokenize

@@ -198,13 +198,17 @@ lyric_timing/                    — OPTIONAL AI lyric-timing subsystem (peer pa
                                      (byte-compatible with lrc-editor)
   detector.py                    — audit_lrc(): flag .lrc files needing re-timing
                                      (all-identical / low-distinct / crammed-early / non-monotonic)
-  aligner.py                     — align(): word→line matching, interpolation, monotonicity,
-                                     confidence — the offline-testable core
-  backends/base.py               — AlignmentBackend Protocol + Word (swappable + mockable)
+  aligner.py                     — align(): word→line matching, interpolation over *sung* time,
+                                     monotonicity, confidence — the offline-testable core
+  activity.py                    — intervals_from_rms(): vocal-stem RMS envelope → intervals of
+                                     actual singing (pure; the torch part lives in the backend)
+  backends/base.py               — AlignmentBackend Protocol + Word + BackendResult
+                                     (words + optional vocal activity; swappable + mockable)
   backends/mock.py               — deterministic fake for tests
   backends/torchaudio_backend.py — real backend: Demucs vocal sep + chunked wav2vec2 CTC forced
-                                     alignment (torchaudio; memory bounded by 30s windows, not track
-                                     length; lazy heavy imports; run from the AI venv)
+                                     alignment with a star wildcard token (torchaudio; memory
+                                     bounded by 30s windows, not track length; lazy heavy imports;
+                                     run from the AI venv). build_targets() is pure + unit-tested
   cli.py                         — python -m lyric_timing audit|retime
 setup-ai.sh                      — creates the AI venv at ~/.local/share/spindlebot/ai-venv
                                      (Python 3.13) from requirements-ai.txt
@@ -255,7 +259,11 @@ tests/
                                      sanitization, self-containment, --html CLI wiring
   test_lyric_timing_lrc.py       — lyric_timing/lrc parse/format
   test_lyric_timing_detector.py  — audit heuristics
-  test_lyric_timing_aligner.py   — word→line assignment, interpolation, monotonicity (mock backend)
+  test_lyric_timing_aligner.py   — word→line assignment, interpolation (incl. over sung time),
+                                     monotonicity (mock backend)
+  test_lyric_timing_activity.py  — RMS envelope → singing intervals
+  test_lyric_timing_backend_targets.py — CTC target building: star placement, word separators,
+                                     unmappable words (pure; no torch)
   test_lyric_timing_cli.py       — audit + retime CLIs (mock backend)
   test_lyric_timing_torchaudio.py— real-backend integration; skipped unless
                                      LYRIC_TIMING_IT_AUDIO/LYRIC_TIMING_IT_LRC set (never in CI)
@@ -486,5 +494,7 @@ python3 -m spindlebot restart                                # restart launchd a
 ./setup-ai.sh                                                # one-time: install AI lyric-timing deps (heavy)
 python3 -m lyric_timing audit <dir-or-lrc...> [--json]       # flag .lrc files needing re-timing (no heavy deps)
 ~/.local/share/spindlebot/ai-venv/bin/python -m lyric_timing retime <audio> <lrc> \
-    [--overwrite] [--json] [--no-vocal-sep]                  # AI re-time via forced alignment (run from repo root)
+    [--overwrite] [--json] [--no-vocal-sep] \
+    [--model wav2vec2_en|mms_fa]                             # AI re-time via forced alignment (run from repo root;
+                                                             #   mms_fa = multilingual, for non-English lyrics)
 ```
