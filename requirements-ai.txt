@@ -1,0 +1,6 @@
+# Optional AI lyric-timing dependencies — NOT part of core spindlebot.
+# Installed into a dedicated venv by setup-ai.sh (heavy: torch + models).
+demucs>=4.0          # vocal isolation; pulls in torch + torchaudio (the aligner)
+# torchaudio 2.8 ships no default audio I/O backend on macOS; needed both to
+# write the demucs vocal stem and to load audio for alignment
+soundfile>=0.12
