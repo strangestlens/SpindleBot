@@ -11,7 +11,7 @@ Also triggered automatically when a directory is dropped into the Import area (e
 > **Working areas (renamed Apr 2026, Phase A):** "Staging" → **Import** (active import) and "Library" → **Pending** (processed albums awaiting distribution), both relocated under `~/Library/Application Support/SpindleBot/`. Config keys are `core.import_dir` / `core.pending_dir` (legacy `staging_dir`/`library_dir` still honored); env vars are `SPINDLEBOT_IMPORT_DIR` / `SPINDLEBOT_PENDING_DIR`.
 > **Processing area (added Jul 2026, Option C):** a third area **Processing** between Import and Pending holds in-flight albums while art/lyrics are fetched; an album is promoted to Pending only once `album_lyrics_complete()` holds. This eliminates the fetch-lyrics window in which a mount-sync could prune audio out of Pending mid-fetch and strand late lyric sidecars. Config key `core.processing_dir` (default `~/Library/Application Support/SpindleBot/Processing`); env var `SPINDLEBOT_PROCESSING_DIR`. The promote/finalize orchestration lives in `services/promote.py`; `spindlebot finalize` re-fetches lyrics and promotes anything still stuck.
 
-**Sync:** launchd detects DwRugged mount → `music-sync.sh` → fetch-art → posttag → rsync → beets DB path reconciliation → fetch-lyrics → notify
+**Sync:** launchd detects the retention-drive mount (WatchPaths, generated from the first enabled local_drive `[[destinations]]`) → `music-sync.sh` → inventory → review + acknowledge → sync (copy→verify→record presence) → prune (release Pending copies verified on retention) → beets DB path reconciliation → notify
 
 ## Phase status (April 2026)
 

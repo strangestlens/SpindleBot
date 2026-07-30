@@ -128,6 +128,10 @@ source "$CONFIG_DIR/bootstrap.sh" 2>/dev/null || true
 LOG_DIR="${SPINDLEBOT_LOG_DIR:-$HOME/.config/beets}"
 WATCH_VOLUME="${SPINDLEBOT_WATCH_VOLUME:-}"
 
+# launchd refuses to load an agent whose StandardOut/ErrorPath parent doesn't
+# exist — make sure the log dir is there before we bootstrap the agents.
+mkdir -p "$LOG_DIR"
+
 cat > "$LAUNCH_AGENTS/com.strangestlens.music-watcher.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
