@@ -254,7 +254,7 @@ offline against a mock.
 
 Idempotent, and it restores your previous venv if the install fails. It tries
 Python 3.13 down to 3.10 and uses the first that can resolve
-`requirements-ai.txt`. Models (~2–3 GB) download to `~/.cache` on the first
+`requirements-ai.txt`. Models (~700 MB) download to `~/.cache` on the first
 alignment run, not here. Verify with the command `setup-ai.sh` prints on success.
 
 ### Commands

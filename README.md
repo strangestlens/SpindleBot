@@ -197,7 +197,7 @@ light and CI never loads a model.
 ```
 
 Idempotent; a previously working venv is restored if every install attempt
-fails. Models (~2–3 GB: Demucs `htdemucs` + wav2vec2) download to `~/.cache` on
+fails. Models (~700 MB: Demucs `htdemucs` ~300 MB + wav2vec2 ~360 MB) download to `~/.cache` on
 the first alignment run, not during setup.
 
 `audit` needs none of this — it's pure text heuristics and runs on a bare
