@@ -1743,9 +1743,14 @@ def load_track():
     data = request.get_json(force=True)
     lrc_path = Path(data.get("lrc", "")).expanduser()
     # /commit later writes to state["lrc_path"] — never accept a path that
-    # isn't an existing .lrc
+    # isn't an existing .lrc, and never write through a symlink (it would
+    # redirect the commit to wherever the link points)
     if lrc_path.suffix != ".lrc" or not lrc_path.exists():
         return jsonify({"ok": False, "error": f"not an existing .lrc: {lrc_path}"})
+    if lrc_path.is_symlink() or not lrc_path.is_file():
+        return jsonify({"ok": False,
+                        "error": f"refusing symlinked or non-regular .lrc: {lrc_path}"})
+    lrc_path = lrc_path.resolve()
     audio = _sibling_audio(lrc_path)
     if audio is None:
         return jsonify({"ok": False,

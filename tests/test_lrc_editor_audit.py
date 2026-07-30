@@ -140,3 +140,16 @@ def test_load_rejects_non_lrc_and_missing_paths(editor, tmp_path):
     j = client.post("/load", json={"lrc": str(tmp_path / "ghost.lrc")}).get_json()
     assert j["ok"] is False and "not an existing .lrc" in j["error"]
     assert editor.state["lrc_path"] is None  # state untouched
+
+
+def test_load_rejects_symlinked_lrc(editor, tmp_path):
+    # a symlinked .lrc would redirect the /commit write to the link target
+    victim = tmp_path / "important.txt"
+    victim.write_text("do not overwrite", encoding="utf-8")
+    link = tmp_path / "sneaky.lrc"
+    link.symlink_to(victim)
+    (tmp_path / "sneaky.flac").write_bytes(b"fake audio")
+
+    j = editor.app.test_client().post("/load", json={"lrc": str(link)}).get_json()
+    assert j["ok"] is False and "symlink" in j["error"]
+    assert editor.state["lrc_path"] is None
