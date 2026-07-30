@@ -11,7 +11,7 @@ Also triggered automatically when a directory is dropped into the Import area (e
 > **Working areas (renamed Apr 2026, Phase A):** "Staging" → **Import** (active import) and "Library" → **Pending** (processed albums awaiting distribution), both relocated under `~/Library/Application Support/SpindleBot/`. Config keys are `core.import_dir` / `core.pending_dir` (legacy `staging_dir`/`library_dir` still honored); env vars are `SPINDLEBOT_IMPORT_DIR` / `SPINDLEBOT_PENDING_DIR`.
 > **Processing area (added Jul 2026, Option C):** a third area **Processing** between Import and Pending holds in-flight albums while art/lyrics are fetched; an album is promoted to Pending only once `album_lyrics_complete()` holds. This eliminates the fetch-lyrics window in which a mount-sync could prune audio out of Pending mid-fetch and strand late lyric sidecars. Config key `core.processing_dir` (default `~/Library/Application Support/SpindleBot/Processing`); env var `SPINDLEBOT_PROCESSING_DIR`. The promote/finalize orchestration lives in `services/promote.py`; `spindlebot finalize` re-fetches lyrics and promotes anything still stuck.
 
-**Sync:** launchd detects DwRugged mount → `music-sync-rugged.sh` → fetch-art → posttag → rsync → beets DB path reconciliation → fetch-lyrics → notify
+**Sync:** launchd detects the retention-drive mount (WatchPaths, generated from the first enabled local_drive `[[destinations]]`) → `music-sync.sh` → inventory → review + acknowledge → sync (copy→verify→record presence) → prune (release Pending copies verified on retention) → beets DB path reconciliation → notify
 
 ## Phase status (April 2026)
 
@@ -19,7 +19,7 @@ Also triggered automatically when a directory is dropped into the Import area (e
 |-------|--------|-------|
 | 1 — Config & Portability | Complete | `config.toml`, `bootstrap.sh`, `spindlebot check`, all scripts use `$SPINDLEBOT_*` env vars |
 | 2 — Modular Architecture | Complete | All import pipeline logic in Python (`runner.py` + `stages/`). Shell scripts are one-liner shims. Full test coverage. |
-| 3 — Sync pipeline in Python | Not started | `music-sync-rugged.sh` still shell; next target for Pythonification |
+| 3 — Sync pipeline in Python | Not started | `music-sync.sh` still shell; next target for Pythonification |
 | 4–6 | Not started | |
 
 > The table above is the **original roadmap**. It is superseded by the active epic below, which uses its own phase labels (**A, 0, 1, 2, …**). Don't conflate the two numbering schemes.
@@ -28,7 +28,7 @@ Also triggered automatically when a directory is dropped into the Import area (e
 
 Replacing "library = whatever is at known paths" with a **SpindleBot-owned SQLite DB** (`~/.config/spindlebot/spindlebot.db`) that is the system of record for content **identity**, every **location** a file lives, and (later) version history. Long-form design + locked decisions: `~/.claude/plans/immutable-shimmying-blanket.md` (user-local; not in the repo).
 
-**Status:** Phase A (#26), Phase 0 (#27), Phase 1 (#28), Phase sidecars (#30), Phase 2 (reconciler + `review` + vclock/lyric/conflict substrate, #31) — all merged. **Phase 3 (destructive sync) merged:** `services/sync.py` `execute_pending` runs acknowledged `pending_action` COPY rows via copy→verify-dest-sha256→write-presence (merged #35, non-destructive) incl. sidecars (#36); `prune_released` + `spindlebot prune` release the authoring copy once verified on retention (dry-run default). **Two distinct destructive ops, different gates:** (a) **PRUNE** (release the non-retention authoring/Pending copy) fires at the FIRST retention copy — Daniel's chosen model; releasing a non-retention copy never lowers the retention count, so `min_copies` is only a *warning* (`below_floor`), not a gate. (b) **DELETE** (remove a *retention* copy) IS gated: never drop retention copies below `min_copies` — built via `services/sync.py` + `spindlebot delete` (#39, dry-run default). The **LIVE CUTOVER has landed** (#38): `music-sync-rugged.sh` is now the content-addressed mount-sync (inventory→review→sync→prune; no `rsync --remove-source-files`). Active line of work is **Phase 4 (lyrics bidirectional sync)**: **4.0 the causal-lineage substrate** (#48) — schema v7 `lyric_version_presence` + `services/lyrics_sync.py`; the reconciler infers linear-edit vs concurrent-conflict vs behind from scan history instead of stamping every observed `.lrc` with a naive single-location vclock. No bytes moved yet — **4.1** is auto-propagation of clean wins + conflict-file preservation, **4.2** the `conflicts list|resolve` CLI. Later: 5 plugins + AI re-timer, 6 DB snapshot, 7 daemon.
+**Status:** Phase A (#26), Phase 0 (#27), Phase 1 (#28), Phase sidecars (#30), Phase 2 (reconciler + `review` + vclock/lyric/conflict substrate, #31) — all merged. **Phase 3 (destructive sync) merged:** `services/sync.py` `execute_pending` runs acknowledged `pending_action` COPY rows via copy→verify-dest-sha256→write-presence (merged #35, non-destructive) incl. sidecars (#36); `prune_released` + `spindlebot prune` release the authoring copy once verified on retention (dry-run default). **Two distinct destructive ops, different gates:** (a) **PRUNE** (release the non-retention authoring/Pending copy) fires at the FIRST retention copy — Daniel's chosen model; releasing a non-retention copy never lowers the retention count, so `min_copies` is only a *warning* (`below_floor`), not a gate. (b) **DELETE** (remove a *retention* copy) IS gated: never drop retention copies below `min_copies` — built via `services/sync.py` + `spindlebot delete` (#39, dry-run default). The **LIVE CUTOVER has landed** (#38): `music-sync.sh` is now the content-addressed mount-sync (inventory→review→sync→prune; no `rsync --remove-source-files`). Active line of work is **Phase 4 (lyrics bidirectional sync)**: **4.0 the causal-lineage substrate** (#48) — schema v7 `lyric_version_presence` + `services/lyrics_sync.py`; the reconciler infers linear-edit vs concurrent-conflict vs behind from scan history instead of stamping every observed `.lrc` with a naive single-location vclock. No bytes moved yet — **4.1** is auto-propagation of clean wins + conflict-file preservation, **4.2** the `conflicts list|resolve` CLI. Later: 5 plugins + AI re-timer, 6 DB snapshot, 7 daemon.
 
 **Layering (keep consistent):**
 - `spindlebot/core/` — pure, no DB/IO side effects, no `print`: `identity.py` (hashing), `enums.py`, `models.py` (frozen dataclasses + `from_row`), `errors.py`.
@@ -102,15 +102,16 @@ spindlebot/
 music-watcher.sh                 — fswatch daemon: fires spindlebot import on .log or dir drop
                                      installed to ~/.local/bin/ by setup.sh
 music-import.sh                  — shim: sources bootstrap.sh, exec's spindlebot import "$@"
-music-sync-rugged.sh             — sync to DwRugged (still shell, Phase 3 target)
+music-sync.sh                    — content-addressed sync to the retention drive (first enabled local_drive dest)
 music-notify.sh                  — legacy notify shim (superseded by stages/notify.py)
 music-pretag.py                  — legacy root-level script (superseded by stages/pretag.py)
 music-fetch-lyrics.py            — legacy root-level script (superseded by stages/fetch_lyrics.py)
 music-fetch-art.py               — legacy root-level script (superseded by stages/fetch_art.py)
 setup.sh                         — first-time environment setup: config files, bootstrap.sh,
                                      music-watcher.sh → ~/.local/bin/, plists → ~/Library/LaunchAgents/
-com.strangestlens.music-watcher.plist       — launchd agent for the fswatch watcher daemon
-com.strangestlens.music-sync-rugged.plist   — launchd agent for DwRugged sync
+(launchd agents com.strangestlens.music-watcher + com.strangestlens.music-sync
+                                     are GENERATED per-machine by setup.sh — home dir, log dir, and
+                                     the retention volume to watch all come from config, not baked in)
 lrc-editor                       — standalone Flask/WaveSurfer.js lyrics timing editor (single
                                      executable); its "AI Arrange" button POSTs /ai-arrange, which runs
                                      lyric_timing retime as a background subprocess of the AI venv;
@@ -186,7 +187,7 @@ tests/
 8. **posttag** — strip beet alias tags, truncate DATE to year
 9. **fetch-art + fetch-lyrics** — embed art, write `.lrc` sidecars
 10. **archive** — move XLD `.log` to archive dir
-11. **auto-sync-or-hint** — only on a fully successful run with `spindlebot_cfg` set (mirrors the `via_processing` gate). If `core.auto_sync_on_import` is **false** (default): log a tail-friendly HINT to run `music-sync-rugged.sh` manually. If **true**: check whether the retention destination path (`ImportConfig.retention_path`, the first enabled **local_drive** `[[destinations]]` — an rclone path can never serve as the mount check) exists — mounted ⇒ log `🔄 auto-syncing…` and invoke the self-guarding `music-sync-rugged.sh` (do NOT reimplement sync); not mounted ⇒ log a reconnect hint and don't invoke. A sync failure here is logged, never promoted to an import failure. Injectable via `ImportRunner(sync_runner=…)` + `ImportConfig.sync_script`/`retention_path` so tests never shell out.
+11. **auto-sync-or-hint** — only on a fully successful run with `spindlebot_cfg` set (mirrors the `via_processing` gate). If `core.auto_sync_on_import` is **false** (default): log a tail-friendly HINT to run `music-sync.sh` manually. If **true**: check whether the retention destination path (`ImportConfig.retention_path`, the first enabled **local_drive** `[[destinations]]` — an rclone path can never serve as the mount check) exists — mounted ⇒ log `🔄 auto-syncing…` and invoke the self-guarding `music-sync.sh` (do NOT reimplement sync); not mounted ⇒ log a reconnect hint and don't invoke. A sync failure here is logged, never promoted to an import failure. Injectable via `ImportRunner(sync_runner=…)` + `ImportConfig.sync_script`/`retention_path` so tests never shell out.
 
 `ImportRunner.__init__` accepts an optional `echo: Callable[[str], None]` for live terminal
 feedback, and an optional `sync_runner: Callable[[Path], int]` (defaults to running
@@ -279,7 +280,7 @@ SpindleBot DB would track copies across devices.
 - Pending area: `~/Library/Application Support/SpindleBot/Pending` → `/Volumes/DwRugged/Music/Library` (processed, lyric-complete albums awaiting distribution; formerly `~/Music/Library`)
 - Duplicates area: `~/Library/Application Support/SpindleBot/Duplicates` (already-in-library rips moved here by import instead of stranding in Import; `core.duplicates_dir`, env `SPINDLEBOT_DUPLICATES_DIR`)
 - beets DB: `~/.config/beets/library.db`
-- launchd agents: `com.strangestlens.music-watcher`, `com.strangestlens.music-sync-rugged`
+- launchd agents: `com.strangestlens.music-watcher`, `com.strangestlens.music-sync`
 
 ## Setup and useful commands
 

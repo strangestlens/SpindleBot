@@ -51,6 +51,7 @@ def _make_config(tmp_path: Path, *, force: bool = False, trigger: Path | None = 
         duplicates_dir=tmp_path / "Duplicates",
         pipeline_dir=tmp_path / "pipeline",
         log_file=tmp_path / "logs" / "watcher.log",
+        destination_name="DwRugged",
     )
 
 
@@ -829,7 +830,7 @@ def test_auto_sync_default_false_logs_hint_and_does_not_sync(tmp_path):
     assert log_contains(cfg, "core.auto_sync_on_import = true")
     # The hint points at the SAME resolved entrypoint auto-sync would invoke
     # (pipeline_dir fallback here), never a hard-coded ~/.local/bin shim.
-    assert log_contains(cfg, str(cfg.pipeline_dir / "music-sync-rugged.sh"))
+    assert log_contains(cfg, str(cfg.pipeline_dir / "music-sync.sh"))
     assert not log_contains(cfg, "~/.local/bin")
 
 
@@ -855,7 +856,7 @@ def test_auto_sync_true_mounted_invokes_sync(tmp_path):
     cfg.spindlebot_cfg = MagicMock()
     cfg.auto_sync_on_import = True
     cfg.retention_path = tmp_path  # exists → "mounted"
-    cfg.sync_script = tmp_path / "pipeline" / "music-sync-rugged.sh"
+    cfg.sync_script = tmp_path / "pipeline" / "music-sync.sh"
 
     sync = MagicMock(return_value=0)
     result = _run_complete_processing_import(cfg, sync_runner=sync)
@@ -919,7 +920,7 @@ def test_failed_import_never_auto_syncs(tmp_path):
 
 
 def test_default_sync_runner_logs_stderr_tail_on_failure(tmp_path):
-    """A sync script that dies before opening rugged-sync.log (bootstrap/config
+    """A sync script that dies before opening music-sync.log (bootstrap/config
     error) leaves its stderr as the only trace — the default runner must log a
     tail of it (file only, echo=False) while preserving the exit code."""
     cfg = _make_config(tmp_path)
@@ -930,7 +931,7 @@ def test_default_sync_runner_logs_stderr_tail_on_failure(tmp_path):
     echoed = []
     runner._echo = echoed.append
     with patch(_SUBPROCESS, return_value=fail):
-        rc = runner._default_sync_runner(tmp_path / "music-sync-rugged.sh")
+        rc = runner._default_sync_runner(tmp_path / "music-sync.sh")
 
     assert rc == 1
     assert log_contains(cfg, "ERROR: SpindleBot not configured")
@@ -939,7 +940,7 @@ def test_default_sync_runner_logs_stderr_tail_on_failure(tmp_path):
     # Success produces no output-tail logging.
     ok = MagicMock(returncode=0, stdout="noise", stderr="")
     with patch(_SUBPROCESS, return_value=ok):
-        rc = runner._default_sync_runner(tmp_path / "music-sync-rugged.sh")
+        rc = runner._default_sync_runner(tmp_path / "music-sync.sh")
     assert rc == 0
     assert not log_contains(cfg, "noise")
 

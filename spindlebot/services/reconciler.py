@@ -105,7 +105,7 @@ def reconcile_location(
 
     `source_locations` is any location content can be copied FROM — the authoring
     library AND other retention locations (so once Pending is pruned, a retention
-    target like a DAP can still be filled from DwRugged). The authoritative source
+    target like a DAP can still be filled from the retention drive). The authoritative source
     is preferred when content lives on more than one. When `progress` is given,
     fires a ProgressEvent per proposed action (indeterminate total).
     """

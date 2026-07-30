@@ -114,23 +114,100 @@ cp "$PIPELINE_DIR/music-watcher.sh" "$HOME/.local/bin/music-watcher.sh"
 chmod +x "$HOME/.local/bin/music-watcher.sh"
 echo "Installed music-watcher.sh → ~/.local/bin/music-watcher.sh"
 
-# ── 7. Install launchd plists ─────────────────────────────────────────────────
+# ── 7. Generate + install launchd agents ─────────────────────────────────────
+# The plists are GENERATED (not copied) so the per-machine bits — home dir, log
+# dir, and the retention volume to watch — are correct for THIS install rather
+# than baked to one person's machine. The watch volume comes from the first
+# enabled local_drive [[destinations]] (config, not a hard-coded drive).
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 mkdir -p "$LAUNCH_AGENTS"
-for plist in \
-  com.strangestlens.music-watcher.plist \
-  com.strangestlens.music-sync-rugged.plist; do
-  if [ -f "$PIPELINE_DIR/$plist" ]; then
-    cp "$PIPELINE_DIR/$plist" "$LAUNCH_AGENTS/$plist"
-    echo "Installed $plist → ~/Library/LaunchAgents/"
-  fi
-done
 
-# Reload agents — bootout is a no-op if not currently loaded
+# Pull the computed environment (log dir + retention watch volume) for THIS host.
+# shellcheck source=/dev/null
+source "$CONFIG_DIR/bootstrap.sh" 2>/dev/null || true
+LOG_DIR="${SPINDLEBOT_LOG_DIR:-$HOME/.config/beets}"
+WATCH_VOLUME="${SPINDLEBOT_WATCH_VOLUME:-}"
+
+# launchd refuses to load an agent whose StandardOut/ErrorPath parent doesn't
+# exist — make sure the log dir is there before we bootstrap the agents.
+mkdir -p "$LOG_DIR"
+
+cat > "$LAUNCH_AGENTS/com.strangestlens.music-watcher.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.strangestlens.music-watcher</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$HOME/.local/bin/music-watcher.sh</string>
+  </array>
+  <key>StandardOutPath</key>
+  <string>$LOG_DIR/watcher-stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>$LOG_DIR/watcher-stderr.log</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+PLIST
+echo "Generated com.strangestlens.music-watcher.plist"
+
+# WatchPaths fires the sync agent when the retention volume mounts. With no
+# local_drive destination configured yet, install it without a trigger (still
+# runnable manually / by `spindlebot restart`).
+if [ -n "$WATCH_VOLUME" ]; then
+  WATCH_BLOCK="  <key>WatchPaths</key>
+  <array>
+    <string>$WATCH_VOLUME</string>
+  </array>"
+else
+  WATCH_BLOCK="  <!-- No local_drive destination configured — no mount trigger. -->"
+  echo "  (no local_drive destination — sync agent installed without a mount trigger)"
+fi
+
+cat > "$LAUNCH_AGENTS/com.strangestlens.music-sync.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.strangestlens.music-sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$PIPELINE_DIR/music-sync.sh</string>
+  </array>
+$WATCH_BLOCK
+  <key>StandardOutPath</key>
+  <string>$LOG_DIR/music-sync-stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>$LOG_DIR/music-sync-stderr.log</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
+PLIST
+echo "Generated com.strangestlens.music-sync.plist"
+
 GUI_UID="gui/$(id -u)"
+
+# Retire the pre-rename sync agent if it's still loaded/installed (music-sync-rugged).
+launchctl bootout "$GUI_UID/com.strangestlens.music-sync-rugged" 2>/dev/null || true
+rm -f "$LAUNCH_AGENTS/com.strangestlens.music-sync-rugged.plist"
+
+# Validate + (re)load. bootout is a no-op if not currently loaded.
 for label in \
   com.strangestlens.music-watcher \
-  com.strangestlens.music-sync-rugged; do
+  com.strangestlens.music-sync; do
+  if ! plutil -lint "$LAUNCH_AGENTS/$label.plist" >/dev/null; then
+    echo "ERROR: generated $label.plist is invalid" >&2
+    exit 1
+  fi
   launchctl bootout "$GUI_UID/$label" 2>/dev/null || true
   launchctl bootstrap "$GUI_UID" "$LAUNCH_AGENTS/$label.plist"
   echo "Started $label"

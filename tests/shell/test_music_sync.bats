@@ -1,12 +1,12 @@
 #!/usr/bin/env bats
-# Tests for music-sync-rugged.sh — the content-addressed mount-sync.
+# Tests for music-sync.sh — the content-addressed mount-sync.
 #
 # The script orchestrates the tested spindlebot commands; these verify the
 # shell glue: the guard conditions, the command sequence, and the safety
 # ordering (prune only after a clean sync). The commands themselves are covered
 # by pytest (test_sync.py / test_prune.py / test_reconciler.py).
 
-SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/music-sync-rugged.sh"
+SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/music-sync.sh"
 FIXTURES="$(cd "$(dirname "$BATS_TEST_FILENAME")/fixtures" && pwd)"
 
 setup() {
@@ -27,7 +27,7 @@ setup() {
   export PATH="$BATS_TMPDIR/bin:$PATH"
   export MOCK_LOG="$BATS_TMPDIR/mock.log"
   # isolate the lockfile to the temp dir — never touch /tmp / a real agent's lock
-  export SPINDLEBOT_RUGGED_LOCKFILE="$BATS_TMPDIR/rugged.lock"
+  export SPINDLEBOT_SYNC_LOCKFILE="$BATS_TMPDIR/music-sync.lock"
 }
 
 teardown() {
@@ -126,4 +126,13 @@ MOCK
 @test "the old rsync MOVE is gone — no rsync command in the script" {
   # the phrase may appear in a comment; assert no actual rsync command runs
   ! grep -qE '^[[:space:]]*rsync' "$SCRIPT"
+}
+
+@test "hard-fails (no inventory/sync/prune) when no destination is configured" {
+  echo x > "$BATS_TMPDIR/Pending/track.flac"        # there IS work to sync
+  # Blank the configured destination name; a later export overrides the fixture's.
+  echo 'export SPINDLEBOT_DESTINATION_NAME=""' >> "$HOME/.config/spindlebot/bootstrap.sh"
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]        # fail loud rather than prune against an empty target
+  [ ! -f "$MOCK_LOG" ]       # bailed before any spindlebot call (no prune)
 }
