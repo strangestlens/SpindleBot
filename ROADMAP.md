@@ -14,6 +14,14 @@
 >   refactor" for its detailed status, and [`HANDOFF.md`](HANDOFF.md) for the
 >   overall current state.
 >
+> - Separately, an optional **AI lyric-timing subsystem** (`lyric_timing/`) has
+>   been built and merged: it audits `.lrc` files for bad timing and re-times
+>   them against the audio by forced alignment. It repairs timing on lyrics the
+>   pipeline *already has* — it is **not** a lyrics source, and does not deliver
+>   the "Lyric Source Note: Shazam" section below, which remains unstarted. See
+>   [`README.md`](README.md#ai-lyric-timing-optional) and
+>   [`HANDOFF.md`](HANDOFF.md#optional-ai-lyric-timing).
+>
 > The forward-looking sections here (destinations, remote access via Navidrome,
 > the Mac app vision, the Shazam lyric source) remain valid and are kept as
 > strategic reference. Don't conflate the "Phase N" labels here with the DB
@@ -37,6 +45,7 @@ SpindleBot is a personal music intelligence system. The immediate goal is a clea
 | **4** | Error recovery & resilience | Partial — lyric-completeness gating + finalize sweep; failure journal still TODO |
 | **5** | Input sources | XLD/CD + folder drops; digital-download "gentle mode" still TODO |
 | **6** | Remote library access | Not yet addressed — Navidrome recommendation below |
+| — | Lyric timing quality | **Delivered** — `lyric_timing/` audit + forced-alignment retime, wired into lrc-editor |
 | — | macOS-only architecture | Acceptable; future Mac App potential |
 
 ---
@@ -75,6 +84,12 @@ sources               = ["lrclib", "shazam"]  # ordered preference
 sources       = ["caa", "itunes"]
 min_size_px   = 500
 ```
+
+> That block is the **original 2026 sketch**, not the config that shipped. Live
+> keys differ: `staging_dir`/`library_dir` are now `import_dir`/`pending_dir`
+> (plus `processing_dir`, `duplicates_dir`), and `lyrics.sources` is
+> `["lrclib"]` — the `"shazam"` entry above was aspirational and no such source
+> exists. `config.toml.example` is the current reference.
 
 Credentials (Telegram token, Genius key, etc.) should additionally support reading from environment variables, prefixed `SPINDLEBOT_`, so they can be injected in CI or Docker without touching the file.
 
@@ -131,6 +146,12 @@ spindlebot/
 └── cli.py                  # `spindlebot` commands
 ```
 
+> The `lyrics/` subpackage in that sketch was never built — lyric fetching lives
+> in `pipeline/stages/fetch_lyrics.py` and talks only to lrclib. The one piece
+> that exists is an alignment engine, and it was deliberately built **outside**
+> `spindlebot`, as the peer `lyric_timing/` package: its torch/demucs
+> dependencies have no business in the core pipeline or in CI.
+
 ### CLI
 
 ```bash
@@ -164,7 +185,7 @@ Target: 80%+ coverage on the `stages/` and `lyrics/` modules. The watchers and C
 
 ### Shell Scripts → Wrappers Only
 
-`music-import.sh`, `music-sync-rugged.sh` become thin stubs that call `python -m spindlebot`. Keep them during the transition so launchd plists don't need to change immediately.
+`music-import.sh`, `music-sync.sh` become thin stubs that call `python -m spindlebot`. Keep them during the transition so launchd plists don't need to change immediately.
 
 ---
 
@@ -322,6 +343,12 @@ This is a real path to the App Store. The core pipeline Python code doesn't chan
 
 ## Lyric Source Note: Shazam
 
+> **Status: not started.** There is no Shazam integration in the codebase.
+> lrclib is still the only lyric source (`sources = ["lrclib"]` in
+> `config.toml.example`; `fetch_lyrics.py` talks to nothing else). The whole
+> plan below is still a plan — see the note after it for the one piece that
+> landed separately.
+
 Shazam is a good plain-text lyrics source and worth adding to the `lyrics/` module. The challenge is that it returns unsynced text, while lrclib returns timestamped LRC. The approach:
 
 1. **Preferred path:** lrclib for synced LRC (keep as primary).
@@ -331,6 +358,26 @@ Shazam is a good plain-text lyrics source and worth adding to the `lyrics/` modu
    - Duration-weighted line distribution (longer lines → more time) — slightly better.
    - Eventual: use audio analysis (onset detection, silence gaps) to segment the track and align text to segments. This is genuinely hard but would be impressive.
 4. The resulting LRC is marked as "estimated" (a non-standard comment line at the top: `[ti:Album Title] [re:spindlebot-estimated]`) so you can identify and manually fix in lrc-editor if desired.
+
+### What the `lyric_timing` subsystem does and doesn't change here
+
+Step 3's "eventual, genuinely hard" option is essentially built — the merged
+`lyric_timing/` package isolates the vocal stem with Demucs and runs wav2vec2 CTC
+**forced alignment**, which is stronger than the onset-detection sketch above and
+yields per-line confidence.
+
+But it does **not** advance this section's actual goal, and it is not a step in
+this plan. `retime` re-times lyric text that is *already in the `.lrc` file*; it
+has no lyric source of its own and cannot help when lrclib returns nothing. The
+gap steps 1–2 exist to close — get plain text from somewhere when lrclib misses —
+is untouched.
+
+So if a plain-text source (Shazam, Genius) is ever wired into the fetch stage, the
+alignment half of the problem is already solved and step 3 can be dropped: hand
+the fetched text to `retime` instead of estimating. Step 4's "estimated" marker is
+likewise unnecessary — quality is already surfaced by `lyric_timing audit` (which
+flags all-identical stamps, bulk stamping, crammed-early, non-monotonic) and by
+lrc-editor coloring sub-0.5-confidence markers orange after an AI Arrange.
 
 ---
 

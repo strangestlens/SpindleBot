@@ -242,13 +242,31 @@ Tests that need controlled art-fetching behaviour must include `musicbrainz_albu
 FLAC fixture tags. Without it, `_fetch_from_caa` is skipped entirely (no MBID → `if mbid:`
 not entered), so `_fetch_from_itunes` runs for real against the network.
 
+**9. `lyric_timing retime` runs from the repo root, in the AI venv**
+The AI venv doesn't have `lyric_timing` installed — it resolves off the CWD. Any caller
+must set `cwd` to the pipeline dir (`lrc-editor` passes `PIPELINE_DIR`), or the subprocess
+dies with `No module named lyric_timing`. Same reason `audit` shells out with
+`cwd=PIPELINE_DIR`.
+
+**10. `retime` stdout is a data channel**
+`--json` and the default LRC output go to stdout and nothing else may. Demucs and torch
+print progress freely, so `cmd_retime` wraps the whole `align()` call in
+`contextlib.redirect_stdout(sys.stderr)`. Anything new that prints during alignment must
+stay on stderr or it will corrupt the caller's parse — this already broke `--json` once.
+
+**11. Heavy imports in `lyric_timing` stay lazy**
+`torch`/`torchaudio`/`demucs` are imported inside methods, never at module scope, so
+`audit` and the whole test suite run on a bare Python. `_ai_deps_available()` probes for
+`torch` via `importlib.util.find_spec` rather than catching an `ImportError` mid-alignment.
+MPS watermark env vars must be set *before* torch is first imported.
+
 ## Code quality non-negotiables
 
 - shellcheck clean on all `.sh` files before commit. Use `# shellcheck disable=SC####` with a comment explaining why — no blanket suppressions.
 - ruff for Python linting (configured in `requirements.txt`).
 - No print-driven side effects in library code. `print()` only in CLI entry points.
 - beets template vars (`$albumartist`, `$path`, etc.) must be in single quotes in shell — use `# shellcheck disable=SC2016` with the comment `"beet template var, not a bash var"`.
-- All new Python modules go in `spindlebot/` and must have corresponding tests in `tests/`.
+- All new Python modules go in `spindlebot/` — or, for the optional AI subsystem, in `lyric_timing/` — and must have corresponding tests in `tests/`. Nothing that pulls a heavy dependency (torch, demucs) may land in `spindlebot/`; that boundary is what keeps the core pipeline and CI light.
 
 ## Design decisions
 

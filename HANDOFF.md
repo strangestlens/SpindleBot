@@ -40,7 +40,7 @@ XLD rips a CD → writes a .log to the Import area
 **Sync** (the retention drive is mounted):
 
 ```
-launchd detects the mount → music-sync-rugged.sh
+launchd detects the mount → music-sync.sh
   → content-addressed sync: inventory → review → copy→verify→record → prune
   → notify
 ```
@@ -70,6 +70,11 @@ Key external tools: **beets** (MusicBrainz matching + its own SQLite item DB),
 **mpv** (playback/preview), and the standalone **lrc-editor** (Flask/WaveSurfer.js
 lyric-timing editor).
 
+There is also an **optional AI lyric-timing subsystem** (`lyric_timing/`, a peer
+package to `spindlebot/`) that finds and repairs mistimed `.lrc` files. It is not
+part of the import pipeline and its heavy dependencies live in their own venv —
+see [Optional: AI lyric timing](#optional-ai-lyric-timing).
+
 ---
 
 ## Current state (July 2026)
@@ -86,15 +91,19 @@ mid-way through a larger content-addressed refactor.
 - **Content-addressed library refactor (active epic):** a SpindleBot-owned SQLite
   DB (`~/.config/spindlebot/spindlebot.db`) tracks content identity, locations,
   and copies. Phases A, 0, 1, sidecars, 2, and 3 (destructive sync incl.
-  copy→verify→record, prune, and gated delete) are merged. The `music-sync-rugged.sh`
+  copy→verify→record, prune, and gated delete) are merged. The `music-sync.sh`
   cutover to content-addressed sync (no more `rsync --remove-source-files`) has
   landed. **Phase 4 (lyrics bidirectional sync) is underway** — 4.0, the causal-lineage
-  substrate (schema v7 `lyric_version_presence` + `services/lyrics_sync.py`), is in
-  review. See [`CLAUDE.md`](CLAUDE.md) → "Content-addressed library refactor" for
+  substrate (schema v7 `lyric_version_presence` + `services/lyrics_sync.py`), is
+  merged. See [`CLAUDE.md`](CLAUDE.md) → "Content-addressed library refactor" for
   the precise per-phase status.
+- **AI lyric timing (side subsystem):** merged and usable. `lyric_timing/` audits
+  `.lrc` files for bad timing and re-times them against the audio by forced
+  alignment, wired into lrc-editor as an **Audit** page and an **AI Arrange**
+  button. Optional and self-contained — see below.
 
-The forward-looking roadmap (lyrics bidirectional sync, AI re-timer, remote access
-via Navidrome, a Mac app) lives in [`ROADMAP.md`](ROADMAP.md).
+The forward-looking roadmap (lyrics bidirectional sync, remote access via
+Navidrome, a Mac app) lives in [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
@@ -220,8 +229,84 @@ spindlebot restart                        # restart the launchd agents
 > never drops retention below `min_copies`.
 
 The daemons — the fswatch import watcher and the retention-drive mount sync — run under
-launchd (`com.strangestlens.music-watcher`, `com.strangestlens.music-sync-rugged`)
+launchd (`com.strangestlens.music-watcher`, `com.strangestlens.music-sync`)
 and are installed by `setup.sh`. Use `spindlebot restart` to bounce them.
+
+---
+
+## Optional: AI lyric timing
+
+A peer package, `lyric_timing/`, not part of the import pipeline and not required
+to run SpindleBot. It exists because lrclib sometimes has only *plain* lyrics:
+the fetch stage still writes an `.lrc`, but every line is stamped `[00:00.00]`.
+This subsystem finds those files and re-times them against the audio.
+
+**Why it's separate:** the real alignment backend needs torch, torchaudio, and
+demucs. Those never enter core SpindleBot or CI — they go in a dedicated venv,
+and the backend sits behind a `Protocol` so every timing rule is unit-tested
+offline against a mock.
+
+### Install (one time)
+
+```bash
+./setup-ai.sh    # → ~/.local/share/spindlebot/ai-venv  (override: $SPINDLEBOT_AI_VENV)
+```
+
+Idempotent, and it restores your previous venv if the install fails. It tries
+Python 3.13 down to 3.10 and uses the first that can resolve
+`requirements-ai.txt`. Models (~700 MB) download to `~/.cache` on the first
+alignment run, not here. Verify with the command `setup-ai.sh` prints on success.
+
+### Commands
+
+```bash
+# audit — pure text heuristics, NO heavy deps, runs on the system python3
+python3 -m lyric_timing audit <dir-or-.lrc ...> [--json]
+
+# retime — forced alignment; must run from the repo root, via the AI venv
+~/.local/share/spindlebot/ai-venv/bin/python -m lyric_timing retime \
+    <audio> <lrc> [--overwrite] [--json] [--no-vocal-sep]
+```
+
+`audit` recurses directories and reports one line per suspicious file:
+`all-timestamps-identical`, `low-distinct-timestamps`, `timestamps-crammed-early`,
+`non-monotonic`, or `no-timed-lines`. The thresholds are deliberately
+conservative — a hand-timed song with a long instrumental tail should not appear.
+
+`retime` keeps the lyric text and recomputes only the timestamps: Demucs isolates
+the vocal stem, wav2vec2 CTC forced alignment over 30-second windows yields word
+times, words are matched to lines positionally, and unmatched or low-confidence
+lines are interpolated between confident anchors, then forced monotonic. It is
+**non-destructive by default** — the new LRC goes to stdout unless you pass
+`--overwrite`.
+
+### In lrc-editor
+
+Two toolbar entries drive the same two commands from the browser:
+
+- **Audit** → the `/audit` page. Pick a folder and an output JSON with the native
+  macOS pickers, run it, and get a table of only the suspicious files. **Edit** on
+  a row loads that track directly into the editor. Paths and the last result set
+  persist in `~/.config/spindlebot/lrc-editor-state.json`.
+- **AI Arrange** → runs `retime` on the loaded track using the lyric text already
+  in the editor, as a `nice`'d, memory-capped background subprocess of the AI
+  venv. Results apply through the undo stack, deliberate empty-text markers keep
+  their manual times, and anything under 0.5 confidence turns orange for manual
+  review. Nothing auto-saves; **Commit** still writes the file.
+
+`lrc-editor` finds the venv via `$SPINDLEBOT_AI_VENV` and the package via
+`$SPINDLEBOT_PIPELINE_DIR` (defaulting to the editor's own directory). Without
+the venv, **AI Arrange** reports "AI venv not found — run setup-ai.sh first"; the
+rest of the editor is unaffected.
+
+### Tests
+
+`tests/test_lyric_timing_*.py` and `tests/test_lrc_editor_{ai,audit}.py` cover
+parse/format, the audit heuristics, the aligner, both CLIs, and the editor's job
+orchestration — all against the mock backend, so the standard `pytest` run needs
+none of the AI dependencies. `tests/test_lyric_timing_torchaudio.py` exercises the
+real backend and is skipped unless `LYRIC_TIMING_IT_AUDIO` and
+`LYRIC_TIMING_IT_LRC` point at a real track. It never runs in CI.
 
 ---
 
@@ -247,15 +332,23 @@ music-pipeline/
 │       ├── promote.py           # Processing → Pending promotion
 │       ├── lyrics_sync.py       # per-doc lyric causal lineage (Phase 4.0)
 │       └── sync.py              # copy→verify→record, prune, delete
+├── lyric_timing/                # OPTIONAL AI lyric-timing subsystem (peer package)
+│   ├── lrc.py                   # parse/format, byte-compatible with lrc-editor
+│   ├── detector.py              # audit_lrc(): heuristics for "this needs re-timing"
+│   ├── aligner.py               # word→line assignment, interpolation, monotonicity
+│   ├── backends/                # AlignmentBackend Protocol + mock + torchaudio
+│   └── cli.py                   # python -m lyric_timing audit|retime
 ├── music-watcher.sh             # fswatch daemon (installed to ~/.local/bin)
 ├── music-import.sh              # shim → spindlebot import
-├── music-sync-rugged.sh         # content-addressed sync to the retention drive
+├── music-sync.sh                # content-addressed sync to the retention drive
 ├── music-notify.sh              # legacy notify shim
 ├── music-*.py                   # legacy root scripts (superseded by stages/, kept for reference)
 ├── setup.sh                     # one-time environment setup
+├── setup-ai.sh                  # optional: builds the AI venv from requirements-ai.txt
 ├── migrate-work-dirs.sh         # sourceable helpers for the Staging→Import / Library→Pending rename
 ├── com.strangestlens.*.plist    # launchd agents
 ├── lrc-editor                   # standalone Flask/WaveSurfer.js lyric-timing editor
+│                                #   (+ the Audit page and AI Arrange button)
 ├── config.toml.example          # config template
 ├── secrets.toml.example         # credentials template
 ├── tests/                       # pytest suite + tests/shell/ (bats)
@@ -286,6 +379,9 @@ These are the ones most likely to trip up a new operator. The full list is in
   Handled in `runner.py`; don't change the approach.
 - **Identity is decoded-audio MD5** (FLAC STREAMINFO `md5_signature`), falling back
   to whole-file sha256. Per-copy sha256 is integrity, never identity.
+- **`lyric_timing retime` must run from the repo root**, using the AI venv's
+  Python. The venv doesn't have the package installed — it's found on the CWD.
+  Run it from elsewhere and you get `No module named lyric_timing`.
 
 ---
 
@@ -297,6 +393,7 @@ These are the ones most likely to trip up a new operator. The full list is in
 - beets DB: `~/.config/beets/library.db`; beets config: `~/.config/beets/config.yaml`
 - SpindleBot DB: `~/.config/spindlebot/spindlebot.db`
 - SpindleBot config: `~/.config/spindlebot/config.toml` + `secrets.toml`
-- Logs: `~/.config/beets/watcher.log` (import), `~/.config/beets/rugged-sync.log` (sync)
+- Logs: `~/.config/beets/watcher.log` (import), `~/.config/beets/music-sync.log` (sync)
 - Retention: `/Volumes/DwRugged/Music/Library`
-- launchd agents: `com.strangestlens.music-watcher`, `com.strangestlens.music-sync-rugged`
+- launchd agents: `com.strangestlens.music-watcher`, `com.strangestlens.music-sync`
+- AI venv: `~/.local/share/spindlebot/ai-venv`; editor state: `~/.config/spindlebot/lrc-editor-state.json`
