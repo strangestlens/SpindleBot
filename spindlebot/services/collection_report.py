@@ -175,9 +175,11 @@ def _card(match) -> str:
 def render_html(report: AuditReport, *, generated_utc: float | None = None) -> str:
     """Render an audit as a standalone HTML page."""
     e = html.escape
-    stamp = time.strftime(
-        "%Y-%m-%d %H:%M", time.localtime(generated_utc or time.time())
-    )
+    # `is None`, not truthiness: 0.0 is a valid timestamp, and the signature
+    # says None is the sentinel. Falsy-testing it makes an explicitly pinned
+    # time silently non-deterministic.
+    when = time.time() if generated_utc is None else generated_utc
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(when))
     media = "/".join(sorted(m.value for m in report.media))
     # Which index answered is part of the report, not a footnote: a wrongly
     # "missing" album is almost always an index that didn't know about it.

@@ -112,6 +112,20 @@ def test_metadata_line_survives_an_absent_breakdown():
     assert "Collection Audit" in page
 
 
+def test_a_pinned_timestamp_is_honoured():
+    """`generated_utc` pins the stamp so a report is reproducible."""
+    import time
+    page = render_html(_report(_match(_item())), generated_utc=1_000_000_000.0)
+    assert time.strftime("%Y-%m-%d %H:%M", time.localtime(1_000_000_000.0)) in page
+
+
+def test_epoch_zero_is_a_timestamp_not_a_missing_value():
+    """0.0 is falsy but perfectly valid; only None means "use now"."""
+    import time
+    page = render_html(_report(_match(_item())), generated_utc=0.0)
+    assert time.strftime("%Y-%m-%d %H:%M", time.localtime(0.0)) in page
+
+
 def test_metadata_line_reports_the_filter():
     page = render_html(_report(
         _match(_item()), fetched=212, considered=152,
