@@ -98,6 +98,19 @@ incomplete for at least one track — that's the designed behaviour, not a
 failure. `python3 -m spindlebot finalize` retries and promotes. See
 [operations](operations.md#when-an-album-is-stuck-in-processing).
 
+## 7. Inventory the retention drive once
+
+Before the first sync, the destination needs one manual scan — the reconciler
+refuses to plan against a location it has never seen, and `music-sync.sh`
+doesn't scan the target itself:
+
+```bash
+python3 -m spindlebot inventory --location "MyDrive"    # your destination's name
+```
+
+Do this once per destination. Skip it and the first sync aborts with
+`review failed`.
+
 ## Where to go next
 
 - [Commands](commands.md) — the full CLI surface
