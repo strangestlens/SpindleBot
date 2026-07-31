@@ -50,6 +50,9 @@ button.active { background: #0f3460; color: #e0e0e0; }
 button.active[data-status="missing"] { background: #e94560; color: #fff; }
 button.active[data-status="uncertain"] { background: #4a3a1a; color: #ff9800; }
 button.active[data-status="owned"] { background: #1b4332; color: #6fcf97; }
+/* Muted, but it still has to read as SELECTED — #2a2a4a here would be
+   indistinguishable from an inactive tab. */
+button.active[data-status="ignored"] { background: #35435c; color: #cfd8e3; }
 #summary { display: flex; gap: 10px; flex-wrap: wrap; padding: 16px 16px 4px; }
 .stat {
   background: #16213e; border: 1px solid #0f3460; border-radius: 8px;
@@ -61,6 +64,7 @@ button.active[data-status="owned"] { background: #1b4332; color: #6fcf97; }
 .stat.missing .n { color: #e94560; }
 .stat.uncertain .n { color: #ff9800; }
 .stat.owned .n { color: #6fcf97; }
+.stat.ignored .n { color: #8899aa; }
 #grid {
   display: grid; gap: 10px; padding: 12px 16px;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -73,6 +77,7 @@ button.active[data-status="owned"] { background: #1b4332; color: #6fcf97; }
 .card[data-status="missing"] { border-left-color: #e94560; }
 .card[data-status="uncertain"] { border-left-color: #ff9800; }
 .card[data-status="owned"] { border-left-color: #6fcf97; }
+.card[data-status="ignored"] { border-left-color: #5c6b7a; opacity: .62; }
 .card .thumb {
   width: 56px; height: 56px; flex-shrink: 0; border-radius: 4px;
   object-fit: cover; background: #0d1b2a;
@@ -133,6 +138,15 @@ def _safe_url(url: str | None) -> str | None:
     return url if urlsplit(url).scheme in SAFE_SCHEMES else None
 
 
+def _status_slug(match) -> str:
+    """What bucket a card renders under.
+
+    Ignored wins over the match status for display only — the underlying
+    verdict is still on the row, so un-ignoring needs no recomputation.
+    """
+    return "ignored" if match.ignored else match.status.value
+
+
 def _card(match) -> str:
     item = match.item
     e = html.escape
@@ -162,7 +176,8 @@ def _card(match) -> str:
 
     haystack = e(f"{item.artist} {item.title} {item.year or ''}".lower(), quote=True)
     return (
-        f'<div class="card" data-status="{match.status.value}" '
+        f'<div class="card" data-status="{_status_slug(match)}" '
+        f'data-id="{e(item.source_id, quote=True)}" '
         f'data-search="{haystack}">{img}'
         f'<div class="body">'
         f'<div class="artist">{e(item.artist)}</div>'
@@ -187,15 +202,18 @@ def render_html(report: AuditReport, *, generated_utc: float | None = None) -> s
         f"{name} {n}" for name, n in sorted(report.library_sources.items())
     ) or "library"
     counts = {
-        MatchStatus.MISSING: len(report.missing),
-        MatchStatus.UNCERTAIN: len(report.uncertain),
-        MatchStatus.OWNED: len(report.owned),
+        "missing": len(report.missing),
+        "uncertain": len(report.uncertain),
+        "owned": len(report.owned),
+        "ignored": len(report.ignored),
     }
 
     stats = "".join(
-        f'<div class="stat {s.value}"><div class="n">{n}</div>'
-        f'<div class="l">{s.value}</div></div>'
-        for s, n in counts.items()
+        f'<div class="stat {slug}"><div class="n">{n}</div>'
+        f'<div class="l">{slug}</div></div>'
+        for slug, n in counts.items()
+        # An empty ignore list is not worth a tile; the others always are.
+        if slug != "ignored" or n
     )
     stats += (
         f'<div class="stat"><div class="n">{report.library_albums}</div>'
@@ -205,18 +223,17 @@ def render_html(report: AuditReport, *, generated_utc: float | None = None) -> s
     # Built with concatenation rather than a nested f-string: escaped quotes
     # inside an f-string expression are Python 3.12+ (PEP 701), and 3.11 is the
     # supported floor.
-    def _tab(status: MatchStatus) -> str:
-        active = ' class="active"' if status is MatchStatus.MISSING else ""
-        label = status.value.title()
+    def _tab(slug: str) -> str:
+        active = ' class="active"' if slug == "missing" else ""
         return (
-            '<button data-status="' + status.value + '"' + active + '>'
-            + label + " (" + str(counts[status]) + ")</button>"
+            '<button data-status="' + slug + '"' + active + '>'
+            + slug.title() + " (" + str(counts[slug]) + ")</button>"
         )
 
-    tabs = "".join(
-        _tab(s)
-        for s in (MatchStatus.MISSING, MatchStatus.UNCERTAIN, MatchStatus.OWNED)
-    ) + '<button data-status="all">All</button>'
+    order = ["missing", "uncertain", "owned"]
+    if counts["ignored"]:
+        order.append("ignored")
+    tabs = "".join(_tab(s) for s in order) + '<button data-status="all">All</button>'
 
     cards = "".join(_card(m) for m in report.matches)
 

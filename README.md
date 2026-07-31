@@ -112,8 +112,36 @@ optional; `--handle` always overrides it.
 | `--refresh` | Re-fetch instead of using the cached collection |
 | `--strict` | Treat uncertain matches as missing |
 | `--all` | Also list what you already own |
+| `--show-ignored` | Include ignored discs (see below) |
 | `--html <file>` | Also write a browsable HTML report (see below) |
 | `--json` | Structured output |
+
+### Ignoring discs you're not going to rip
+
+Damaged discs, gifts, a release the matcher can't reach. Without somewhere to
+put these, the missing list keeps a permanent floor of noise and stops being
+worth opening. Every line of the missing list leads with the id you need:
+
+```bash
+python3 -m spindlebot collection-ignore 16500462 --reason "owned as a katakana-tagged copy"
+```
+
+| Command | Effect |
+|---------|--------|
+| `collection-ignore <id...>` | Stop reporting these. Takes a bare id or a full `discogs:<id>`, one or many |
+| `collection-ignore --list` | What's ignored, with reasons |
+| `collection-ignore --remove <id...>` | Put one back (`--unignore` works too) |
+| `collection-ignore --clear --yes` | Un-ignore everything |
+
+Ignoring is always reversible and never destroys the verdict underneath — an
+ignored disc keeps its real `missing` / `uncertain` status, so un-ignoring
+restores exactly what the audit said before. And if you ignore something and
+then rip it later, the rip wins: an owned album is never reported as ignored, so
+stale entries quietly stop mattering.
+
+The list lives at `~/.config/spindlebot/collection-ignore.json` (override with
+`[collection] ignore_path`). It's a plain file, not a schema change — the audit
+stays read-only against your library.
 
 ### HTML report
 

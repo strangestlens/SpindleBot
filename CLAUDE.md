@@ -107,6 +107,11 @@ spindlebot/
                                      a superset (measured: 67 albums db-only, 2 beets-only).
                                      Refuses to answer from an empty index.
     collection_audit.py          — provider → media filter → match → AuditReport buckets
+    collection_ignore.py         — IgnoreStore: keyed set of discs you've decided not to
+                                     rip, JSON at ~/.config/spindlebot/collection-ignore.json.
+                                     Ignoring NEVER overwrites the match verdict (ItemMatch
+                                     keeps its status + an `ignored` flag), so un-ignoring is
+                                     free. An OWNED album is never marked ignored.
     collection_report.py         — render_html(): AuditReport → a self-contained HTML page
                                      (inline CSS/JS, lrc-editor palette). Pure: returns a
                                      string, the CLI writes the file
@@ -191,6 +196,8 @@ tests/
                                      cache/errors (injected fetcher; never hits the network)
   test_collection_audit.py       — audit service, fixture provider, registry, library index
   test_collection_cli.py         — spindlebot collection-audit CLI (text + --json)
+  test_collection_ignore.py      — ignore store round-trip, audit overlay, and the
+                                     collection-ignore CLI (add/list/remove/clear)
   test_collection_report.py      — HTML report: structure, escaping, http(s)-only URL
                                      sanitization, self-containment, --html CLI wiring
   test_lyric_timing_lrc.py       — lyric_timing/lrc parse/format
@@ -366,7 +373,9 @@ python3 -m spindlebot finalize [--dry-run] [--json]          # retry lyrics + pr
 python3 -m spindlebot fetch-art <album_dir> [--dry-run] [--force]
 python3 -m spindlebot fetch-lyrics <album_dir> [--dry-run] [--force]
 
-python3 -m spindlebot collection-audit [--handle <name>] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--json]
+python3 -m spindlebot collection-audit [--handle <name>] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--html <f>] [--json]
+python3 -m spindlebot collection-ignore <id...> [--reason <t>]  # stop reporting a disc as missing
+python3 -m spindlebot collection-ignore --list | --remove <id...> | --clear --yes
                                                              # optional: what's in the Discogs
                                                              # collection but not in the library
 python3 -m spindlebot inventory [--location <name>] [--json]  # scan a location into the DB (read-only re: bytes)

@@ -54,16 +54,22 @@ min_size_px = 500
 #         credentials; see secrets.toml for the optional token). "fixture"
 #         reads a JSON file you write yourself — `account` is then its path.
 # media   Which media count as rippable. cd | vinyl | cassette | digital | other
-# index   Which view of the library to compare against:
-#           "beets" (default) — every album ever imported, wherever it lives now
-#           "db"              — only what `spindlebot inventory` has scanned
+# index   Which view of the library to compare against. Neither backend is a
+#         superset of the other, so the default unions them:
+#           "auto" (default) — both; owned if EITHER knows the album
+#           "beets"          — only what beets has imported and still tracks
+#           "db"             — only what `spindlebot inventory` has scanned
 
 # [collection]
 # source           = "discogs"
 # account          = "your-discogs-handle"
 # media            = ["cd"]
-# index            = "beets"
+# index            = "auto"
 # cache_ttl_hours  = 24
+#
+# Discs you've decided not to rip live in a separate file, managed with
+#   spindlebot collection-ignore <id>            (and --list / --remove / --clear)
+# ignore_path      = "~/.config/spindlebot/collection-ignore.json"
 
 # -- Sync destinations ---------------------------------------------------------
 # Add as many [[destinations]] blocks as you like.

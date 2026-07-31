@@ -15,8 +15,12 @@ Usage:
     python -m spindlebot sync [--location <name>] [--json] [-v|--quiet]   Execute acknowledged copies (copy→verify→presence); --location scopes to one dest
     python -m spindlebot prune [--execute] [--json] [-v|--quiet]  Release Pending files verified on retention (DRY-RUN unless --execute)
     python -m spindlebot delete [--execute] [--json] [-v|--quiet]  Execute acknowledged retention-copy deletes, gated on min_copies (DRY-RUN unless --execute)
-    python -m spindlebot collection-audit [--handle <name>] [--source discogs|fixture] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--strict] [--all] [--html <file>] [--json]
+    python -m spindlebot collection-audit [--handle <name>] [--source discogs|fixture] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--strict] [--all] [--show-ignored] [--html <file>] [--json]
                                                       Compare an external collection against the library and list what's missing
+    python -m spindlebot collection-ignore <id...> [--reason <text>] [--json]   Stop reporting a disc as missing
+    python -m spindlebot collection-ignore --list [--json]                      Show what's ignored
+    python -m spindlebot collection-ignore --remove <id...> [--json]            Un-ignore (also --unignore)
+    python -m spindlebot collection-ignore --clear --yes [--json]               Un-ignore everything
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -726,7 +730,6 @@ def cmd_collection_audit(cfg, args: list[str]) -> int:
     import json as _json
 
     from spindlebot.core.collection import resolve_media
-    from spindlebot.core.collection_match import MatchStatus
     from spindlebot.core.errors import SpindleBotError
     from spindlebot.services.collection_audit import run_audit
 
@@ -802,6 +805,7 @@ def cmd_collection_audit(cfg, args: list[str]) -> int:
                 "owned": len(report.owned),
                 "uncertain": len(report.uncertain),
                 "missing": len(report.missing),
+                "ignored": len(report.ignored),
             },
             "items": [
                 {
@@ -813,6 +817,7 @@ def cmd_collection_audit(cfg, args: list[str]) -> int:
                     "url": m.item.url,
                     "thumb_url": m.item.thumb_url,
                     "status": m.status.value,
+                    "ignored": m.ignored,
                     "reason": m.reason,
                     "score": round(m.score, 3),
                     "matched": (
@@ -825,12 +830,18 @@ def cmd_collection_audit(cfg, args: list[str]) -> int:
         }))
         return 0
 
+    # Widest id in this run, so the ids column lines up without being padded to
+    # some arbitrary guess.
+    id_width = max((len(m.item.source_id) for m in report.matches), default=0)
+
     def line(m) -> str:
         # Some release titles already carry their year ("Hyperspace (2020)");
         # appending it again just reads as a bug.
         year = m.item.year
         suffix = f" ({year})" if year and str(year) not in m.item.title else ""
-        return f"  {m.item.artist} — {m.item.title}{suffix}"
+        # The id leads: it's what `collection-ignore` takes, and a list you
+        # can't act on from is just a list.
+        return f"  {m.item.source_id:<{id_width}}  {m.item.artist} — {m.item.title}{suffix}"
 
     media_label = "/".join(sorted(k.value for k in report.media))
     print(
@@ -861,15 +872,179 @@ def cmd_collection_audit(cfg, args: list[str]) -> int:
         for m in report.owned:
             print(line(m))
 
-    counts = {s: len([m for m in report.matches if m.status is s]) for s in MatchStatus}
+    if report.ignored and ("--all" in args or "--show-ignored" in args):
+        print(f"\nIGNORED ({len(report.ignored)})")
+        for m in report.ignored:
+            print(line(m))
+
+    tail = f" · {len(report.ignored)} ignored" if report.ignored else ""
     print(
-        f"\n{counts[MatchStatus.OWNED]} owned · "
-        f"{counts[MatchStatus.UNCERTAIN]} uncertain · "
-        f"{counts[MatchStatus.MISSING]} missing"
+        f"\n{len(report.owned)} owned · {len(report.uncertain)} uncertain · "
+        f"{len(report.missing)} missing{tail}"
     )
+    if report.missing:
+        print(
+            "\nNot going to rip one? "
+            f"spindlebot collection-ignore {report.missing[0].item.source_id}"
+        )
     if html_out:
         print(f"📄 {html_path}")
     return 0
+
+
+# ── collection-ignore ─────────────────────────────────────────────────────────
+
+def cmd_collection_ignore(cfg, args: list[str]) -> int:
+    """
+    Manage the collection-audit ignore list: discs you know you're missing and
+    don't want told about again. Always reversible — `--remove` puts one back.
+    """
+    import json as _json
+
+    from spindlebot.core.errors import SpindleBotError
+    from spindlebot.services.collection_ignore import IgnoreStore, resolve_key
+
+    want_json = "--json" in args
+    FLAGS = {"--json", "--list", "--clear", "--yes", "--remove", "--unignore",
+             "--reason", "--source"}
+
+    def _opt(flag: str) -> str | None:
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 < len(args):
+                return args[i + 1]
+        return None
+
+    def fail(msg: str) -> int:
+        if want_json:
+            print(_json.dumps({"error": msg}))
+        else:
+            print(msg, file=sys.stderr)
+        return 1
+
+    def emit(payload: dict, lines: list[str]) -> int:
+        if want_json:
+            print(_json.dumps(payload))
+        else:
+            for line in lines:
+                print(line)
+        return 0
+
+    source = _opt("--source") or cfg.collection.source
+    removing = "--remove" in args or "--unignore" in args
+
+    # Every bare token is an id; values consumed by --reason/--source are not.
+    consumed = {v for v in (_opt("--reason"), _opt("--source")) if v is not None}
+    tokens = [a for a in args if a not in FLAGS and a not in consumed]
+
+    try:
+        store = IgnoreStore.load(cfg.collection.ignore_path)
+    except SpindleBotError as e:
+        return fail(str(e))
+
+    # ── list ─────────────────────────────────────────────────────────────────
+    if "--list" in args or (not tokens and "--clear" not in args):
+        entries = store.listing()
+        payload = {
+            "path": str(store.path),
+            "count": len(entries),
+            "ignored": [
+                {"key": i.key, "artist": i.artist, "title": i.title,
+                 "reason": i.reason, "ignored_utc": i.ignored_utc}
+                for i in entries
+            ],
+        }
+        if not entries:
+            return emit(payload, ["Nothing ignored."])
+        lines = [f"Ignored ({len(entries)}) — {store.path}"]
+        width = max(len(i.key) for i in entries)
+        for i in entries:
+            note = f"   ({i.reason})" if i.reason else ""
+            lines.append(f"  {i.key:<{width}}  {i.label}{note}")
+        lines.append("\nPut one back:  spindlebot collection-ignore --remove <id>")
+        return emit(payload, lines)
+
+    # ── clear ────────────────────────────────────────────────────────────────
+    if "--clear" in args:
+        if "--yes" not in args:
+            return fail(
+                f"--clear removes all {len(store)} ignored item(s). "
+                "Re-run with --yes if that's what you want."
+            )
+        removed = store.clear()
+        try:
+            store.save()
+        except SpindleBotError as e:
+            return fail(str(e))
+        return emit({"cleared": removed}, [f"Cleared {removed} ignored item(s)."])
+
+    # ── remove ───────────────────────────────────────────────────────────────
+    if removing:
+        removed, unknown = [], []
+        for token in tokens:
+            try:
+                key = resolve_key(token, source=source)
+            except ValueError:
+                continue
+            entry = store.remove(key)
+            (removed if entry else unknown).append(entry.key if entry else key)
+        if removed:
+            try:
+                store.save()
+            except SpindleBotError as e:
+                return fail(str(e))
+        lines = [f"  ↩ {k}" for k in removed] or ["Nothing removed."]
+        lines += [f"  ?  {k} was not ignored" for k in unknown]
+        if removed:
+            lines.insert(0, f"Un-ignored {len(removed)} item(s):")
+        return emit({"removed": removed, "not_ignored": unknown}, lines)
+
+    # ── add ──────────────────────────────────────────────────────────────────
+    keys = []
+    for token in tokens:
+        try:
+            keys.append(resolve_key(token, source=source))
+        except ValueError:
+            return fail(f"invalid id: {token!r}")
+
+    # Best-effort: pull artist/title off the cached collection so `--list` is
+    # readable later. A cache miss must never block an ignore, so this is
+    # wrapped rather than allowed to fail the command.
+    details: dict = {}
+    try:
+        from spindlebot.collections.base import get_provider
+        account = cfg.collection.account
+        if account:
+            provider = get_provider(source, cfg)
+            details = {i.key: i for i in provider.fetch(account)}
+    except (SpindleBotError, ValueError, RuntimeError, OSError):
+        details = {}
+
+    reason = _opt("--reason") or ""
+    added = []
+    for key in keys:
+        item = details.get(key)
+        entry = store.add(
+            key,
+            artist=item.artist if item else "",
+            title=item.title if item else "",
+            reason=reason,
+        )
+        added.append(entry)
+    try:
+        store.save()
+    except SpindleBotError as e:
+        return fail(str(e))
+
+    payload = {
+        "added": [{"key": e.key, "artist": e.artist, "title": e.title,
+                   "reason": e.reason} for e in added],
+        "count": len(store),
+    }
+    lines = [f"Ignoring {len(added)} item(s):"]
+    lines += [f"  ✓ {e.key}  {e.label}" for e in added]
+    lines.append(f"\nUndo:  spindlebot collection-ignore --remove {added[0].key}")
+    return emit(payload, lines)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
@@ -954,6 +1129,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "collection-audit":
         return cmd_collection_audit(cfg, args[1:])
+
+    if command == "collection-ignore":
+        return cmd_collection_ignore(cfg, args[1:])
 
     if command == "notify":
         if len(args) < 3:
