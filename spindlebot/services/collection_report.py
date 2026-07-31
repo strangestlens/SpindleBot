@@ -179,6 +179,11 @@ def render_html(report: AuditReport, *, generated_utc: float | None = None) -> s
         "%Y-%m-%d %H:%M", time.localtime(generated_utc or time.time())
     )
     media = "/".join(sorted(m.value for m in report.media))
+    # Which index answered is part of the report, not a footnote: a wrongly
+    # "missing" album is almost always an index that didn't know about it.
+    index_label = ", ".join(
+        f"{name} {n}" for name, n in sorted(report.library_sources.items())
+    ) or "library"
     counts = {
         MatchStatus.MISSING: len(report.missing),
         MatchStatus.UNCERTAIN: len(report.uncertain),
@@ -195,10 +200,19 @@ def render_html(report: AuditReport, *, generated_utc: float | None = None) -> s
         f'<div class="l">in library</div></div>'
     )
 
+    # Built with concatenation rather than a nested f-string: escaped quotes
+    # inside an f-string expression are Python 3.12+ (PEP 701), and 3.11 is the
+    # supported floor.
+    def _tab(status: MatchStatus) -> str:
+        active = ' class="active"' if status is MatchStatus.MISSING else ""
+        label = status.value.title()
+        return (
+            '<button data-status="' + status.value + '"' + active + '>'
+            + label + " (" + str(counts[status]) + ")</button>"
+        )
+
     tabs = "".join(
-        f'<button data-status="{s.value}"'
-        f'{" class=\"active\"" if s is MatchStatus.MISSING else ""}>'
-        f'{s.value.title()} ({counts[s]})</button>'
+        _tab(s)
         for s in (MatchStatus.MISSING, MatchStatus.UNCERTAIN, MatchStatus.OWNED)
     ) + '<button data-status="all">All</button>'
 
@@ -216,7 +230,7 @@ def render_html(report: AuditReport, *, generated_utc: float | None = None) -> s
 <div id="toolbar">
   <h1>Collection Audit</h1>
   <span class="meta">{e(report.source)}:{e(report.account)} · {report.considered} of
-    {report.fetched} on {e(media)} · {stamp}</span>
+    {report.fetched} on {e(media)} · {e(index_label)} · {stamp}</span>
   <div id="controls">
     <div id="tabs">{tabs}</div>
     <input id="search" type="search" placeholder="filter artist or title…"

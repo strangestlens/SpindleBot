@@ -10,6 +10,7 @@ from spindlebot.core.collection import CollectionItem, LibraryAlbum
 from spindlebot.core.collection_match import ItemMatch, MatchStatus
 from spindlebot.core.enums import MediaKind
 from spindlebot.services.collection_audit import AuditReport
+from spindlebot.services.library_index import LibraryIndex
 from spindlebot.services.collection_report import render_html
 
 
@@ -32,6 +33,8 @@ def _report(*matches, **kw) -> AuditReport:
         considered=kw.pop("considered", len(matches)),
         library_albums=kw.pop("library_albums", 0),
         matches=list(matches),
+        library_sources=kw.pop("library_sources", {}),
+        library_errors=kw.pop("library_errors", {}),
     )
 
 
@@ -93,6 +96,20 @@ def test_uncertain_card_shows_what_it_nearly_matched():
         0.94,
     )))
     assert "≈ Portishead — Dummy Session (0.94)" in page
+
+
+def test_metadata_line_names_the_indexes_consulted():
+    """Same reasoning as the CLI: a wrongly-missing album usually means the
+    index didn't know about it, so never hide which one answered."""
+    page = render_html(_report(
+        _match(_item()), library_sources={"beets": 112, "db": 177},
+    ))
+    assert "beets 112, db 177" in page
+
+
+def test_metadata_line_survives_an_absent_breakdown():
+    page = render_html(_report(_match(_item())))
+    assert "Collection Audit" in page
 
 
 def test_metadata_line_reports_the_filter():
@@ -196,7 +213,9 @@ def shelf(tmp_path):
 def stub_library(monkeypatch):
     monkeypatch.setattr(
         "spindlebot.services.library_index.load",
-        lambda cfg, index="beets": [LibraryAlbum("Radiohead", "OK Computer")],
+        lambda cfg, index="auto": LibraryIndex(
+            albums=[LibraryAlbum("Radiohead", "OK Computer")], counts={"beets": 1}
+        ),
     )
 
 
