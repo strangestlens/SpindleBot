@@ -143,6 +143,29 @@ The list lives at `~/.config/spindlebot/collection-ignore.json` (override with
 `[collection] ignore_path`). It's a plain file, not a schema change — the audit
 stays read-only against your library.
 
+### collection-browser — click-to-ignore UI
+
+```bash
+./collection-browser --handle your-discogs-handle
+```
+
+Opens a local web UI at `localhost` with the same report, plus an **ignore**
+button on every card and an **undo** on every ignored one. Counts and tabs
+update live; each action also raises a toast with its own Undo. Sibling to
+[`lrc-editor`](#lrc-editor--visual-timestamp-editor) — same palette, same shape,
+same single-file design — and it lives outside `spindlebot/` deliberately so the
+pipeline package never grows a Flask dependency.
+
+| Flag | Effect |
+|------|--------|
+| `--handle` / `--source` / `--media` / `--index` / `--refresh` | As `collection-audit` |
+| `--port N` | Fixed port (default: a free one) |
+| `--no-open` | Don't launch a browser |
+
+It binds to `127.0.0.1` and refuses cross-origin POSTs — any page in your
+browser can post to a localhost port, and a drive-by edit of your ignore list is
+still an edit.
+
 ### HTML report
 
 ```bash
