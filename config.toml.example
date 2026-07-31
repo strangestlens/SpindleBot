@@ -42,6 +42,29 @@ request_delay_seconds = 0.3          # politeness delay between lrclib API calls
 sources     = ["caa", "itunes"]   # Cover Art Archive, then iTunes Store fallback
 min_size_px = 500
 
+# -- Collection audit (OPTIONAL) ------------------------------------------------
+# Compares an external collection you already maintain against the digital
+# library, so you can see which discs you own but haven't ripped. Delete this
+# whole block to turn the feature off — nothing else depends on it.
+#
+#   spindlebot collection-audit
+#   spindlebot collection-audit --handle someone-else --media cd,vinyl
+#
+# source  "discogs" reads a Discogs collection (public collections need no
+#         credentials; see secrets.toml for the optional token). "fixture"
+#         reads a JSON file you write yourself — `account` is then its path.
+# media   Which media count as rippable. cd | vinyl | cassette | digital | other
+# index   Which view of the library to compare against:
+#           "beets" (default) — every album ever imported, wherever it lives now
+#           "db"              — only what `spindlebot inventory` has scanned
+
+# [collection]
+# source           = "discogs"
+# account          = "your-discogs-handle"
+# media            = ["cd"]
+# index            = "beets"
+# cache_ttl_hours  = 24
+
 # -- Sync destinations ---------------------------------------------------------
 # Add as many [[destinations]] blocks as you like.
 # The first enabled local_drive destination is the retention target used by music-sync.sh.

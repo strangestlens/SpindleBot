@@ -1,0 +1,458 @@
+{
+  "pagination": {
+    "page": 1,
+    "pages": 1,
+    "per_page": 100,
+    "items": 10
+  },
+  "releases": [
+    {
+      "id": 14078702,
+      "instance_id": 2093495848,
+      "date_added": "2025-12-25T21:47:39-08:00",
+      "basic_information": {
+        "id": 14078702,
+        "title": "The Curse",
+        "year": 2005,
+        "thumb": "https://i.discogs.com/mHI9DpU1Tv-dy0n0_JiBAau1UrL97YRXMsjGtgz2JyQ/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTE0MDc4/NzAyLTE2NzA1MzI4/NzgtNDkxNS5qcGVn.jpeg",
+        "formats": [
+          {
+            "name": "CD",
+            "qty": "1",
+            "descriptions": [
+              "Album",
+              "Reissue"
+            ]
+          },
+          {
+            "name": "DVD",
+            "qty": "1",
+            "descriptions": [
+              "DVD-Video",
+              "Double Sided"
+            ]
+          },
+          {
+            "name": "All Media",
+            "qty": "1",
+            "text": "Slipcase",
+            "descriptions": []
+          }
+        ],
+        "labels": [
+          {
+            "name": "Victory Records",
+            "catno": "VR249",
+            "entity_type": "1",
+            "entity_type_name": "Label",
+            "id": 33329,
+            "resource_url": "https://api.discogs.com/labels/33329"
+          }
+        ],
+        "artists": [
+          {
+            "name": "Atreyu",
+            "anv": "",
+            "join": "",
+            "id": 182667
+          }
+        ]
+      }
+    },
+    {
+      "id": 27047718,
+      "instance_id": 2083084861,
+      "date_added": "2025-11-23T20:02:19-08:00",
+      "basic_information": {
+        "id": 27047718,
+        "title": "James Taylor's Greatest Hits",
+        "year": 0,
+        "thumb": "https://i.discogs.com/6GXJHLQXfe2sOj4v88w4EswtQHeXX6gKkMBoer9m7q0/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTI3MDQ3/NzE4LTE2ODM4MzAz/MDktNzQ1NS5qcGVn.jpeg",
+        "formats": [
+          {
+            "name": "CD",
+            "qty": "1",
+            "descriptions": [
+              "Compilation",
+              "Club Edition"
+            ]
+          }
+        ],
+        "labels": [
+          {
+            "name": "Warner Bros. Records",
+            "catno": "3113-2",
+            "entity_type": "1",
+            "entity_type_name": "Label",
+            "id": 1000,
+            "resource_url": "https://api.discogs.com/labels/1000"
+          }
+        ],
+        "artists": [
+          {
+            "name": "James Taylor (2)",
+            "anv": "",
+            "join": "",
+            "id": 262944
+          }
+        ]
+      }
+    },
+    {
+      "id": 20441203,
+      "instance_id": 2093496298,
+      "date_added": "2025-12-25T21:51:21-08:00",
+      "basic_information": {
+        "id": 20441203,
+        "title": "Birth Of Jazz",
+        "year": 2007,
+        "thumb": "https://i.discogs.com/CiO1haVzxP0vQAGRd9DO21z-muU0X0cLg17zJkQPy8M/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTIwNDQx/MjAzLTE2MzMxMzI4/NTQtNjcxOS5qcGVn.jpeg",
+        "formats": [
+          {
+            "name": "CD",
+            "qty": "2",
+            "descriptions": [
+              "Compilation"
+            ]
+          }
+        ],
+        "labels": [
+          {
+            "name": "Fuel 2000",
+            "catno": "3020617212",
+            "entity_type": "1",
+            "entity_type_name": "Label",
+            "id": 10743,
+            "resource_url": "https://api.discogs.com/labels/10743"
+          }
+        ],
+        "artists": [
+          {
+            "name": "Louis Armstrong",
+            "anv": "",
+            "join": ",",
+            "id": 38201
+          },
+          {
+            "name": "Jelly Roll Morton",
+            "anv": "",
+            "join": "",
+            "id": 309976
+          }
+        ]
+      }
+    },
+    {
+      "id": 12838819,
+      "instance_id": 2130824571,
+      "date_added": "2026-04-02T20:02:08-07:00",
+      "basic_information": {
+        "id": 12838819,
+        "title": "Mezzanine",
+        "year": 2019,
+        "thumb": "https://i.discogs.com/FIkjnRwknGJXR66gcT9_x8-hhOp6r2gNV5flvJoN3Y0/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEyODM4/ODE5LTE1NjY2MzYx/MjQtMzAzOC5qcGVn.jpeg",
+        "formats": [
+          {
+            "name": "CD",
+            "qty": "1",
+            "text": "Black Disk, Orange Label",
+            "descriptions": [
+              "Album",
+              "Reissue",
+              "Remastered",
+              "Stereo"
+            ]
+          },
+          {
+            "name": "CD",
+            "qty": "1",
+            "text": "Black Disk, Pink Label",
+            "descriptions": [
+              "Stereo"
+            ]
+          },
+          {
+            "name": "All Media",
+            "qty": "1",
+            "text": "20th Anniversary Edition",
+            "descriptions": [
+              "Deluxe Edition"
+            ]
+          }
+        ],
+        "labels": [
+          {
+            "name": "Virgin EMI Records",
+            "catno": "6742755",
+            "entity_type": "1",
+            "entity_type_name": "Label",
+            "id": 567148,
+            "resource_url": "https://api.discogs.com/labels/567148"
+          }
+        ],
+        "artists": [
+          {
+            "name": "Massive Attack",
+            "anv": "",
+            "join": "",
+            "id": 4480
+          }
+        ]
+      }
+    },
+    {
+      "id": 8577244,
+      "instance_id": 2160716964,
+      "date_added": "2026-07-03T13:52:51-07:00",
+      "basic_information": {
+        "id": 8577244,
+        "title": "Ummagumma",
+        "year": 0,
+        "thumb": "https://i.discogs.com/G8aSmT89SPIJpFQydCoGU7HKHlVerLQVgRjxT2OA9sg/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTg1Nzcy/NDQtMTQ2NDM4OTYy/NS01MzEwLmpwZWc.jpeg",
+        "formats": [
+          {
+            "name": "CD",
+            "qty": "2",
+            "descriptions": [
+              "Album",
+              "Reissue",
+              "Remastered",
+              "Unofficial Release"
+            ]
+          }
+        ],
+        "labels": [
+          {
+            "name": "EMI (2)",
+            "catno": "50999 028937 2 3",
+            "entity_type": "1",
+            "entity_type_name": "Label",
+            "id": 134487,
+            "resource_url": "https://api.discogs.com/labels/134487"
+          }
+        ],
+        "artists": [
+          {
+            "name": "Pink Floyd",
+            "anv": "",
+            "join": "",
+            "id": 45467
+          }
+        ]
+      }
+    },
+    {
+      "id": 105704,
+      "instance_id": 2120521754,
+      "date_added": "2026-03-03T21:46:57-08:00",
+      "basic_information": {
+        "id": 105704,
+        "title": "OK Computer",
+        "year": 1997,
+        "thumb": "https://i.discogs.com/7WTRD_wfJmeXcyHABr5LfX4JAfsixkKwaPFfchPn7io/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEwNTcw/NC0xNTIzMTY5NDY4/LTI3OTguanBlZw.jpeg",
+        "formats": [
+          {
+            "name": "CD",
+            "qty": "1",
+            "descriptions": [
+              "Album"
+            ]
+          }
+        ],
+        "labels": [
+          {
+            "name": "Capitol Records",
+            "catno": "CDP 7243 8 55229 2 5",
+            "entity_type": "1",
+            "entity_type_name": "Label",
+            "id": 654,
+            "resource_url": "https://api.discogs.com/labels/654"
+          }
+        ],
+        "artists": [
+          {
+            "name": "Radiohead",
+            "anv": "",
+            "join": "",
+            "id": 3840
+          }
+        ]
+      }
+    },
+    {
+      "id": 1371354,
+      "instance_id": 2120458526,
+      "date_added": "2026-03-03T15:03:23-08:00",
+      "basic_information": {
+        "id": 1371354,
+        "title": "O Brother, Where Art Thou?",
+        "year": 2000,
+        "thumb": "https://i.discogs.com/h0jHMY8m-cyNyl2SrHI024SXD12lZkQNEhRPnmMXcLA/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTEzNzEz/NTQtMTUyMDU3MDQ5/MC0yMzg2LmpwZWc.jpeg",
+        "formats": [
+          {
+            "name": "CD",
+            "qty": "1",
+            "descriptions": [
+              "Compilation",
+              "Enhanced"
+            ]
+          }
+        ],
+        "labels": [
+          {
+            "name": "Mercury",
+            "catno": "088 170-069-2",
+            "entity_type": "1",
+            "entity_type_name": "Label",
+            "id": 39357,
+            "resource_url": "https://api.discogs.com/labels/39357"
+          }
+        ],
+        "artists": [
+          {
+            "name": "Various",
+            "anv": "",
+            "join": "",
+            "id": 194
+          }
+        ]
+      }
+    },
+    {
+      "id": 25803139,
+      "instance_id": 2083084565,
+      "date_added": "2025-11-23T20:00:15-08:00",
+      "basic_information": {
+        "id": 25803139,
+        "title": "ザ・ゴッズ・ウィー・キャン・タッチ (ジャパン・スペシャル・エディション) = The Gods We Can Touch (Japan Special Edition)",
+        "year": 2023,
+        "thumb": "https://i.discogs.com/1xYY8d6solIoDGC4lqui6plensFCk7sgWw1OPJdKA90/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTI1ODAz/MTM5LTE2NzQwMzk3/NTMtNjQzMy5qcGVn.jpeg",
+        "formats": [
+          {
+            "name": "CD",
+            "qty": "1",
+            "descriptions": [
+              "Album"
+            ]
+          },
+          {
+            "name": "CD",
+            "qty": "1",
+            "descriptions": []
+          },
+          {
+            "name": "All Media",
+            "qty": "1",
+            "descriptions": [
+              "Special Edition"
+            ]
+          }
+        ],
+        "labels": [
+          {
+            "name": "Decca",
+            "catno": "UICO-1326/7",
+            "entity_type": "1",
+            "entity_type_name": "Label",
+            "id": 5320,
+            "resource_url": "https://api.discogs.com/labels/5320"
+          }
+        ],
+        "artists": [
+          {
+            "name": "Aurora (16)",
+            "anv": "オーロラ",
+            "join": "=",
+            "id": 532900
+          },
+          {
+            "name": "Aurora (16)",
+            "anv": "",
+            "join": "",
+            "id": 532900
+          }
+        ]
+      }
+    },
+    {
+      "id": 36662767,
+      "instance_id": 2122021494,
+      "date_added": "2026-03-08T08:09:44-07:00",
+      "basic_information": {
+        "id": 36662767,
+        "title": "Imperial Dunes",
+        "year": 2019,
+        "thumb": "https://i.discogs.com/tgpNuAkc2-Jhr2iaV6gzhAg5YFUu3nd07PppwCFkwyA/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTM2NjYy/NzY3LTE3NzI0ODg5/MDMtNjU4OS5qcGVn.jpeg",
+        "formats": [
+          {
+            "name": "CDr",
+            "qty": "1",
+            "descriptions": [
+              "Album"
+            ]
+          }
+        ],
+        "labels": [
+          {
+            "name": "Mojave Beach Records",
+            "catno": "none",
+            "entity_type": "1",
+            "entity_type_name": "Label",
+            "id": 1900428,
+            "resource_url": "https://api.discogs.com/labels/1900428"
+          }
+        ],
+        "artists": [
+          {
+            "name": "Landroid",
+            "anv": "",
+            "join": "",
+            "id": 8060799
+          }
+        ]
+      }
+    },
+    {
+      "id": 8013824,
+      "instance_id": 2099350008,
+      "date_added": "2026-01-07T12:42:19-08:00",
+      "basic_information": {
+        "id": 8013824,
+        "title": "My Life In A Hole In The Ground",
+        "year": 2016,
+        "thumb": "https://i.discogs.com/r7mz2vX5KN0MwZ_JiXPOMUOGUeE1wWzX1ZU1VXJtQOA/rs:fit/g:sm/q:40/h:150/w:150/czM6Ly9kaXNjb2dz/LWRhdGFiYXNlLWlt/YWdlcy9SLTgwMTM4/MjQtMTYwODQ3NjY4/MS00OTE0LmpwZWc.jpeg",
+        "formats": [
+          {
+            "name": "Vinyl",
+            "qty": "1",
+            "descriptions": [
+              "LP",
+              "Album",
+              "Reissue",
+              "Remastered",
+              "Stereo"
+            ]
+          }
+        ],
+        "labels": [
+          {
+            "name": "On-U Sound",
+            "catno": "ONULP13",
+            "entity_type": "1",
+            "entity_type_name": "Label",
+            "id": 2409,
+            "resource_url": "https://api.discogs.com/labels/2409"
+          }
+        ],
+        "artists": [
+          {
+            "name": "African Head Charge",
+            "anv": "",
+            "join": "",
+            "id": 13674
+          }
+        ]
+      }
+    }
+  ]
+}

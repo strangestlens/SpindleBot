@@ -4,6 +4,30 @@ Notable changes to SpindleBot, loosely following [Keep a Changelog](https://keep
 Versioning is 0.x (pre-1.0, no stability guarantees) until the content-addressed library
 refactor epic is complete.
 
+## [Unreleased]
+
+### Added
+- Optional collection audit: `spindlebot collection-audit` compares an external collection
+  against the digital library and lists what you own but haven't ripped. Purely assistive —
+  reads the library, writes only a fetch cache, and stays inert when unconfigured.
+  - Pluggable sources behind a one-method provider protocol, each split into an impure client
+    and a pure transformer: `discogs` (public collections need no credentials; an optional
+    token raises the rate limit from 25 to 60 req/min) and `fixture` (a hand-written JSON
+    collection — test double and the way in for anyone not on Discogs)
+  - Artist-scoped matcher with three outcomes (`owned` / `uncertain` / `missing`), so a
+    normalization miss surfaces for review instead of sending you to re-rip a disc you own
+  - `[collection]` config block and `[discogs] token` secret, both optional; `--handle`
+    overrides the configured account
+  - Library index defaults to `auto`, the union of beets and the SpindleBot DB. Neither is a
+    superset (measured on a real library: 67 albums DB-only, 2 beets-only), and either alone
+    inflates the missing list. Every run prints which index contributed what; an empty index
+    is a hard failure rather than a "your whole collection is missing" report
+
+### Changed
+- CI now runs the Python suite on a 3.11 + 3.14 matrix. Testing only the 3.11 floor let
+  dev-machine-only syntax through to CI (a 3.12+ f-string), and testing only 3.14 would let
+  the documented 3.11 floor rot
+
 ## [0.3.0] - 2026-07-30
 
 First tagged release. This entry summarizes current capability rather than itemizing all 86

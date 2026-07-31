@@ -15,6 +15,8 @@ Usage:
     python -m spindlebot sync [--location <name>] [--json] [-v|--quiet]   Execute acknowledged copies (copy→verify→presence); --location scopes to one dest
     python -m spindlebot prune [--execute] [--json] [-v|--quiet]  Release Pending files verified on retention (DRY-RUN unless --execute)
     python -m spindlebot delete [--execute] [--json] [-v|--quiet]  Execute acknowledged retention-copy deletes, gated on min_copies (DRY-RUN unless --execute)
+    python -m spindlebot collection-audit [--handle <name>] [--source discogs|fixture] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--strict] [--all] [--json]
+                                                      Compare an external collection against the library and list what's missing
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -713,6 +715,150 @@ def cmd_delete(cfg, args: list[str]) -> int:
     return 0 if not result.errors else 1
 
 
+# ── collection-audit ──────────────────────────────────────────────────────────
+
+def cmd_collection_audit(cfg, args: list[str]) -> int:
+    """
+    Compare an external collection (Discogs by default) against the digital
+    library and report what hasn't been ripped. Purely assistive: reads the
+    library, writes nothing but a fetch cache.
+    """
+    import json as _json
+
+    from spindlebot.core.collection import resolve_media
+    from spindlebot.core.collection_match import MatchStatus
+    from spindlebot.core.errors import SpindleBotError
+    from spindlebot.services.collection_audit import run_audit
+
+    want_json = "--json" in args
+
+    def _opt(flag: str) -> str | None:
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 < len(args):
+                return args[i + 1]
+        return None
+
+    def fail(msg: str) -> int:
+        if want_json:
+            print(_json.dumps({"error": msg}))
+        else:
+            print(msg, file=sys.stderr)
+        return 1
+
+    account = _opt("--handle") or _opt("--account") or cfg.collection.account
+    if not account:
+        return fail(
+            "No collection account. Pass --handle <name>, or set\n"
+            "  [collection]\n  account = \"<name>\"\n"
+            "in ~/.config/spindlebot/config.toml"
+        )
+
+    source = _opt("--source") or cfg.collection.source
+    index = _opt("--index") or cfg.collection.index
+    raw_media = _opt("--media")
+    try:
+        media = resolve_media(
+            raw_media.split(",") if raw_media else cfg.collection.media
+        )
+    except ValueError as e:
+        return fail(str(e))
+
+    try:
+        report = run_audit(
+            cfg,
+            account=account,
+            source=source,
+            media=media,
+            refresh="--refresh" in args,
+            index=index,
+            strict="--strict" in args,
+        )
+    except (SpindleBotError, ValueError, RuntimeError) as e:
+        return fail(str(e))
+
+    if want_json:
+        print(_json.dumps({
+            "source": report.source,
+            "account": report.account,
+            "media": sorted(m.value for m in report.media),
+            "fetched": report.fetched,
+            "considered": report.considered,
+            "library_albums": report.library_albums,
+            "library_sources": report.library_sources,
+            "library_errors": report.library_errors,
+            "counts": {
+                "owned": len(report.owned),
+                "uncertain": len(report.uncertain),
+                "missing": len(report.missing),
+            },
+            "items": [
+                {
+                    "key": m.item.key,
+                    "artist": m.item.artist,
+                    "title": m.item.title,
+                    "year": m.item.year,
+                    "media": sorted(k.value for k in m.item.media),
+                    "url": m.item.url,
+                    "thumb_url": m.item.thumb_url,
+                    "status": m.status.value,
+                    "reason": m.reason,
+                    "score": round(m.score, 3),
+                    "matched": (
+                        {"albumartist": m.matched.albumartist, "album": m.matched.album}
+                        if m.matched else None
+                    ),
+                }
+                for m in report.matches
+            ],
+        }))
+        return 0
+
+    def line(m) -> str:
+        # Some release titles already carry their year ("Hyperspace (2020)");
+        # appending it again just reads as a bug.
+        year = m.item.year
+        suffix = f" ({year})" if year and str(year) not in m.item.title else ""
+        return f"  {m.item.artist} — {m.item.title}{suffix}"
+
+    media_label = "/".join(sorted(k.value for k in report.media))
+    print(
+        f"{report.source}:{report.account} — {report.fetched} item(s), "
+        f"{report.considered} on {media_label}"
+    )
+    # Always show which index answered. A wrongly-missing album is almost always
+    # an index that didn't know about it, so this is the first thing to check.
+    breakdown = ", ".join(f"{k} {v}" for k, v in sorted(report.library_sources.items()))
+    print(f"library ({breakdown}) — {report.library_albums} unique album(s)")
+    for name, err in sorted(report.library_errors.items()):
+        print(f"  ⚠  {name} index unavailable: {err}", file=sys.stderr)
+    print()
+
+    if report.uncertain:
+        print(f"UNCERTAIN ({len(report.uncertain)}) — confirm these yourself")
+        for m in report.uncertain:
+            print(line(m))
+            print(f"      ≈ {m.matched.albumartist} — {m.matched.album} ({m.score:.2f})")
+        print()
+
+    print(f"MISSING ({len(report.missing)})")
+    for m in report.missing:
+        print(line(m))
+
+    if "--all" in args and report.owned:
+        print(f"\nOWNED ({len(report.owned)})")
+        for m in report.owned:
+            print(line(m))
+
+    counts = {s: len([m for m in report.matches if m.status is s]) for s in MatchStatus}
+    print(
+        f"\n{counts[MatchStatus.OWNED]} owned · "
+        f"{counts[MatchStatus.UNCERTAIN]} uncertain · "
+        f"{counts[MatchStatus.MISSING]} missing"
+    )
+    return 0
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -792,6 +938,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "delete":
         return cmd_delete(cfg, args[1:])
+
+    if command == "collection-audit":
+        return cmd_collection_audit(cfg, args[1:])
 
     if command == "notify":
         if len(args) < 3:

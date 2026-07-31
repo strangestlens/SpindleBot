@@ -84,10 +84,67 @@ python3 -m spindlebot sync [--location <name>]       # execute acknowledged copi
 python3 -m spindlebot prune [--execute]              # release Pending copies verified on retention
 python3 -m spindlebot fetch-art  <dir> [--dry-run] [--force]
 python3 -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]
+python3 -m spindlebot collection-audit [--handle <name>]  # what's on the shelf but not ripped
 python3 -m spindlebot restart                        # restart the launchd agents
 ```
 
 `prune` and `delete` default to **dry-run** — pass `--execute` to touch bytes.
+
+## Collection audit (optional)
+
+Compares a collection you already maintain elsewhere against the digital
+library and lists the discs you own but haven't ripped. Entirely assistive — it
+reads the library and writes nothing but a fetch cache. Unconfigured, it simply
+doesn't run.
+
+```bash
+python3 -m spindlebot collection-audit --handle your-discogs-handle
+```
+
+Put the handle in `config.toml` under `[collection]` and the flag becomes
+optional; `--handle` always overrides it.
+
+| Flag | Effect |
+|------|--------|
+| `--source discogs\|fixture` | Where the collection comes from |
+| `--media cd,vinyl` | Which media count as rippable (default `cd`, which includes CDrs) |
+| `--index auto\|beets\|db` | Which view of the library to compare against (default `auto`, the union — see below) |
+| `--refresh` | Re-fetch instead of using the cached collection |
+| `--strict` | Treat uncertain matches as missing |
+| `--all` | Also list what you already own |
+| `--json` | Structured output |
+
+**Discogs** needs no credentials for a public collection. A personal access
+token in `secrets.toml` (`[discogs] token`) raises the API rate limit from 25 to
+60 requests/minute and is required for a private collection.
+
+**Adding another source** means writing one provider: an impure client that
+fetches, and a pure transformer that maps its payload to `CollectionItem`. The
+`fixture` provider — a JSON file you write by hand — is a working example, and
+doubles as the way in for anyone not on Discogs.
+
+Results land in three buckets, not two. `uncertain` exists so that a
+normalization miss sends you to check a row rather than to re-rip a disc you
+already own.
+
+### Which library index?
+
+Neither backend is a complete picture, and they go stale in opposite directions:
+
+| Index | Knows about | Blind to |
+|-------|-------------|----------|
+| `beets` | Everything it imported and still tracks | Albums that reached a drive without a `beet import` |
+| `db` | Everything `spindlebot inventory` has scanned at any location | A fresh import that hasn't synced yet |
+
+Measured on a real library: 67 albums existed **only** in the SpindleBot DB and
+2 existed **only** in beets. So `auto` (the default) unions them — an album
+counts as owned if either index knows it, which can only ever shrink the missing
+list. Every run prints the breakdown (`library (beets 112, db 177) — 176 unique
+album(s)`), because when an album is wrongly reported missing, the index is the
+first suspect.
+
+If both indexes come back empty the audit **fails** rather than reporting your
+entire collection as missing.
 
 ## Scripts
 

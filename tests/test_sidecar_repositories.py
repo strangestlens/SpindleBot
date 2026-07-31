@@ -64,6 +64,23 @@ def test_album_link_track_is_idempotent(conn):
     assert album_repo.list_track_ids(conn, al.id) == sorted([a.id, b.id])
 
 
+def test_album_list_all_is_sorted_case_insensitively(conn):
+    album_repo.upsert(conn, album_key="k1", now=0,
+                      albumartist="beck", album="Mutations")
+    album_repo.upsert(conn, album_key="k2", now=0,
+                      albumartist="Aphex Twin", album="Drukqs")
+    album_repo.upsert(conn, album_key="k3", now=0,
+                      albumartist="Beck", album="Guero")
+    # "beck" and "Beck" tie on artist, so the album title breaks it.
+    assert [(a.albumartist, a.album) for a in album_repo.list_all(conn)] == [
+        ("Aphex Twin", "Drukqs"), ("Beck", "Guero"), ("beck", "Mutations"),
+    ]
+
+
+def test_album_list_all_is_empty_on_a_fresh_db(conn):
+    assert album_repo.list_all(conn) == []
+
+
 # ── sidecar_repo ──────────────────────────────────────────────────────────────
 
 def _album(conn):

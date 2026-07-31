@@ -85,5 +85,13 @@ def list_present_track_paths(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     return [(r[0], r[1]) for r in rows]
 
 
+def list_all(conn: sqlite3.Connection) -> list[Album]:
+    """Every album known to the DB, ordered by artist then title."""
+    rows = conn.execute(
+        "SELECT * FROM album ORDER BY albumartist COLLATE NOCASE, album COLLATE NOCASE"
+    ).fetchall()
+    return [Album.from_row(r) for r in rows]
+
+
 def count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM album").fetchone()[0]

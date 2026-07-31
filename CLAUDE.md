@@ -51,7 +51,8 @@ Replacing "library = whatever is at known paths" with a **SpindleBot-owned SQLit
 ```
 spindlebot/
   cli.py                         — CLI entry point: check / config / import / import-staging /
-                                     inventory / review / finalize / fetch-lyrics / fetch-art / notify / restart
+                                     inventory / review / finalize / collection-audit /
+                                     fetch-lyrics / fetch-art / notify / restart
   config.py                      — typed config dataclasses, loads config.toml + secrets.toml,
                                      env var overrides
   disc.py                        — AUDIO_EXTENSIONS, find_audio_files(), check_wait(),
@@ -72,8 +73,13 @@ spindlebot/
     identity.py                  — audio_md5 / file_sha256 / audio_content_id (ContentId)
     albums.py                    — album_key(): deterministic album grouping (mb_albumid → albumartist+album)
     vclock.py                    — pure version vectors: dominates / concurrent / merge / bump / json
+    collection.py                — CollectionItem (the common reduction every external
+                                     collection source adapts to) + LibraryAlbum + resolve_media
+    collection_match.py          — ARTIST-SCOPED matcher: normalize → artist candidates →
+                                     exact/containment/score → owned|uncertain|missing
     enums.py                     — LocationKind / IdentityKind / ScanStatus / SidecarRole /
-                                     SidecarParentKind / RunKind / ActionKind / ContentKind / ConflictStatus
+                                     SidecarParentKind / RunKind / ActionKind / ContentKind /
+                                     ConflictStatus / MediaKind
     models.py                    — frozen row dataclasses (+ from_row): Location, AudioContent,
                                      AudioPresence, Album, SidecarContent, SidecarPresence, Run,
                                      PendingAction, LyricDoc, LyricVersion, LyricVersionPresence,
@@ -86,8 +92,21 @@ spindlebot/
                                      scan_repo, album_repo, sidecar_repo, sidecar_presence_repo,
                                      run_repo, action_repo, lyric_repo, lyric_version_presence_repo,
                                      conflict_repo
+  collections/                   — OPTIONAL external collection sources (assistive; nothing in
+                                     the import/sync path depends on this). Each provider splits
+                                     into an impure client + a PURE transformer, so every
+                                     source quirk is testable against a recorded fixture.
+    base.py                      — CollectionProvider Protocol + name→factory registry
+    discogs.py                   — DiscogsClient (paging/throttle/cache) + to_items() (pure)
+    fixture.py                   — hand-written JSON collection; test double AND the
+                                     supported way in for anyone not on Discogs
   services/                      — orchestration over repos+core (no print side effects)
     inventory.py                 — scan a location → upsert content + albums + sidecars + presence
+    library_index.py             — the library as a LibraryIndex; `auto` (DEFAULT) unions
+                                     beets + the SpindleBot album table, because NEITHER is
+                                     a superset (measured: 67 albums db-only, 2 beets-only).
+                                     Refuses to answer from an empty index.
+    collection_audit.py          — provider → media filter → match → AuditReport buckets
     locations.py                 — register_from_config; deterministic location_uuid
     volumes.py                   — marker files (.spindlebot-location-<uuid>), resolve_root
     reconciler.py                — planner: diff DB vs observed → pending_action (copy/missing/
@@ -161,6 +180,14 @@ tests/
   test_lyrics_sync.py            — lyric lineage service (current/behind/concurrent, legacy-head
                                      repair, stable-uuid actor, per-observation version presence)
   test_review_cli.py             — spindlebot review CLI (plan + acknowledge)
+  test_collection_match.py       — THE matcher contract: normalization + a match table whose
+                                     rows are real Discogs/beets pairs (incl. the containment
+                                     cases a whole-string fuzzy match got wrong)
+  test_collection_discogs.py     — Discogs transformer against tests/fixtures/
+                                     discogs_collection_page1.json + client paging/throttle/
+                                     cache/errors (injected fetcher; never hits the network)
+  test_collection_audit.py       — audit service, fixture provider, registry, library index
+  test_collection_cli.py         — spindlebot collection-audit CLI (text + --json)
   test_lyric_timing_lrc.py       — lyric_timing/lrc parse/format
   test_lyric_timing_detector.py  — audit heuristics
   test_lyric_timing_aligner.py   — word→line assignment, interpolation, monotonicity (mock backend)
@@ -260,6 +287,23 @@ stay on stderr or it will corrupt the caller's parse — this already broke `--j
 `torch` via `importlib.util.find_spec` rather than catching an `ImportError` mid-alignment.
 MPS watermark env vars must be set *before* torch is first imported.
 
+**12. Collection matching is artist-scoped — do not "simplify" it to one fuzzy score**
+Resolve the artist first, then compare titles only within that artist's albums. A whole-string
+similarity over `"artist title"` measurably does not work: a multi-disc rip carries a
+`" - <disc title>"` suffix from MusicBrainz and Discogs release names run long or short, so
+`Ummagumma` vs `Ummagumma - Live Album` scored 0.78 — below every usable threshold and
+indistinguishable from an album that genuinely isn't there. Seven real albums were reported
+missing that way. The match table in `tests/test_collection_match.py` guards each case.
+
+**13. Non-Latin scripts must survive normalization**
+`normalize_*` strips combining marks only from ASCII bases. Blanket NFKD + combining-mark
+removal also strips Japanese dakuten (パ decays to ハ, a different kana), and an ASCII-only
+character class empties a katakana title entirely — which throws away the only thing a
+dual-script release can match on. A library tagged in a different script than the collection
+lists (e.g. beets `ベック / ハイパースペース(2020)` vs Discogs `Beck / Hyperspace (2020)`)
+remains unmatchable without transliteration; that is what the ignore list is for, not a reason
+to add a heavy dependency to `spindlebot/`.
+
 ## Code quality non-negotiables
 
 - shellcheck clean on all `.sh` files before commit. Use `# shellcheck disable=SC####` with a comment explaining why — no blanket suppressions.
@@ -317,6 +361,9 @@ python3 -m spindlebot finalize [--dry-run] [--json]          # retry lyrics + pr
 python3 -m spindlebot fetch-art <album_dir> [--dry-run] [--force]
 python3 -m spindlebot fetch-lyrics <album_dir> [--dry-run] [--force]
 
+python3 -m spindlebot collection-audit [--handle <name>] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--json]
+                                                             # optional: what's in the Discogs
+                                                             # collection but not in the library
 python3 -m spindlebot inventory [--location <name>] [--json]  # scan a location into the DB (read-only re: bytes)
 python3 -m spindlebot review --location <name> [--json]       # plan reconciliation (run inventory first); no bytes moved
 python3 -m spindlebot review --acknowledge-run <run_id>       # acknowledge a run's proposed actions

@@ -20,3 +20,11 @@ class IntegrityMismatch(SpindleBotError):
 
 class MinCopiesViolation(SpindleBotError):
     """An action would drop a content below the configured min_copies floor."""
+
+
+class UnknownProvider(SpindleBotError):
+    """No collection provider is registered under that name."""
+
+
+class CollectionFetchError(SpindleBotError):
+    """An external collection source could not be read."""
