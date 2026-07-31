@@ -166,7 +166,9 @@ function showToast(text, {error = false, undo = null} = {}) {
   lastAction = undo;
   toast.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove('show'), 6000);
+  // An error you blink and miss is an error you'll hit again. Success toasts
+  // are disposable — the card's own undo button is the durable path.
+  toastTimer = setTimeout(() => toast.classList.remove('show'), error ? 15000 : 6000);
 }
 
 function recount() {
@@ -182,13 +184,24 @@ async function toggle(card, verb) {
   const button = card.querySelector('.act');
   button.disabled = true;
   try {
-    const res = await fetch(verb === 'ignore' ? '/ignore' : '/unignore', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({key: card.dataset.key}),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || 'request failed');
+    let res;
+    try {
+      res = await fetch(verb === 'ignore' ? '/ignore' : '/unignore', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({key: card.dataset.key}),
+      });
+    } catch (netErr) {
+      // fetch only throws for network-level failures, and for a localhost tool
+      // that means one thing: the server is gone. This page outlives the
+      // process that served it — leaving a tab open overnight is the normal
+      // case, not an edge case — and "Failed to fetch" tells you nothing.
+      throw new Error(
+        'collection-browser is not running — restart it and reload this page'
+      );
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || ('request failed (' + res.status + ')'));
     // The verdict never changed, so undoing is just restoring the bucket.
     card.dataset.status = verb === 'ignore' ? 'ignored' : card.dataset.verdict;
     button.dataset.act = verb === 'ignore' ? 'undo' : 'ignore';

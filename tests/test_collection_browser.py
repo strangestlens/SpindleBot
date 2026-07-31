@@ -97,6 +97,15 @@ def test_owned_cards_have_no_ignore_button(browser):
     assert all('class="act"' not in block for block in owned)
 
 
+def test_a_dead_server_says_so_instead_of_failed_to_fetch(browser):
+    """This page outlives the process that served it — a tab left open
+    overnight is the normal case. The browser's raw "Failed to fetch" tells you
+    nothing about what to do."""
+    page = browser.client.get("/").get_data(as_text=True)
+    assert "collection-browser is not running" in page
+    assert "restart it and reload" in page
+
+
 def test_exported_report_stays_inert(browser):
     """The static export must not ship dead buttons."""
     from spindlebot.services.collection_report import render_html
