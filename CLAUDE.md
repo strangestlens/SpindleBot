@@ -38,7 +38,7 @@ Replacing "library = whatever is at known paths" with a **SpindleBot-owned SQLit
 
 **Conventions:**
 - **Identity** = decoded-audio MD5 (FLAC STREAMINFO `md5_signature`), fallback to whole-file sha256, recorded via `IdentityKind`. File sha256 is per-copy *integrity*, never identity.
-- **Closed sets are `StrEnum`s** (`LocationKind`, `IdentityKind`, `ScanStatus`, `SidecarRole`, `SidecarParentKind`, `RunKind`, `ActionKind`, `ContentKind`, `ConflictStatus`) — stored as TEXT, validated on read+write, fail loud on unknown. No bare string literals for these.
+- **Closed sets are `StrEnum`s** (`LocationKind`, `IdentityKind`, `ScanStatus`, `SidecarRole`, `SidecarParentKind`, `RunKind`, `ActionKind`, `ContentKind`, `ConflictStatus`, `MediaKind`, plus `MatchStatus` in `core/collection_match.py`) — stored as TEXT, validated on read+write, fail loud on unknown. No bare string literals for these. One deliberate exception: `[collection] media` stays raw strings in config and is validated by `resolve_media` at the point of use, because `config.load()` bootstraps every shell script and a typo in an optional assistive feature must not take down import and sync.
 - **Schema is minimal per phase** — add new tables in a *new* migration version; never edit a shipped schema file. Current `user_version` = **7**. v1: `location`/`audio_content`/`audio_presence`; v2: `location.root_path` + `location_scan`; v3: `album`/`album_track`/`sidecar_content`/`sidecar_presence`; v4: `run`/`pending_action`; v5: `lyric_doc`/`lyric_version`/`conflict`; v6: `mtime` on both presence tables + `(location_id, rel_path)` indexes (incremental rescan); v7: `lyric_version_presence` (per-`(doc, location)` version each location holds — the causal memory Phase 4.0 lineage needs). Polymorphic ids (`sidecar_content.parent_id`, `pending_action.content_id`) carry **no FK** by design — deleters must clean up explicitly.
 - **Locations are first-class**, identified by a marker file `.spindlebot-location-<uuid>` at `root_path` (a path — may be a *subfolder* of a shared volume, not a whole volume). A *missing* marker is never treated as a wiped drive; a *foreign* marker refuses resolution.
 - **beets overlay**: `audio_content.beets_item_id` linked by path during inventory (read-only); advisory, nullable, never depended on.
@@ -52,7 +52,8 @@ Replacing "library = whatever is at known paths" with a **SpindleBot-owned SQLit
 spindlebot/
   cli.py                         — CLI entry point: check / config / import / import-staging /
                                      inventory / review / finalize / collection-audit /
-                                     fetch-lyrics / fetch-art / notify / restart
+                                     collection-ignore / fetch-lyrics / fetch-art /
+                                     notify / restart
   config.py                      — typed config dataclasses, loads config.toml + secrets.toml,
                                      env var overrides
   disc.py                        — AUDIO_EXTENSIONS, find_audio_files(), check_wait(),
@@ -96,7 +97,10 @@ spindlebot/
                                      the import/sync path depends on this). Each provider splits
                                      into an impure client + a PURE transformer, so every
                                      source quirk is testable against a recorded fixture.
-    base.py                      — CollectionProvider Protocol + name→factory registry
+    base.py                      — CollectionProvider Protocol + name→factory registry.
+                                     fetch(cached_only=True) = answer from local data or
+                                     not at all — a bookkeeping command (collection-ignore)
+                                     must never be able to stall on HTTP.
     discogs.py                   — DiscogsClient (paging/throttle/cache) + to_items() (pure)
     fixture.py                   — hand-written JSON collection; test double AND the
                                      supported way in for anyone not on Discogs

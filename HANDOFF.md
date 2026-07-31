@@ -70,10 +70,15 @@ Key external tools: **beets** (MusicBrainz matching + its own SQLite item DB),
 **mpv** (playback/preview), and the standalone **lrc-editor** (Flask/WaveSurfer.js
 lyric-timing editor).
 
-There is also an **optional AI lyric-timing subsystem** (`lyric_timing/`, a peer
-package to `spindlebot/`) that finds and repairs mistimed `.lrc` files. It is not
-part of the import pipeline and its heavy dependencies live in their own venv —
-see [Optional: AI lyric timing](#optional-ai-lyric-timing).
+Two optional side subsystems sit alongside the pipeline, neither of which it
+depends on:
+
+- **AI lyric timing** (`lyric_timing/`, a peer package) finds and repairs
+  mistimed `.lrc` files. Its heavy dependencies live in their own venv — see
+  [Optional: AI lyric timing](#optional-ai-lyric-timing).
+- **Collection audit** answers "which discs do I own but haven't ripped?" by
+  comparing an external collection against the library — see
+  [Optional: collection audit](#optional-collection-audit).
 
 ---
 
@@ -101,6 +106,12 @@ mid-way through a larger content-addressed refactor.
   `.lrc` files for bad timing and re-times them against the audio by forced
   alignment, wired into lrc-editor as an **Audit** page and an **AI Arrange**
   button. Optional and self-contained — see below.
+- **Collection audit (side subsystem):** merged and usable. `spindlebot
+  collection-audit` compares an external collection (Discogs, or a JSON file you
+  write) against the library and lists the discs you own but haven't ripped,
+  with an ignore list and a `collection-browser` web UI. Purely assistive —
+  nothing in the import or sync path depends on it, and it's inert until
+  configured. See below.
 
 The forward-looking roadmap (lyrics bidirectional sync, remote access via
 Navidrome, a Mac app) lives in [`ROADMAP.md`](ROADMAP.md).
@@ -151,6 +162,9 @@ $EDITOR ~/.config/spindlebot/secrets.toml   # Telegram token, Genius API key
   beets config location.
 - `[notifications]` — toggle macOS and Telegram independently.
 - `[lyrics]` / `[art]` — source order and tuning.
+- `[collection]` — **optional**; the external-collection audit. Delete the block
+  and the feature is simply off. `[discogs] token` in `secrets.toml` is optional
+  too — a public collection needs no credentials.
 - `[[destinations]]` — one block per sync target. `type = "local_drive"` (rsync to
   a mounted volume) or `type = "rclone"` (any rclone remote). The **first enabled
   `local_drive`** is the retention destination and the mount probe.
@@ -215,6 +229,12 @@ spindlebot sync [--location <name>]                   # execute acknowledged cop
 spindlebot prune [--execute]                          # release Pending copies verified on retention (DRY-RUN unless --execute)
 spindlebot delete [--execute]                         # execute acknowledged retention-copy deletes (gated on min_copies)
 
+# --- collection audit (optional; see below) ---
+spindlebot collection-audit [--handle <name>]         # what's on the shelf but not ripped
+spindlebot collection-ignore <id...> [--reason <t>]   # stop reporting a disc as missing
+spindlebot collection-ignore --list                   # what's ignored
+spindlebot collection-ignore --remove <id...>         # put one back (--unignore too)
+
 # --- per-album utilities ---
 spindlebot fetch-lyrics <dir> [--dry-run] [--force]
 spindlebot fetch-art <dir> [--dry-run] [--force]
@@ -231,6 +251,105 @@ spindlebot restart                        # restart the launchd agents
 The daemons — the fswatch import watcher and the retention-drive mount sync — run under
 launchd (`com.strangestlens.music-watcher`, `com.strangestlens.music-sync`)
 and are installed by `setup.sh`. Use `spindlebot restart` to bounce them.
+
+---
+
+## Optional: collection audit
+
+Answers one question: **which discs do I own but haven't ripped?** It compares a
+collection you already maintain elsewhere against the digital library. Nothing
+in the import or sync path depends on it, and with no `[collection]` config it
+simply doesn't run.
+
+```bash
+spindlebot collection-audit --handle your-discogs-handle
+```
+
+```
+discogs:yourhandle — 212 item(s), 152 on cd
+library (beets 112, db 177) — 176 unique album(s)
+
+MISSING (47)
+  1234567   Beck — Sea Change (2002)
+  ...
+
+104 owned · 1 uncertain · 47 missing
+
+Not going to rip one? spindlebot collection-ignore 1234567
+```
+
+### Three things worth understanding before you trust it
+
+**1. The library index is the union of beets *and* the SpindleBot DB.** Neither
+is a superset of the other, and they go stale in opposite directions:
+
+| Index | Knows | Blind to |
+|-------|-------|----------|
+| `beets` | Everything it imported and still tracks | Albums that reached a drive without a `beet import` |
+| `db` | Everything `inventory` has scanned at any location | A fresh import that hasn't synced yet |
+
+Measured on the author's library: 67 albums existed *only* in the DB (copied-in
+files with no `beets_item_id`) and 2 *only* in beets. Auditing against beets
+alone reported 95 of 152 CDs missing — 48 of them owned. So `--index auto` (the
+default) unions them, and every run prints which index contributed what. If an
+album is ever wrongly reported missing, **the index is the first suspect**.
+
+If both indexes come back empty the audit fails rather than declaring your
+entire collection missing.
+
+**2. Matching is artist-scoped, and that is load-bearing.** It resolves the
+artist first, then compares titles only within that artist's albums. A
+whole-string similarity does not work here — a multi-disc rip carries a
+MusicBrainz `" - <disc title>"` suffix, so `Ummagumma` vs
+`Ummagumma - Live Album` scores 0.78, indistinguishable from an album that
+genuinely isn't there. See gotcha #12 in `CLAUDE.md`.
+
+**3. There are three buckets, not two.** `uncertain` exists so a normalization
+miss sends you to eyeball a row rather than to the shelf to re-rip something you
+already own.
+
+### Ignoring
+
+Damaged discs, gifts, a release the matcher can't reach. Without this the
+missing list keeps a permanent floor of noise and stops being worth opening.
+
+```bash
+spindlebot collection-ignore 1234567 --reason "disc is cracked"
+spindlebot collection-ignore --list
+spindlebot collection-ignore --remove 1234567     # --unignore works too
+```
+
+Ignoring never overwrites the verdict underneath, so un-ignoring restores
+exactly what the audit said before. An album you later rip is never reported as
+ignored, so stale entries stop mattering on their own. Stored as JSON at
+`~/.config/spindlebot/collection-ignore.json` — not a schema change.
+
+### The web UI
+
+```bash
+./collection-browser --handle your-discogs-handle
+```
+
+The same report with an **ignore** button on every card and an **undo** on every
+ignored one; counts update live. A sibling to `lrc-editor` — same palette, same
+single-file shape — and deliberately outside `spindlebot/` so the pipeline
+package never takes a Flask dependency. Binds to `127.0.0.1` and refuses
+cross-origin POSTs.
+
+`collection-audit --html <file>` writes the same page as a static export with no
+buttons and no server.
+
+### Sources other than Discogs
+
+A provider is one function: account → `list[CollectionItem]`. Each splits into
+an impure client and a **pure** transformer, so a source's quirks are testable
+against a recorded payload with no network. Two ship today:
+
+- `discogs` — public collections need no credentials. A token in `secrets.toml`
+  (`[discogs] token`) raises the rate limit from 25 to 60 req/min and is
+  required for a private collection.
+- `fixture` — a JSON file you write by hand. Both the test double and the
+  supported way in for anyone not on Discogs; `account` is the file path.
 
 ---
 
@@ -321,13 +440,20 @@ music-pipeline/
 │   ├── pipeline/
 │   │   ├── runner.py            # ImportRunner: orchestrates all import stages
 │   │   └── stages/              # pretag, posttag, fetch_art, fetch_lyrics, notify
-│   ├── core/                    # pure, side-effect-free (identity, albums, vclock, enums, models)
+│   ├── core/                    # pure, side-effect-free (identity, albums, vclock, enums, models,
+│   │                            #   collection + collection_match)
+│   ├── collections/             # OPTIONAL external collection sources (discogs, fixture);
+│   │                            #   each = impure client + PURE transformer
 │   ├── db/                      # SpindleBot's own SQLite system-of-record
 │   │   ├── connection.py        # open_db(): WAL + foreign_keys + migrate
 │   │   ├── schema*.sql          # versioned DDL (user_version 1–7)
 │   │   └── repositories/        # the ONLY SQL layer
 │   └── services/                # orchestration over repos+core
 │       ├── inventory.py, locations.py, volumes.py
+│       ├── library_index.py     # the library as beets ∪ DB (neither is a superset)
+│       ├── collection_audit.py  # provider → media filter → match → buckets
+│       ├── collection_ignore.py # the "don't tell me about this disc" list
+│       ├── collection_report.py # AuditReport → self-contained HTML
 │       ├── reconciler.py        # planner: diff DB vs observed → pending_action
 │       ├── promote.py           # Processing → Pending promotion
 │       ├── lyrics_sync.py       # per-doc lyric causal lineage (Phase 4.0)
@@ -349,6 +475,9 @@ music-pipeline/
 ├── com.strangestlens.*.plist    # launchd agents
 ├── lrc-editor                   # standalone Flask/WaveSurfer.js lyric-timing editor
 │                                #   (+ the Audit page and AI Arrange button)
+├── collection-browser           # standalone Flask UI for the collection audit
+│                                #   (click-to-ignore); outside spindlebot/ so the
+│                                #   package never takes a Flask dependency
 ├── config.toml.example          # config template
 ├── secrets.toml.example         # credentials template
 ├── tests/                       # pytest suite + tests/shell/ (bats)

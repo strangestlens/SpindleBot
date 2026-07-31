@@ -46,6 +46,7 @@ SpindleBot is a personal music intelligence system. The immediate goal is a clea
 | **5** | Input sources | XLD/CD + folder drops; digital-download "gentle mode" still TODO |
 | **6** | Remote library access | Not yet addressed — Navidrome recommendation below |
 | — | Lyric timing quality | **Delivered** — `lyric_timing/` audit + forced-alignment retime, wired into lrc-editor |
+| — | Collection gap tracking | **Delivered** — `collection-audit` (Discogs → library), ignore list, `collection-browser` UI |
 | — | macOS-only architecture | Acceptable; future Mac App potential |
 
 ---
@@ -378,6 +379,46 @@ the fetched text to `retime` instead of estimating. Step 4's "estimated" marker 
 likewise unnecessary — quality is already surfaced by `lyric_timing audit` (which
 flags all-identical stamps, bulk stamping, crammed-early, non-monotonic) and by
 lrc-editor coloring sub-0.5-confidence markers orange after an AI Arrange.
+
+---
+
+## Collection Gap Tracking (delivered)
+
+**Goal:** know which discs you physically own but haven't ripped, without
+maintaining a second inventory by hand.
+
+Shipped as `spindlebot collection-audit` — it reads a collection you already
+keep elsewhere (Discogs today) and diffs it against the library. Purely
+assistive: nothing in the import or sync path depends on it, it writes nothing
+but a fetch cache and an ignore list, and it's inert until configured.
+
+Three design decisions worth carrying forward if this is ever extended:
+
+1. **Sources are pluggable, and a provider is one function** (account →
+   `list[CollectionItem]`), split into an impure client and a pure transformer.
+   Adding MusicBrainz collections, a CSV export, or Last.fm means one module and
+   a registry entry — no changes to the matcher or the CLI.
+2. **The library index is a union, not a choice.** beets and the SpindleBot DB
+   are each partial views that go stale in opposite directions; auditing against
+   either alone produced ~48 false "missing" reports on a real library. Anything
+   else that asks "do I have this?" should read `services/library_index.py`
+   rather than picking one.
+3. **An ignore list is what makes a report converge.** Without a way to say
+   "yes, missing, and that's fine", the list keeps a permanent floor of noise and
+   stops being opened. Ignoring is an overlay that never overwrites the match
+   verdict, so it's always reversible.
+
+Natural extensions, none scheduled:
+
+- **Other providers** — MusicBrainz collections would bring release MBIDs, which
+  short-circuit the string matcher entirely (the `mb_release_id` path already
+  exists and is tested; no source populates it yet).
+- **Other media** — `--media vinyl` already works. A "what have I got on vinyl
+  but not digitally?" report is a flag away.
+- **Transliteration** — the one matching gap left is a library tagged in a
+  different script than the collection lists it (`ベック` vs `Beck`). Solving it
+  needs a transliteration dependency, which would violate the light-deps
+  boundary on `spindlebot/`; the ignore list covers it instead.
 
 ---
 
