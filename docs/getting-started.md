@@ -27,7 +27,7 @@ cd ~/Music/music-pipeline
 2. Writes `~/.config/spindlebot/bootstrap.sh` with your Python path and pipeline
    dir baked in — every shell script sources this to get its `$SPINDLEBOT_*`
    vars.
-3. Creates the Import / Processing / Pending working directories.
+3. Creates the Import / Processing / Pending / Archive working directories.
 4. Installs `music-watcher.sh` → `~/.local/bin/`.
 5. Generates and loads the two launchd agents into `~/Library/LaunchAgents/`.
    The home dir, log dir, and the retention volume to watch all come from your
@@ -35,6 +35,14 @@ cd ~/Music/music-pipeline
 6. Runs `python3 -m spindlebot check`.
 
 Re-run it any time you move the pipeline directory.
+
+> **If you're upgrading rather than installing fresh**, step 3 also runs
+> `migrate_work_dirs`: it relocates anything still sitting in the pre-rename
+> defaults `~/Music/Staging` and `~/Music/Library` into the new Import and
+> Pending areas, and rewrites the matching paths in the beets DB. It's
+> idempotent and never deletes the old top-level directories, but it does move
+> files — worth knowing before you run it. The old archive default
+> (`~/Music/All Discs`) is deliberately *not* migrated.
 
 ## 2. Fill in config and secrets
 
@@ -55,10 +63,16 @@ cd ~/Music/music-pipeline
 python3 -m spindlebot check
 ```
 
-`check` verifies the working dirs exist, the tool binaries are executable, the
-beets DB is present, each enabled destination is reachable, and the credentials
-are set — printing a concrete fix suggestion for anything that fails. Treat a
-clean `check` as the bar for "installed correctly".
+`check` verifies that the Import / Pending / log / Archive dirs exist (not
+Processing or Duplicates), the tool binaries are executable, the beets DB is
+present, each enabled destination is reachable, and the credentials are set —
+printing a concrete fix suggestion for anything that fails.
+
+Two caveats on reading the output. It checks the Telegram and Genius
+credentials unconditionally, so if you aren't using Telegram you'll see it fail
+those lines even with `notifications.telegram_enabled = false`; that's cosmetic.
+And `check` is a config-and-environment probe, not a smoke test — a clean run
+means nothing is obviously misconfigured, not that an import will succeed.
 
 ## 4. Point beets at the Pending area
 

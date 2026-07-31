@@ -144,7 +144,10 @@ owned**.
 So `auto` (the default) unions them: an album counts as owned if either index
 knows it, which can only ever shrink the missing list. Every run prints the
 breakdown (`library (beets 112, db 177) — 176 unique album(s)`), because when an
-album is wrongly reported missing, the index is the first suspect.
+album is wrongly reported missing, the index is the first suspect. The three
+numbers don't add up as a set union because they aren't measuring the same
+thing: the `db` figure counts album rows, and one album present at several
+locations collapses to one entry on dedup.
 
 If both indexes come back empty the audit **fails** rather than reporting your
 entire collection as missing.

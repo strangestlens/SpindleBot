@@ -79,6 +79,7 @@ python3 -m spindlebot inventory [--location <name>]  # scan a location into the 
 python3 -m spindlebot review --location <name>       # plan reconciliation (no bytes moved)
 python3 -m spindlebot sync [--location <name>]       # execute acknowledged copies
 python3 -m spindlebot prune [--execute]              # release Pending copies verified on retention
+python3 -m spindlebot delete [--execute]             # remove a retention copy (gated on min_copies)
 python3 -m spindlebot fetch-art  <dir> [--dry-run] [--force]
 python3 -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]
 python3 -m spindlebot restart                        # restart the launchd agents

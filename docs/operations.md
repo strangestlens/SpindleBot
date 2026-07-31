@@ -49,9 +49,8 @@ Both live under `core.log_dir`. Follow an import as it happens:
 tail -f ~/.config/beets/watcher.log
 ```
 
-User-facing milestones are emoji-prefixed, so `grep -E '^\[.*\] [^A-Za-z]' ` or
-just eyeballing the emoji gives you the run summary without the verbose
-internals.
+User-facing milestones are emoji-prefixed, so scanning for the emoji gives you
+the run summary without the verbose internals.
 
 ## What a sync run does
 

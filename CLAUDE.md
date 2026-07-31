@@ -196,6 +196,10 @@ lyric_timing/                    — OPTIONAL AI lyric-timing subsystem (peer pa
 setup-ai.sh                      — creates the AI venv at ~/.local/share/spindlebot/ai-venv
                                      (Python 3.13) from requirements-ai.txt
 
+docs/                            — human-facing guides; see "Documentation map" above for
+                                     which doc owns what. Explanations live here, RULES live
+                                     in this file — don't restate one in the other.
+
 tests/
   test_config.py
   test_disc_check.py

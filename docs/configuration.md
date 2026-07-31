@@ -100,19 +100,52 @@ Reorder the blocks and you change which drive is authoritative for retention.
 
 ## Secrets and env-var precedence
 
-`secrets.toml` holds `[telegram] token` / `chat_id`, `[genius] key`, and the
-optional `[discogs] token`. Environment variables **override the file**:
+Note the key names — they aren't what the env-var names suggest:
+
+```toml
+[telegram]
+bot_token = ""   # from @BotFather      NOT `token`
+chat_id   = ""
+
+[genius]
+api_key   = ""   # from genius.com      NOT `key`
+
+[discogs]
+token     = ""   # optional; see collection-audit
+```
+
+Environment variables **override the file**:
 
 | Variable | Overrides |
 |----------|-----------|
-| `SPINDLEBOT_TELEGRAM_TOKEN` | `[telegram] token` |
+| `SPINDLEBOT_TELEGRAM_TOKEN` | `[telegram] bot_token` |
 | `SPINDLEBOT_TELEGRAM_CHAT_ID` | `[telegram] chat_id` |
-| `SPINDLEBOT_GENIUS_KEY` | `[genius] key` |
+| `SPINDLEBOT_GENIUS_KEY` | `[genius] api_key` |
+| `SPINDLEBOT_DISCOGS_TOKEN` | `[discogs] token` |
 
-Path and behaviour keys have env overrides too, following the same pattern:
-`SPINDLEBOT_IMPORT_DIR`, `SPINDLEBOT_PROCESSING_DIR`, `SPINDLEBOT_PENDING_DIR`,
-`SPINDLEBOT_DUPLICATES_DIR`, `SPINDLEBOT_AUTO_SYNC_ON_IMPORT`. Useful for a
-one-off run against a scratch area without editing the file.
+### Which env vars actually override config
+
+There are two families of `SPINDLEBOT_*` variable and it's easy to conflate
+them:
+
+**Inputs** — read by `config.load()`, so setting one changes what SpindleBot
+does:
+
+| Variable | Overrides |
+|----------|-----------|
+| `SPINDLEBOT_CONFIG_DIR` | where `config.toml` and `secrets.toml` are read from |
+| `SPINDLEBOT_PROCESSING_DIR` | `core.processing_dir` |
+| `SPINDLEBOT_DUPLICATES_DIR` | `core.duplicates_dir` |
+| `SPINDLEBOT_AUTO_SYNC_ON_IMPORT` | `core.auto_sync_on_import` |
+| `SPINDLEBOT_COLLECTION_ACCOUNT` | `[collection] account` |
+| the four secrets above | `secrets.toml` |
+
+**Outputs** — emitted by `config shell` for the shell scripts to consume.
+`SPINDLEBOT_IMPORT_DIR`, `SPINDLEBOT_PENDING_DIR`, `SPINDLEBOT_ARCHIVE_DIR`,
+`SPINDLEBOT_LOG_DIR` and friends are in this family. **Setting them in your
+environment does nothing** — `core.import_dir` and `core.pending_dir` are read
+from TOML only. To point a one-off run at a scratch area, use
+`SPINDLEBOT_CONFIG_DIR` with an alternate `config.toml`.
 
 ## `[collection]` — optional
 

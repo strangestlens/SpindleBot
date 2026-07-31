@@ -1,8 +1,9 @@
 # Command reference
 
-Every command is invoked as `python3 -m spindlebot <command>`. There is no
-`spindlebot` executable on `PATH` — `setup.sh` doesn't install one — so the
-examples below assume an alias:
+Every command is invoked as `python3 -m spindlebot <command>` — there is no
+`spindlebot` executable on `PATH`, and `setup.sh` doesn't install one. The
+examples below spell out the full form so they can be pasted as-is. If you use
+this often, alias it:
 
 ```bash
 alias spindlebot='python3 -m spindlebot'
@@ -18,22 +19,22 @@ human-readable text only.
 ## Inspection and setup
 
 ```bash
-spindlebot check                          # validate config + environment
-spindlebot config shell                   # emit config as shell exports (what bootstrap.sh evals)
-spindlebot config get core.pending_dir    # print a single value
-spindlebot restart                        # restart the launchd agents
-spindlebot notify <title> <message>       # send a test notification on all channels
+python3 -m spindlebot check                          # validate config + environment
+python3 -m spindlebot config shell                   # emit config as shell exports (what bootstrap.sh evals)
+python3 -m spindlebot config get core.pending_dir    # print a single value
+python3 -m spindlebot restart                        # restart the launchd agents
+python3 -m spindlebot notify <title> <message>       # send a test notification on all channels
 ```
 
 ## Import
 
 ```bash
-spindlebot import <trigger> [--force]     # run the import pipeline for one album
-                                          #   trigger = an album dir OR an XLD .log
-                                          #   --force skips the multi-disc wait
-spindlebot import-staging [--dry-run]     # import everything currently in the Import area
-spindlebot finalize [--dry-run] [--json]  # retry lyrics + promote lyric-complete albums
-                                          #   out of Processing → Pending
+python3 -m spindlebot import <trigger> [--force]     # run the import pipeline for one album
+                                                     #   trigger = an album dir OR an XLD .log
+                                                     #   --force skips the multi-disc wait
+python3 -m spindlebot import-staging [--dry-run]     # import everything currently in the Import area
+python3 -m spindlebot finalize [--dry-run] [--json]  # retry lyrics + promote lyric-complete albums
+                                                     #   out of Processing → Pending
 ```
 
 `import` is what the fswatch daemon fires on a `.log` write or folder drop; you
@@ -44,13 +45,19 @@ that has since become lyric-complete.
 ## Content-addressed DB and sync
 
 ```bash
-spindlebot inventory [--location <name>] [--rehash]   # scan a location into the DB
-spindlebot review --location <name> [--yes]           # plan reconciliation; --yes acknowledges
-spindlebot review --acknowledge-run <run_id>          # acknowledge every action in a run
-spindlebot sync [--location <name>]                   # execute acknowledged copies
-spindlebot prune [--execute]                          # release Pending copies verified on retention
-spindlebot delete [--execute]                         # execute acknowledged retention-copy deletes
+python3 -m spindlebot inventory [--location <name>] [--rehash]   # scan a location into the DB
+python3 -m spindlebot review --location <name> [--yes]           # plan reconciliation; --yes acknowledges
+python3 -m spindlebot review --acknowledge-run <run_id>          # acknowledge every action in a run
+python3 -m spindlebot review --acknowledge <id[,id...]>          # acknowledge specific actions
+python3 -m spindlebot sync [--location <name>]                   # execute acknowledged copies
+python3 -m spindlebot prune [--execute]                          # release Pending copies verified on retention
+python3 -m spindlebot delete [--execute]                         # execute acknowledged retention-copy deletes
 ```
+
+Each of these takes `--json`, plus `-v`/`--verbose` for scrolling per-file
+output or `--quiet`/`--no-progress` to silence the progress display.
+`music-sync.sh` passes `--quiet`, which is why the sync log reads as milestones
+rather than per-file chatter.
 
 The pipeline is deliberately staged, and each stage is inert with respect to the
 next:
@@ -84,8 +91,8 @@ Both are dry-run unless you pass `--execute`.
 ## Per-album utilities
 
 ```bash
-spindlebot fetch-lyrics <dir> [--dry-run] [--force]
-spindlebot fetch-art <dir> [--dry-run] [--force]
+python3 -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]
+python3 -m spindlebot fetch-art <dir> [--dry-run] [--force]
 ```
 
 `--force` overwrites what's already there; without it, existing `.lrc`/`.nolrc`
@@ -94,12 +101,12 @@ markers and embedded art are left alone.
 ## Collection audit (optional)
 
 ```bash
-spindlebot collection-audit [--handle <name>] [--media cd,vinyl]
+python3 -m spindlebot collection-audit [--handle <name>] [--media cd,vinyl]
                             [--index auto|beets|db] [--refresh]
                             [--strict] [--all] [--show-ignored]
                             [--html <file>] [--json]
-spindlebot collection-ignore <id...> [--reason <text>]
-spindlebot collection-ignore --list | --remove <id...> | --clear --yes
+python3 -m spindlebot collection-ignore <id...> [--reason <text>]
+python3 -m spindlebot collection-ignore --list | --remove <id...> | --clear --yes
 ```
 
 Full reference in [collection audit](collection-audit.md).

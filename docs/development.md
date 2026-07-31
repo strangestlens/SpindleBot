@@ -7,7 +7,7 @@ the mechanics: how to run things, what CI enforces, and how work lands.
 ## Running the suites
 
 ```bash
-python3 -m pytest tests/ --ignore=tests/shell    # 43 Python test modules
+python3 -m pytest tests/ --ignore=tests/shell    # Python suite
 bats tests/shell/                                 # shellcheck + shell integration
 python3 -m ruff check .                           # lint
 ```
@@ -43,7 +43,7 @@ Practical consequences:
 | Job | Runs |
 |-----|------|
 | `python` | `ruff check` + `pytest tests/ --ignore=tests/shell` on a **3.11 + 3.14 matrix** |
-| `shell` | `shellcheck` on the shell scripts + `bats tests/shell/` |
+| `shell` | `shellcheck ./*.sh` (every script, not a list that drifts) + `bats tests/shell/` |
 
 **Why both Python versions.** 3.11 is the floor the code claims to support
 (`StrEnum`, `tomllib`); 3.14 is what the dev machine runs. Testing only the
