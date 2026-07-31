@@ -8,6 +8,7 @@ import pytest
 
 from spindlebot.cli import cmd_collection_audit
 from spindlebot.core.collection import LibraryAlbum
+from spindlebot.services.library_index import LibraryIndex
 from spindlebot.core.enums import MediaKind
 
 
@@ -16,7 +17,7 @@ def _cfg(tmp_path, account="", media=("cd",)):
         core=SimpleNamespace(db_path=tmp_path / "spindlebot.db"),
         tools=SimpleNamespace(beet="/usr/bin/true"),
         collection=SimpleNamespace(
-            source="fixture", account=account, media=media, index="beets",
+            source="fixture", account=account, media=media, index="auto",
             cache_dir=tmp_path / "cache", cache_ttl_hours=24.0,
         ),
         secrets=SimpleNamespace(discogs=SimpleNamespace(token="")),
@@ -35,14 +36,22 @@ def collection_file(tmp_path):
     return path
 
 
+def _index(*albums, counts=None, errors=None) -> LibraryIndex:
+    return LibraryIndex(
+        albums=list(albums),
+        counts=counts or {"beets": len(albums)},
+        errors=errors or {},
+    )
+
+
 @pytest.fixture(autouse=True)
 def stub_library(monkeypatch):
     monkeypatch.setattr(
         "spindlebot.services.library_index.load",
-        lambda cfg, index="beets": [
+        lambda cfg, index="auto": _index(
             LibraryAlbum("Radiohead", "OK Computer"),
             LibraryAlbum("Beck", "Mutations"),
-        ],
+        ),
     )
 
 
@@ -89,6 +98,40 @@ def test_json_output(tmp_path, collection_file, capsys):
     missing = [i for i in payload["items"] if i["status"] == "missing"]
     assert missing[0]["title"] == "Sea Change"
     assert missing[0]["key"].startswith("fixture:")
+
+
+def test_shows_which_index_answered(tmp_path, collection_file, monkeypatch, capsys):
+    """A wrongly-missing album is almost always an index that didn't know it,
+    so the breakdown is never hidden."""
+    monkeypatch.setattr(
+        "spindlebot.services.library_index.load",
+        lambda cfg, index="auto": _index(
+            LibraryAlbum("Radiohead", "OK Computer"),
+            counts={"beets": 112, "db": 177},
+        ),
+    )
+    cmd_collection_audit(_cfg(tmp_path), ["--handle", str(collection_file)])
+    assert "library (beets 112, db 177) — 1 unique album(s)" in capsys.readouterr().out
+
+
+def test_warns_when_an_index_is_unavailable(tmp_path, collection_file, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "spindlebot.services.library_index.load",
+        lambda cfg, index="auto": _index(
+            LibraryAlbum("Radiohead", "OK Computer"),
+            counts={"beets": 1},
+            errors={"db": "no SpindleBot DB — run `spindlebot inventory`"},
+        ),
+    )
+    cmd_collection_audit(_cfg(tmp_path), ["--handle", str(collection_file)])
+    assert "db index unavailable" in capsys.readouterr().err
+
+
+def test_json_carries_the_index_breakdown(tmp_path, collection_file, capsys):
+    cmd_collection_audit(_cfg(tmp_path), ["--handle", str(collection_file), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["library_sources"] == {"beets": 2}
+    assert payload["library_errors"] == {}
 
 
 def test_config_supplies_the_account(tmp_path, collection_file, capsys):
@@ -141,7 +184,7 @@ def test_strict_flag_moves_uncertain_into_missing(tmp_path, monkeypatch, capsys)
     path.write_text(json.dumps([{"artist": "Portishead", "title": "Dummy Sessions"}]))
     monkeypatch.setattr(
         "spindlebot.services.library_index.load",
-        lambda cfg, index="beets": [LibraryAlbum("Portishead", "Dummy Session")],
+        lambda cfg, index="auto": _index(LibraryAlbum("Portishead", "Dummy Session")),
     )
 
     cmd_collection_audit(_cfg(tmp_path), ["--handle", str(path)])

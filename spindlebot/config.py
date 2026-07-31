@@ -93,7 +93,7 @@ class CollectionConfig:
     source: str = "discogs"
     account: str = ""
     media: tuple = ("cd",)
-    index: str = "beets"          # "beets" | "db"
+    index: str = "auto"           # "auto" (union) | "beets" | "db"
     cache_dir: Path = field(
         default_factory=lambda: CONFIG_DIR / "cache"
     )
@@ -272,7 +272,7 @@ def load() -> SpindleBotConfig:
             "SPINDLEBOT_COLLECTION_ACCOUNT", col.get("account", "")
         ),
         media=tuple(col.get("media", ["cd"])),
-        index=col.get("index", "beets"),
+        index=col.get("index", "auto"),
         cache_dir=_expand(col.get("cache_dir", str(CONFIG_DIR / "cache"))),
         cache_ttl_hours=float(col.get("cache_ttl_hours", 24.0)),
     )

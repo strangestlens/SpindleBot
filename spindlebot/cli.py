@@ -15,7 +15,7 @@ Usage:
     python -m spindlebot sync [--location <name>] [--json] [-v|--quiet]   Execute acknowledged copies (copy→verify→presence); --location scopes to one dest
     python -m spindlebot prune [--execute] [--json] [-v|--quiet]  Release Pending files verified on retention (DRY-RUN unless --execute)
     python -m spindlebot delete [--execute] [--json] [-v|--quiet]  Execute acknowledged retention-copy deletes, gated on min_copies (DRY-RUN unless --execute)
-    python -m spindlebot collection-audit [--handle <name>] [--source discogs|fixture] [--media cd,vinyl] [--index beets|db] [--refresh] [--strict] [--all] [--json]
+    python -m spindlebot collection-audit [--handle <name>] [--source discogs|fixture] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--strict] [--all] [--json]
                                                       Compare an external collection against the library and list what's missing
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
@@ -785,6 +785,8 @@ def cmd_collection_audit(cfg, args: list[str]) -> int:
             "fetched": report.fetched,
             "considered": report.considered,
             "library_albums": report.library_albums,
+            "library_sources": report.library_sources,
+            "library_errors": report.library_errors,
             "counts": {
                 "owned": len(report.owned),
                 "uncertain": len(report.uncertain),
@@ -824,7 +826,13 @@ def cmd_collection_audit(cfg, args: list[str]) -> int:
         f"{report.source}:{report.account} — {report.fetched} item(s), "
         f"{report.considered} on {media_label}"
     )
-    print(f"library ({index}) — {report.library_albums} album(s)\n")
+    # Always show which index answered. A wrongly-missing album is almost always
+    # an index that didn't know about it, so this is the first thing to check.
+    breakdown = ", ".join(f"{k} {v}" for k, v in sorted(report.library_sources.items()))
+    print(f"library ({breakdown}) — {report.library_albums} unique album(s)")
+    for name, err in sorted(report.library_errors.items()):
+        print(f"  ⚠  {name} index unavailable: {err}", file=sys.stderr)
+    print()
 
     if report.uncertain:
         print(f"UNCERTAIN ({len(report.uncertain)}) — confirm these yourself")

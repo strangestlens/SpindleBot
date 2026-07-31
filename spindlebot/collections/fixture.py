@@ -34,6 +34,21 @@ def _media(raw) -> frozenset[MediaKind]:
     return frozenset(out)
 
 
+def _year(raw, *, title: str) -> int | None:
+    """Coerce a hand-written year. `"1991"` is as valid as `1991` here."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return int(text) or None
+    except ValueError:
+        raise CollectionFetchError(
+            f"invalid year {raw!r} for {title!r} — expected a number like 1991"
+        ) from None
+
+
 def _strs(raw) -> tuple[str, ...]:
     if not raw:
         return ()
@@ -49,14 +64,13 @@ def to_items(rows: list[dict], *, source: str = "fixture") -> list[CollectionIte
         title = str(row.get("title") or "").strip()
         if not title:
             continue
-        year = row.get("year")
         items.append(CollectionItem(
             source=source,
             source_id=str(row.get("id", index)),
             artist=str(row.get("artist") or "").strip(),
             title=title,
             media=_media(row.get("media")),
-            year=int(year) if year else None,
+            year=_year(row.get("year"), title=title),
             catno=(str(row["catno"]) if row.get("catno") else None),
             artist_alts=_strs(row.get("artist_alts")),
             title_alts=_strs(row.get("title_alts")),

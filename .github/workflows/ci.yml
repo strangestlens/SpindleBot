@@ -7,15 +7,24 @@ on:
 jobs:
   # ── Python tests ─────────────────────────────────────────────────────────────
   python:
-    name: Python tests
+    name: Python tests (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor the code claims to support (StrEnum, tomllib); 3.14
+        # is what the dev machine actually runs. Testing only one of them lets
+        # the other rot — a 3.12+ f-string landed and CI caught it only after
+        # push, which is the failure this matrix exists to prevent.
+        python-version: ["3.11", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: pip install -r requirements.txt pytest

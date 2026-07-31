@@ -102,8 +102,10 @@ spindlebot/
                                      supported way in for anyone not on Discogs
   services/                      — orchestration over repos+core (no print side effects)
     inventory.py                 — scan a location → upsert content + albums + sidecars + presence
-    library_index.py             — the library as list[LibraryAlbum]; beets (default) or the
-                                     SpindleBot album table (--index db)
+    library_index.py             — the library as a LibraryIndex; `auto` (DEFAULT) unions
+                                     beets + the SpindleBot album table, because NEITHER is
+                                     a superset (measured: 67 albums db-only, 2 beets-only).
+                                     Refuses to answer from an empty index.
     collection_audit.py          — provider → media filter → match → AuditReport buckets
     locations.py                 — register_from_config; deterministic location_uuid
     volumes.py                   — marker files (.spindlebot-location-<uuid>), resolve_root
@@ -359,7 +361,7 @@ python3 -m spindlebot finalize [--dry-run] [--json]          # retry lyrics + pr
 python3 -m spindlebot fetch-art <album_dir> [--dry-run] [--force]
 python3 -m spindlebot fetch-lyrics <album_dir> [--dry-run] [--force]
 
-python3 -m spindlebot collection-audit [--handle <name>] [--media cd,vinyl] [--refresh] [--json]
+python3 -m spindlebot collection-audit [--handle <name>] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--json]
                                                              # optional: what's in the Discogs
                                                              # collection but not in the library
 python3 -m spindlebot inventory [--location <name>] [--json]  # scan a location into the DB (read-only re: bytes)

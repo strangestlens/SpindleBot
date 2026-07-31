@@ -6,7 +6,7 @@ touches nothing.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from spindlebot.collections.base import get_provider
 from spindlebot.core.collection import CollectionItem, LibraryAlbum
@@ -26,6 +26,10 @@ class AuditReport:
     considered: int       # items left after the media filter
     library_albums: int
     matches: list[ItemMatch]
+    # Which index contributed what. Surfaced everywhere the report is rendered:
+    # when an album is wrongly called missing, the index is the first suspect.
+    library_sources: dict = field(default_factory=dict)
+    library_errors: dict = field(default_factory=dict)
 
     def _of(self, status: MatchStatus) -> list[ItemMatch]:
         return [m for m in self.matches if m.status is status]
@@ -63,7 +67,7 @@ def run_audit(
     source: str = "discogs",
     media: frozenset[MediaKind] = DEFAULT_MEDIA,
     refresh: bool = False,
-    index: str = "beets",
+    index: str = "auto",
     strict: bool = False,
     provider=None,
     library: list[LibraryAlbum] | None = None,
@@ -77,7 +81,11 @@ def run_audit(
     items = provider.fetch(account, refresh=refresh)
     considered = filter_media(items, media)
 
-    albums = library_index.load(cfg, index) if library is None else library
+    if library is None:
+        loaded = library_index.load(cfg, index)
+        albums, sources, errors = loaded.albums, loaded.counts, loaded.errors
+    else:
+        albums, sources, errors = library, {"injected": len(library)}, {}
     matches = sorted(match_items(considered, albums), key=_sort_key)
 
     if strict:
@@ -97,4 +105,6 @@ def run_audit(
         considered=len(considered),
         library_albums=len(albums),
         matches=matches,
+        library_sources=sources,
+        library_errors=errors,
     )

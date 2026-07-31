@@ -153,6 +153,27 @@ def test_fixture_provider_skips_rows_without_a_title(tmp_path):
     assert [i.title for i in FixtureProvider().fetch(str(path))] == ["Real"]
 
 
+@pytest.mark.parametrize("raw,expected", [
+    (1991, 1991),
+    ("1991", 1991),     # hand-written JSON quotes numbers all the time
+    ("  1991 ", 1991),
+    ("", None),
+    (None, None),
+    (0, None),
+])
+def test_fixture_provider_coerces_years(tmp_path, raw, expected):
+    path = tmp_path / "shelf.json"
+    path.write_text(json.dumps([{"title": "T", "year": raw}]))
+    assert FixtureProvider().fetch(str(path))[0].year == expected
+
+
+def test_fixture_provider_names_the_row_with_a_bad_year(tmp_path):
+    path = tmp_path / "shelf.json"
+    path.write_text(json.dumps([{"title": "Spiderland", "year": "nineteen"}]))
+    with pytest.raises(CollectionFetchError, match="invalid year 'nineteen' for 'Spiderland'"):
+        FixtureProvider().fetch(str(path))
+
+
 @pytest.mark.parametrize("content,match", [
     (None, "not found"),
     ("{ not json", "not valid JSON"),
@@ -227,3 +248,112 @@ def test_from_beets_parses_success(tmp_path):
 def test_load_rejects_an_unknown_index(tmp_path):
     with pytest.raises(ValueError, match="unknown library index"):
         library_index.load(_cfg(tmp_path), "spotify")
+
+
+# ── the union index ───────────────────────────────────────────────────────────
+#
+# Neither backend is a superset of the other. Measured on a real library: 67
+# albums existed only in the SpindleBot DB (inventoried at a location beets has
+# no row for) and 2 existed only in beets (imported but not yet inventoried).
+# Defaulting to either alone inflates the missing list, which is the one thing
+# this feature cannot get wrong.
+
+def _stub_loaders(monkeypatch, *, beets=None, db=None):
+    def make(albums, error):
+        def loader(cfg, **kw):
+            if error:
+                raise RuntimeError(error)
+            return albums
+        return loader
+
+    monkeypatch.setattr(library_index, "LOADERS", {
+        "beets": make(beets if isinstance(beets, list) else [], beets
+                      if isinstance(beets, str) else None),
+        "db": make(db if isinstance(db, list) else [], db
+                   if isinstance(db, str) else None),
+    })
+
+
+def test_auto_unions_both_indexes(tmp_path, monkeypatch):
+    _stub_loaders(
+        monkeypatch,
+        beets=[LibraryAlbum("Beck", "Mutations")],
+        db=[LibraryAlbum("Fiona Apple", "Tidal")],
+    )
+    result = library_index.load(_cfg(tmp_path), "auto")
+    assert {a.album for a in result.albums} == {"Mutations", "Tidal"}
+    assert result.counts == {"beets": 1, "db": 1}
+    assert result.errors == {}
+
+
+def test_auto_dedupes_albums_both_indexes_know(tmp_path, monkeypatch):
+    _stub_loaders(
+        monkeypatch,
+        beets=[LibraryAlbum("Beck", "Mutations")],
+        db=[LibraryAlbum("beck", "mutations", mb_albumid="mb-1")],
+    )
+    result = library_index.load(_cfg(tmp_path), "auto")
+    assert len(result.albums) == 1
+    # The entry carrying an MBID wins — it can match on id, not just strings.
+    assert result.albums[0].mb_albumid == "mb-1"
+    # Per-source counts stay honest even though the union collapsed them.
+    assert result.counts == {"beets": 1, "db": 1}
+
+
+def test_auto_survives_one_index_being_unavailable(tmp_path, monkeypatch):
+    _stub_loaders(
+        monkeypatch,
+        beets=[LibraryAlbum("Beck", "Mutations")],
+        db="no SpindleBot DB — run inventory first",
+    )
+    result = library_index.load(_cfg(tmp_path), "auto")
+    assert len(result.albums) == 1
+    assert result.counts == {"beets": 1}
+    assert "inventory" in result.errors["db"]
+
+
+def test_auto_refuses_to_report_everything_missing(tmp_path, monkeypatch):
+    """An empty library would call the entire collection missing. Fail instead."""
+    _stub_loaders(monkeypatch, beets=[], db=[])
+    with pytest.raises(RuntimeError, match="Refusing to report the whole collection"):
+        library_index.load(_cfg(tmp_path), "auto")
+
+
+def test_auto_reports_why_when_every_index_failed(tmp_path, monkeypatch):
+    _stub_loaders(monkeypatch, beets="beet not installed", db="no DB")
+    with pytest.raises(RuntimeError, match="beet not installed"):
+        library_index.load(_cfg(tmp_path), "auto")
+
+
+def test_explicit_index_does_not_fall_back(tmp_path, monkeypatch):
+    """--index db means db. Silently answering from beets would mislead."""
+    _stub_loaders(monkeypatch, beets=[LibraryAlbum("Beck", "Mutations")], db="no DB")
+    with pytest.raises(RuntimeError, match="no DB"):
+        library_index.load(_cfg(tmp_path), "db")
+
+
+def test_from_db_refuses_to_create_the_database(tmp_path):
+    """open_db would happily make an empty one, and an empty index is a
+    confidently wrong answer."""
+    cfg = _cfg(tmp_path)
+    assert not cfg.core.db_path.exists()
+    with pytest.raises(RuntimeError, match="run `spindlebot inventory`"):
+        library_index.from_db(cfg)
+    assert not cfg.core.db_path.exists()
+
+
+def test_audit_carries_the_index_breakdown(tmp_path, monkeypatch):
+    _stub_loaders(
+        monkeypatch,
+        beets=[LibraryAlbum("Beck", "Mutations")],
+        db=[LibraryAlbum("Fiona Apple", "Tidal")],
+    )
+    report = run_audit(
+        _cfg(tmp_path), account="x",
+        provider=_StubProvider([_item("Fiona Apple", "Tidal")]),
+    )
+    assert report.library_sources == {"beets": 1, "db": 1}
+    assert report.library_albums == 2
+    # The DB-only album resolves as owned — the exact case that was reported
+    # missing when beets was the sole default.
+    assert [m.item.title for m in report.owned] == ["Tidal"]

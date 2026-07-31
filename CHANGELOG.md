@@ -18,6 +18,15 @@ refactor epic is complete.
     normalization miss surfaces for review instead of sending you to re-rip a disc you own
   - `[collection]` config block and `[discogs] token` secret, both optional; `--handle`
     overrides the configured account
+  - Library index defaults to `auto`, the union of beets and the SpindleBot DB. Neither is a
+    superset (measured on a real library: 67 albums DB-only, 2 beets-only), and either alone
+    inflates the missing list. Every run prints which index contributed what; an empty index
+    is a hard failure rather than a "your whole collection is missing" report
+
+### Changed
+- CI now runs the Python suite on a 3.11 + 3.14 matrix. Testing only the 3.11 floor let
+  dev-machine-only syntax through to CI (a 3.12+ f-string), and testing only 3.14 would let
+  the documented 3.11 floor rot
 
 ## [0.3.0] - 2026-07-30
 

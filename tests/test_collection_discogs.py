@@ -190,6 +190,50 @@ def test_client_retries_on_rate_limit_then_succeeds():
     assert 7.0 in slept
 
 
+@pytest.mark.parametrize("header,expected", [
+    ({"Retry-After": "7"}, 7.0),
+    ({"retry-after": "7"}, 7.0),                 # header casing varies
+    ({"Retry-After": "  12  "}, 12.0),
+    ({}, 60.0),                                  # absent
+    ({"Retry-After": ""}, 60.0),
+    ({"Retry-After": "soon"}, 60.0),             # malformed: fall back, never raise
+    ({"Retry-After": "-5"}, 0.0),                # never sleep negative
+    ({"Retry-After": "99999"}, 300.0),           # clamped
+])
+def test_retry_delay_handles_every_retry_after_shape(header, expected):
+    client = DiscogsClient()
+    assert client._retry_delay(header) == expected
+
+
+def test_retry_delay_accepts_an_http_date():
+    """RFC 9110 allows Retry-After to be an HTTP-date, not just seconds."""
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    when = datetime.now(timezone.utc) + timedelta(seconds=45)
+    delay = DiscogsClient()._retry_delay({"Retry-After": format_datetime(when)})
+    assert 30 <= delay <= 60
+
+
+def test_retry_delay_clamps_an_absurd_http_date():
+    client = DiscogsClient()
+    assert client._retry_delay({"Retry-After": "Wed, 21 Oct 2099 07:28:00 GMT"}) == 300.0
+
+
+def test_a_malformed_retry_after_does_not_abort_the_fetch():
+    slept: list[float] = []
+    responses = [
+        (429, {"Retry-After": "not-a-number"}, b""),
+        (200, {}, json.dumps(_page(1, 1, [{"id": 1}])).encode()),
+    ]
+    client = DiscogsClient(
+        fetcher=lambda url, headers: responses.pop(0), sleep=slept.append,
+    )
+    assert client.fetch_raw("someone") == [{"id": 1}]
+    # The fallback delay, then the ordinary inter-request throttle on the retry.
+    assert slept[0] == 60.0
+
+
 def test_client_gives_up_after_repeated_rate_limits():
     client = DiscogsClient(
         fetcher=lambda url, headers: (429, {}, b""), sleep=lambda _: None,

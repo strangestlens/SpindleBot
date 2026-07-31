@@ -18,6 +18,8 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Callable
 
@@ -33,6 +35,8 @@ UNAUTH_RPM = 25
 AUTH_RPM = 60
 RATE_MARGIN = 1.1       # stay comfortably inside a moving-average window
 MAX_RETRIES = 3
+RETRY_FALLBACK_SECONDS = 60.0   # no/unparseable Retry-After: one rate-limit window
+MAX_RETRY_SECONDS = 300.0       # never honour an absurd Retry-After
 
 # Discogs format name → medium. Names not listed map to OTHER, which covers the
 # container pseudo-formats ("Box Set", "All Media") that always accompany the
@@ -249,6 +253,32 @@ class DiscogsClient:
             headers["Authorization"] = f"Discogs token={self.token}"
         return headers
 
+    def _retry_delay(self, headers: dict) -> float:
+        """How long to wait after a 429.
+
+        RFC 9110 allows Retry-After to be either delta-seconds or an HTTP-date,
+        and a server is free to send neither. Every branch falls back rather
+        than raising — a malformed header must not abort a fetch mid-page. The
+        upper clamp stops a bogus far-future date from hanging the run.
+        """
+        raw = (headers.get("Retry-After") or headers.get("retry-after") or "").strip()
+        if not raw:
+            return RETRY_FALLBACK_SECONDS
+        try:
+            return max(0.0, min(float(raw), MAX_RETRY_SECONDS))
+        except ValueError:
+            pass
+        try:
+            when = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            return RETRY_FALLBACK_SECONDS
+        if when is None:
+            return RETRY_FALLBACK_SECONDS
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        delta = (when - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, min(delta, MAX_RETRY_SECONDS))
+
     def _get(self, url: str) -> dict:
         for attempt in range(MAX_RETRIES):
             self._throttle()
@@ -265,8 +295,7 @@ class DiscogsClient:
             if status == 429:
                 if attempt == MAX_RETRIES - 1:
                     break
-                retry_after = headers.get("Retry-After") or headers.get("retry-after")
-                self.sleep(float(retry_after) if retry_after else 60.0)
+                self.sleep(self._retry_delay(headers))
                 continue
             if status == 404:
                 raise CollectionFetchError(

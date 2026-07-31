@@ -108,7 +108,7 @@ optional; `--handle` always overrides it.
 |------|--------|
 | `--source discogs\|fixture` | Where the collection comes from |
 | `--media cd,vinyl` | Which media count as rippable (default `cd`, which includes CDrs) |
-| `--index beets\|db` | Compare against the beets library (default) or what `inventory` has scanned |
+| `--index auto\|beets\|db` | Which view of the library to compare against (default `auto`, the union — see below) |
 | `--refresh` | Re-fetch instead of using the cached collection |
 | `--strict` | Treat uncertain matches as missing |
 | `--all` | Also list what you already own |
@@ -126,6 +126,25 @@ doubles as the way in for anyone not on Discogs.
 Results land in three buckets, not two. `uncertain` exists so that a
 normalization miss sends you to check a row rather than to re-rip a disc you
 already own.
+
+### Which library index?
+
+Neither backend is a complete picture, and they go stale in opposite directions:
+
+| Index | Knows about | Blind to |
+|-------|-------------|----------|
+| `beets` | Everything it imported and still tracks | Albums that reached a drive without a `beet import` |
+| `db` | Everything `spindlebot inventory` has scanned at any location | A fresh import that hasn't synced yet |
+
+Measured on a real library: 67 albums existed **only** in the SpindleBot DB and
+2 existed **only** in beets. So `auto` (the default) unions them — an album
+counts as owned if either index knows it, which can only ever shrink the missing
+list. Every run prints the breakdown (`library (beets 112, db 177) — 176 unique
+album(s)`), because when an album is wrongly reported missing, the index is the
+first suspect.
+
+If both indexes come back empty the audit **fails** rather than reporting your
+entire collection as missing.
 
 ## Scripts
 
