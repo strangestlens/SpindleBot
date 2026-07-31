@@ -13,6 +13,30 @@ Also triggered automatically when a directory is dropped into the Import area (e
 
 **Sync:** launchd detects the retention-drive mount (WatchPaths, generated from the first enabled local_drive `[[destinations]]`) → `music-sync.sh` → inventory → review + acknowledge → sync (copy→verify→record presence) → prune (release Pending copies verified on retention) → beets DB path reconciliation → notify
 
+## Documentation map
+
+**This file is the contract.** It owns the *rules* — layering, conventions, the
+active epic, gotchas — and stays self-contained so an agent never has to go
+fetch a second file to know what it may not do. `docs/` owns the *explanations* a
+human needs, and `README.md` is orientation and routing only.
+
+Keep that boundary when editing. If a change adds a rule, it belongs here; if it
+adds a walkthrough, a CLI reference, or an operational procedure, it belongs in
+`docs/` and should not be restated here.
+
+| Doc | Owns |
+|-----|------|
+| `docs/getting-started.md` | Fresh-Mac setup: prereqs → `setup.sh` → config → `check` → first import → first inventory |
+| `docs/configuration.md` | `config.toml` by section, secrets, env-var precedence, `[[destinations]]` rules |
+| `docs/commands.md` | Full CLI reference (`spindlebot` + `lyric_timing`), the plan/act staging table, destructive-op gates |
+| `docs/operations.md` | launchd agents, scripts table, logs, what a sync run does step by step, troubleshooting |
+| `docs/architecture.md` | The two flows, the working areas and why Processing exists, content addressing, import stage sequence, path template, layering summary |
+| `docs/development.md` | Test suites, testing philosophy, CI matrix, ruff pin, quality bar, branch/PR workflow |
+| `docs/lyrics.md` | `.lrc` sidecars, playback, lrc-editor |
+| `docs/ai-lyric-timing.md` | The optional `lyric_timing/` subsystem end to end |
+| `docs/collection-audit.md` | The optional collection audit, ignore list, and collection-browser |
+| `docs/archive/original-roadmap.md` | The superseded 6-phase plan (historical) |
+
 ## Phase status (April 2026)
 
 | Phase | Status | Notes |
