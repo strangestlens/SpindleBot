@@ -112,7 +112,19 @@ optional; `--handle` always overrides it.
 | `--refresh` | Re-fetch instead of using the cached collection |
 | `--strict` | Treat uncertain matches as missing |
 | `--all` | Also list what you already own |
+| `--html <file>` | Also write a browsable HTML report (see below) |
 | `--json` | Structured output |
+
+### HTML report
+
+```bash
+python3 -m spindlebot collection-audit --html ~/Desktop/collection.html
+```
+
+Writes a single self-contained page — inline CSS and JS, no server, no build
+step — styled to match [`lrc-editor`](#lrc-editor--visual-timestamp-editor).
+Cover thumbnails, status tabs, and a live text filter. The only network requests
+it makes are for the cover images; everything else works offline.
 
 **Discogs** needs no credentials for a public collection. A personal access
 token in `secrets.toml` (`[discogs] token`) raises the API rate limit from 25 to

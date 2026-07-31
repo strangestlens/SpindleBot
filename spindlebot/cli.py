@@ -15,7 +15,7 @@ Usage:
     python -m spindlebot sync [--location <name>] [--json] [-v|--quiet]   Execute acknowledged copies (copy→verify→presence); --location scopes to one dest
     python -m spindlebot prune [--execute] [--json] [-v|--quiet]  Release Pending files verified on retention (DRY-RUN unless --execute)
     python -m spindlebot delete [--execute] [--json] [-v|--quiet]  Execute acknowledged retention-copy deletes, gated on min_copies (DRY-RUN unless --execute)
-    python -m spindlebot collection-audit [--handle <name>] [--source discogs|fixture] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--strict] [--all] [--json]
+    python -m spindlebot collection-audit [--handle <name>] [--source discogs|fixture] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--strict] [--all] [--html <file>] [--json]
                                                       Compare an external collection against the library and list what's missing
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
@@ -777,10 +777,21 @@ def cmd_collection_audit(cfg, args: list[str]) -> int:
     except (SpindleBotError, ValueError, RuntimeError) as e:
         return fail(str(e))
 
+    html_out = _opt("--html")
+    if html_out:
+        from spindlebot.services.collection_report import render_html
+        html_path = Path(html_out).expanduser()
+        try:
+            html_path.parent.mkdir(parents=True, exist_ok=True)
+            html_path.write_text(render_html(report), encoding="utf-8")
+        except OSError as e:
+            return fail(f"could not write {html_path}: {e}")
+
     if want_json:
         print(_json.dumps({
             "source": report.source,
             "account": report.account,
+            "html": str(html_path) if html_out else None,
             "media": sorted(m.value for m in report.media),
             "fetched": report.fetched,
             "considered": report.considered,
@@ -856,6 +867,8 @@ def cmd_collection_audit(cfg, args: list[str]) -> int:
         f"{counts[MatchStatus.UNCERTAIN]} uncertain · "
         f"{counts[MatchStatus.MISSING]} missing"
     )
+    if html_out:
+        print(f"📄 {html_path}")
     return 0
 
 

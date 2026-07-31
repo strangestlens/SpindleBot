@@ -107,6 +107,9 @@ spindlebot/
                                      a superset (measured: 67 albums db-only, 2 beets-only).
                                      Refuses to answer from an empty index.
     collection_audit.py          — provider → media filter → match → AuditReport buckets
+    collection_report.py         — render_html(): AuditReport → a self-contained HTML page
+                                     (inline CSS/JS, lrc-editor palette). Pure: returns a
+                                     string, the CLI writes the file
     locations.py                 — register_from_config; deterministic location_uuid
     volumes.py                   — marker files (.spindlebot-location-<uuid>), resolve_root
     reconciler.py                — planner: diff DB vs observed → pending_action (copy/missing/
@@ -188,6 +191,8 @@ tests/
                                      cache/errors (injected fetcher; never hits the network)
   test_collection_audit.py       — audit service, fixture provider, registry, library index
   test_collection_cli.py         — spindlebot collection-audit CLI (text + --json)
+  test_collection_report.py      — HTML report: structure, escaping, http(s)-only URL
+                                     sanitization, self-containment, --html CLI wiring
   test_lyric_timing_lrc.py       — lyric_timing/lrc parse/format
   test_lyric_timing_detector.py  — audit heuristics
   test_lyric_timing_aligner.py   — word→line assignment, interpolation, monotonicity (mock backend)

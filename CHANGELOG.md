@@ -22,6 +22,8 @@ refactor epic is complete.
     superset (measured on a real library: 67 albums DB-only, 2 beets-only), and either alone
     inflates the missing list. Every run prints which index contributed what; an empty index
     is a hard failure rather than a "your whole collection is missing" report
+  - `--html <file>` writes a self-contained browsable report (cover thumbnails, status tabs,
+    live text filter) styled to match `lrc-editor`; no server, no build step
 
 ### Changed
 - CI now runs the Python suite on a 3.11 + 3.14 matrix. Testing only the 3.11 floor let
