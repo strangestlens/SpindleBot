@@ -390,7 +390,8 @@ maintaining a second inventory by hand.
 Shipped as `spindlebot collection-audit` — it reads a collection you already
 keep elsewhere (Discogs today) and diffs it against the library. Purely
 assistive: nothing in the import or sync path depends on it, it writes nothing
-but a fetch cache and an ignore list, and it's inert until configured.
+you didn't ask for (a fetch cache, the ignore list, and `--html` where you point
+it), and it's inert until configured.
 
 Three design decisions worth carrying forward if this is ever extended:
 
@@ -411,8 +412,9 @@ Three design decisions worth carrying forward if this is ever extended:
 Natural extensions, none scheduled:
 
 - **Other providers** — MusicBrainz collections would bring release MBIDs, which
-  short-circuit the string matcher entirely (the `mb_release_id` path already
-  exists and is tested; no source populates it yet).
+  short-circuit the string matcher entirely. The `mb_release_id` path exists and
+  is tested, and the `fixture` provider already reads the field; what's missing
+  is a *remote* source that supplies one, since Discogs exposes no MBID.
 - **Other media** — `--media vinyl` already works. A "what have I got on vinyl
   but not digitally?" report is a flag away.
 - **Transliteration** — the one matching gap left is a library tagged in a

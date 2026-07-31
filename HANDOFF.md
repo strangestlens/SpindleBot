@@ -266,17 +266,26 @@ spindlebot collection-audit --handle your-discogs-handle
 ```
 
 ```
-discogs:yourhandle — 212 item(s), 152 on cd
+discogs:your-discogs-handle — 212 item(s), 152 on cd
 library (beets 112, db 177) — 176 unique album(s)
 
+UNCERTAIN (1) — confirm these yourself
+  1506644   Tori Amos — Live At Montreux 1991 & 1992 (2008)
+      ≈ TORI AMOS — Live At Montreux: 1991/1992 (0.93)
+
 MISSING (47)
-  1234567   Beck — Sea Change (2002)
+  500883    Afro Celt Sound System — Volume 1 Sound Magic (1996)
+  21066448  Akercocke — Renaissance In Extremis (2021)
+  16500462  Beck — Hyperspace (2020)
   ...
 
 104 owned · 1 uncertain · 47 missing
 
-Not going to rip one? spindlebot collection-ignore 1234567
+Not going to rip one? spindlebot collection-ignore 500883
 ```
+
+Every missing row leads with the id, because a list you can't act on from is
+just a list.
 
 ### Three things worth understanding before you trust it
 

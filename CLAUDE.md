@@ -51,9 +51,9 @@ Replacing "library = whatever is at known paths" with a **SpindleBot-owned SQLit
 ```
 spindlebot/
   cli.py                         — CLI entry point: check / config / import / import-staging /
-                                     inventory / review / finalize / collection-audit /
-                                     collection-ignore / fetch-lyrics / fetch-art /
-                                     notify / restart
+                                     inventory / review / sync / prune / delete /
+                                     finalize / collection-audit / collection-ignore /
+                                     fetch-lyrics / fetch-art / notify / restart
   config.py                      — typed config dataclasses, loads config.toml + secrets.toml,
                                      env var overrides
   disc.py                        — AUDIO_EXTENSIONS, find_audio_files(), check_wait(),
