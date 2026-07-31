@@ -1,439 +1,156 @@
-# SpindleBot — Development Roadmap
+# SpindleBot — Roadmap
 
 *Last updated: July 2026*
 
-> **Status banner.** This document is the *original 6-phase roadmap* (numbered
-> 1–6). It has been partly delivered and partly superseded:
-> - **Phase 1 (Config & portability)** and **Phase 2 (Modular architecture +
->   testing)** are **complete** — all import logic is now a tested Python package.
-> - The project has since pivoted to a **content-addressed library refactor**
->   (a SpindleBot-owned SQLite DB tracking content identity + every copy's
->   location), which uses its own phase labels (A, 0, 1, 2, 3…) and is the
->   **active** line of work. That epic — not the numbering below — is the current
->   plan of record. See [`CLAUDE.md`](CLAUDE.md) → "Content-addressed library
->   refactor" for its detailed status, and [`HANDOFF.md`](HANDOFF.md) for the
->   overall current state.
->
-> - Separately, an optional **AI lyric-timing subsystem** (`lyric_timing/`) has
->   been built and merged: it audits `.lrc` files for bad timing and re-times
->   them against the audio by forced alignment. It repairs timing on lyrics the
->   pipeline *already has* — it is **not** a lyrics source, and does not deliver
->   the "Lyric Source Note: Shazam" section below, which remains unstarted. See
->   [`README.md`](README.md#ai-lyric-timing-optional) and
->   [`HANDOFF.md`](HANDOFF.md#optional-ai-lyric-timing).
->
-> The forward-looking sections here (destinations, remote access via Navidrome,
-> the Mac app vision, the Shazam lyric source) remain valid and are kept as
-> strategic reference. Don't conflate the "Phase N" labels here with the DB
-> epic's labels.
-
----
+What's still ahead. For what's already shipped see [`CHANGELOG.md`](CHANGELOG.md);
+for per-phase detail on the epic in flight see [`CLAUDE.md`](CLAUDE.md).
 
 ## Vision
 
-SpindleBot is a personal music intelligence system. The immediate goal is a clean, well-tested, configurable pipeline that anyone can run. The longer-term goal is a complete local-first music management platform with remote streaming access — organized, resilient, and extensible.
-
----
-
-## Priority Map
-
-| Priority | Area | Current State |
-|----------|------|---------------|
-| **1** | Configuration & portability | **Done** — `config.toml`/`secrets.toml`, `bootstrap.sh`, `spindlebot check` |
-| **2** | Modular architecture + testing | **Done** — import logic is a tested Python package (`runner.py` + `stages/`) |
-| **3** | Destination flexibility | Config supports `[[destinations]]`; content-addressed sync (copy/verify/prune) landed via the DB epic |
-| **4** | Error recovery & resilience | Partial — lyric-completeness gating + finalize sweep; failure journal still TODO |
-| **5** | Input sources | XLD/CD + folder drops; digital-download "gentle mode" still TODO |
-| **6** | Remote library access | Not yet addressed — Navidrome recommendation below |
-| — | Lyric timing quality | **Delivered** — `lyric_timing/` audit + forced-alignment retime, wired into lrc-editor |
-| — | Collection gap tracking | **Delivered** — `collection-audit` (Discogs → library), ignore list, `collection-browser` UI |
-| — | macOS-only architecture | Acceptable; future Mac App potential |
-
----
-
-## Phase 1: Configuration & Portability
-
-**Goal:** Zero hardcoded values. The system should run from a config file and work on any Mac without code changes.
-
-### Config File
-
-Introduce `~/.config/spindlebot/config.toml` (or `XDG_CONFIG_HOME`). All environment-specific values move here:
-
-```toml
-[core]
-library_dir     = "~/Music/Library"
-staging_dir     = "~/Music/Staging"
-log_dir         = "~/Music/logs"
-archive_dir     = "~/Music/All Discs"
-
-[tools]
-beet            = "/opt/homebrew/bin/beet"
-python          = "/opt/homebrew/bin/python3"
-mpv             = "/opt/homebrew/bin/mpv"
-beets_config    = "~/.config/beets/config.yaml"
-
-[notifications]
-telegram_bot_token = ""       # leave empty to disable
-telegram_chat_id   = ""
-macos_notify       = true
-
-[lyrics]
-request_delay_seconds = 0.3
-sources               = ["lrclib", "shazam"]  # ordered preference
-
-[art]
-sources       = ["caa", "itunes"]
-min_size_px   = 500
-```
-
-> That block is the **original 2026 sketch**, not the config that shipped. Live
-> keys differ: `staging_dir`/`library_dir` are now `import_dir`/`pending_dir`
-> (plus `processing_dir`, `duplicates_dir`), and `lyrics.sources` is
-> `["lrclib"]` — the `"shazam"` entry above was aspirational and no such source
-> exists. `config.toml.example` is the current reference.
-
-Credentials (Telegram token, Genius key, etc.) should additionally support reading from environment variables, prefixed `SPINDLEBOT_`, so they can be injected in CI or Docker without touching the file.
-
-### Beets Config Templating
-
-Currently `beets-config.yaml` has hardcoded paths. Replace with a generated config: `spindlebot beets-config --write` renders from the `[core]` and `[tools]` sections. The Genius API key moves to the credentials block.
-
-### Config Validation
-
-On every run, validate that:
-- All required paths exist
-- Tool binaries are executable
-- Required API credentials are present (warn, don't fail, for optional ones)
-
-Print a clear human-readable error when something is wrong rather than failing silently mid-pipeline.
-
----
-
-## Phase 2: Modular Architecture & Testing
-
-**Goal:** Replace two monolithic shell scripts with a collection of discrete, testable Python modules. This is the most impactful change and touches everything else.
-
-### Package Structure
-
-```
-spindlebot/
-├── __main__.py             # CLI entry point: `python -m spindlebot`
-├── config.py               # Config loading, validation, schema
-├── pipeline/
-│   ├── runner.py           # Orchestrates stage execution
-│   ├── stages/
-│   │   ├── pretag.py       # Pre-import tag cleanup (was music-pretag.py)
-│   │   ├── beet_import.py  # beet import wrapper
-│   │   ├── posttag.py      # Post-import DB fixes + tag normalization
-│   │   ├── fetch_art.py    # Album art (was music-fetch-art.py)
-│   │   ├── fetch_lyrics.py # LRC lyrics (was music-fetch-lyrics.py)
-│   │   ├── sync.py         # Sync to destination(s)
-│   │   └── notify.py       # Notifications (was music-notify.sh)
-├── watchers/
-│   ├── staging.py          # Watches staging dir for .log files
-│   └── destination.py      # Watches for drive/NAS mount events
-├── sources/
-│   ├── base.py             # AbstractInputSource
-│   ├── xld.py              # XLD rip + .log detection (current behavior)
-│   └── digital.py          # Digital download folder watcher (Phase 5)
-├── destinations/
-│   ├── base.py             # AbstractDestination
-│   ├── local_drive.py      # rsync to mounted external drive
-│   └── rclone.py           # rclone to any remote (B2, S3, NAS, etc.)
-├── lyrics/
-│   ├── lrclib.py           # lrclib.net (timestamped)
-│   ├── shazam.py           # Shazam (plain text, needs alignment)
-│   └── aligner.py          # Text alignment: plain → timestamped LRC
-└── cli.py                  # `spindlebot` commands
-```
-
-> The `lyrics/` subpackage in that sketch was never built — lyric fetching lives
-> in `pipeline/stages/fetch_lyrics.py` and talks only to lrclib. The one piece
-> that exists is an alignment engine, and it was deliberately built **outside**
-> `spindlebot`, as the peer `lyric_timing/` package: its torch/demucs
-> dependencies have no business in the core pipeline or in CI.
-
-### CLI
-
-```bash
-spindlebot start          # Start all watchers
-spindlebot stop
-spindlebot status
-
-spindlebot import <path>  # Manually trigger import for a staging folder
-spindlebot sync           # Manually trigger sync
-
-# Run individual stages for debugging
-spindlebot run pretag <path>
-spindlebot run fetch-lyrics <album>
-spindlebot run fetch-art <album>
-
-spindlebot check          # Validate config, check tool paths, test API credentials
-```
-
-### Testing Strategy
-
-Each stage should be independently testable with mocked external calls:
-
-- **pretag / posttag**: Pure in-process logic — test directly with fixture FLAC files. No mocking needed.
-- **beet_import**: Wrap the beet subprocess call; mock it in tests. Test the pre/post logic, not beet itself.
-- **fetch_art / fetch_lyrics**: Mock the HTTP clients. Test fallback chains, retry behavior, cache marker logic.
-- **sync**: Mock the rsync subprocess and sqlite3 calls.
-
-Use `pytest` with `tmp_path` fixtures so tests never touch the real library. Run with `pytest -x --tb=short` in CI.
-
-Target: 80%+ coverage on the `stages/` and `lyrics/` modules. The watchers and CLI can be integration-tested with a local staging fixture.
-
-### Shell Scripts → Wrappers Only
-
-`music-import.sh`, `music-sync.sh` become thin stubs that call `python -m spindlebot`. Keep them during the transition so launchd plists don't need to change immediately.
-
----
-
-## Phase 3: Destination Flexibility
-
-**Goal:** Sync targets are defined in config, not code. Add one line to point at a new destination.
-
-### Architecture
-
-`AbstractDestination` defines `sync(source_path, album_paths) -> SyncResult`. Each implementation handles its own transport.
-
-Config drives the list:
-
-```toml
-[[destinations]]
-name    = "MyDrive"
-type    = "local_drive"
-path    = "/Volumes/MyDrive/Music/Library"
-enabled = true
-
-[[destinations]]
-name    = "Backblaze"
-type    = "rclone"
-remote  = "b2:my-music-bucket/Library"
-enabled = true
-
-[[destinations]]
-name    = "HomeNAS"
-type    = "rclone"
-remote  = "sftp:nas.local:/media/music"
-enabled = false
-```
-
-The sync stage iterates enabled destinations in parallel (or sequentially — configurable). DB path reconciliation runs per destination.
-
-### On iCloud
-
-iCloud Drive is **not suitable** for a large lossless library. Apple's iCloud Music Library imposes a 200 MB per-file limit and converts unmatched tracks to 256 kbps AAC — both fatal for FLAC. As a generic file sync destination, iCloud has no FLAC-specific limitations, but sync reliability for directories of large files at scale is poor.
-
-**Better options for cloud backup:**
-- **Backblaze B2**: $6/TB/month (storage) + $0.01/GB egress. Rclone native support. The right choice for archival backup.
-- **Wasabi**: $6.99/TB/month, zero egress fees. Good if you'll restore frequently.
-- **AWS S3 Glacier Instant Retrieval**: ~$4/TB/month. Slower restores but cheapest at scale.
-
-For a 1–2 TB FLAC library, Backblaze B2 + rclone is the pragmatic answer. Rclone can sync incrementally, verify checksums, and has a dry-run mode. Configure once in `rclone.conf`, reference the remote in `config.toml`.
-
----
-
-## Phase 4: Error Recovery & Resilience
-
-**Goal:** Transient failures don't silently drop data. Every failure is recoverable.
-
-### Retry Logic
-
-Wrap all external API calls (lrclib, iTunes, CAA, Telegram) in a shared `retry_with_backoff(fn, attempts=3, base_delay=1.0)` helper. On HTTP 429 (rate limited), respect the `Retry-After` header if present.
-
-```python
-# Rough shape
-def retry_with_backoff(fn, attempts=3, base_delay=1.0):
-    for i in range(attempts):
-        try:
-            return fn()
-        except TransientError as e:
-            if i == attempts - 1:
-                raise
-            time.sleep(base_delay * (2 ** i))
-```
-
-### Failure Queue
-
-Introduce a lightweight failure journal: `~/.config/spindlebot/failed.jsonl`. Each failed stage appends a record:
-
-```json
-{"ts": "2026-03-27T04:12:00", "stage": "fetch_lyrics", "album": "Cocteau Twins/Heaven or Las Vegas", "error": "lrclib 503", "retries": 3}
-```
-
-`spindlebot retry-failed` replays the queue. `spindlebot status` reports the failure count. This replaces the current `lyrics-missing.log` approach with something machine-readable and actionable.
-
-### Pre-flight Checks
-
-Before any import run: verify the staging folder is readable, beet is available, and the library directory is writable. Before any sync: verify the destination is mounted/reachable and has sufficient space. Fail fast and loud rather than partway through.
-
-### Atomic Moves
-
-The current rsync `--remove-source-files` approach is already good — files only leave local storage after confirmed remote write. Keep this. Add a post-sync checksum verification pass (rclone's `check` subcommand does this natively).
-
----
-
-## Phase 5: Input Sources
-
-**Goal:** The pipeline accepts music from sources beyond physical CDs.
-
-This can come after Phases 1–4, but the architecture in Phase 2 already anticipates it (`sources/` module). The main additions:
-
-### Digital Downloads Watcher
-
-Monitor a `~/Music/Downloads` staging folder. When new files appear (FLAC, ALAC, MP3, or a folder of tracks), run them through the same pretag → import → posttag → fetch-lyrics pipeline. Digital downloads usually already have correct metadata, so pretag acts in "gentle mode" — normalize rather than strip.
-
-A simple heuristic: if a folder contains audio files with consistent `ALBUM`, `ARTIST`, and `DATE` tags, treat it as a complete album and import directly. If metadata is sparse, fall back to MusicBrainz search.
-
-### Note on Digital Albums Already in Library
-
-Albums you've previously imported manually and normalized are already in good shape — the pipeline should recognize them as already-imported (by MusicBrainz album ID in the beets DB) and skip rather than re-process.
-
----
-
-## Phase 6: Remote Library Access
-
-**Goal:** Access the full library from anywhere, on any device.
-
-### Recommendation: Navidrome
-
-Don't build this. Navidrome already exists and does exactly what's needed.
-
-**What it is:** A lightweight, self-hosted music streaming server written in Go. Single binary, ~200 MB RAM for 40,000 tracks, Docker-deployable. Implements the Subsonic/OpenSubsonic API — which means 20+ client apps already work with it.
-
-**Why it fits SpindleBot specifically:**
-- It reads from a static music directory. SpindleBot already produces a well-organized, consistently-tagged library. Navidrome will index it cleanly.
-- It surfaces the metadata SpindleBot works so hard to normalize (album artist, year, genre, MusicBrainz IDs).
-- It supports `.lrc` sidecar files natively for synced lyrics — exactly the files SpindleBot generates.
-- It's free, open-source, and actively maintained (v0.60.3, February 2026).
-
-**Client apps worth knowing:**
-- iOS/macOS: **Symfonium**, **Substreamer** — polished, CarPlay support
-- Android: **Symfonium**, **DSub**
-- Desktop: **Sonixd**, web UI built-in
-- The Subsonic ecosystem is wide enough that there's a good client for every platform.
-
-**Deployment for remote access:**
-1. Run Navidrome locally pointing at the library on the retention drive (or NAS).
-2. Expose via Tailscale or a reverse proxy (Caddy + DDNS) for remote access.
-3. No data leaves your infrastructure. No subscription fee.
-
-**What SpindleBot contributes to this setup:** The library Navidrome indexes is only as good as the metadata feeding it. SpindleBot's value — normalized tags, consistent album artist, embedded art, `.lrc` files — becomes the foundation Navidrome builds on. The two systems are naturally complementary.
-
-**Alternative if Navidrome isn't enough:**
-- **Jellyfin** is heavier but has official mobile apps and supports video too. Good if the library eventually includes video content.
-- **Plex** with Plexamp is the premium option — excellent music UX, but requires Plex Pass ($120 lifetime or $5/month) for remote streaming.
-
----
-
-## Mac App Vision (Longer-Term)
-
-macOS-only architecture is fine for now and remains true to the platform SpindleBot was built for. The logical next step is a proper Mac app:
-
-- SwiftUI wrapper with an embedded Python runtime (via [Python.framework](https://docs.python.org/3/using/mac.html))
-- The pipeline stages run as background Python processes
-- SwiftUI provides: config editor, pipeline status dashboard, import queue, re-rip list management, notification preferences
-- Navidrome runs as a bundled service, launched on demand
-- `launchd` plists become internal app infrastructure
-
-This is a real path to the App Store. The core pipeline Python code doesn't change — only the surface around it does.
-
----
-
-## Lyric Source Note: Shazam
-
-> **Status: not started.** There is no Shazam integration in the codebase.
-> lrclib is still the only lyric source (`sources = ["lrclib"]` in
-> `config.toml.example`; `fetch_lyrics.py` talks to nothing else). The whole
-> plan below is still a plan — see the note after it for the one piece that
-> landed separately.
-
-Shazam is a good plain-text lyrics source and worth adding to the `lyrics/` module. The challenge is that it returns unsynced text, while lrclib returns timestamped LRC. The approach:
-
-1. **Preferred path:** lrclib for synced LRC (keep as primary).
-2. **Shazam fallback:** If lrclib returns nothing, fetch plain lyrics from Shazam.
-3. **Alignment:** Use the `aligner.py` module to estimate timestamps. Strategy options:
-   - Proportional distribution (current "Lay Out Lyrics" behavior in lrc-editor) — good enough for ambient/slow music, not for rapid lyrics.
-   - Duration-weighted line distribution (longer lines → more time) — slightly better.
-   - Eventual: use audio analysis (onset detection, silence gaps) to segment the track and align text to segments. This is genuinely hard but would be impressive.
-4. The resulting LRC is marked as "estimated" (a non-standard comment line at the top: `[ti:Album Title] [re:spindlebot-estimated]`) so you can identify and manually fix in lrc-editor if desired.
-
-### What the `lyric_timing` subsystem does and doesn't change here
-
-Step 3's "eventual, genuinely hard" option is essentially built — the merged
-`lyric_timing/` package isolates the vocal stem with Demucs and runs wav2vec2 CTC
-**forced alignment**, which is stronger than the onset-detection sketch above and
-yields per-line confidence.
-
-But it does **not** advance this section's actual goal, and it is not a step in
-this plan. `retime` re-times lyric text that is *already in the `.lrc` file*; it
-has no lyric source of its own and cannot help when lrclib returns nothing. The
-gap steps 1–2 exist to close — get plain text from somewhere when lrclib misses —
-is untouched.
-
-So if a plain-text source (Shazam, Genius) is ever wired into the fetch stage, the
-alignment half of the problem is already solved and step 3 can be dropped: hand
-the fetched text to `retime` instead of estimating. Step 4's "estimated" marker is
-likewise unnecessary — quality is already surfaced by `lyric_timing audit` (which
-flags all-identical stamps, bulk stamping, crammed-early, non-monotonic) and by
-lrc-editor coloring sub-0.5-confidence markers orange after an AI Arrange.
-
----
-
-## Collection Gap Tracking (delivered)
-
-**Goal:** know which discs you physically own but haven't ripped, without
-maintaining a second inventory by hand.
-
-Shipped as `spindlebot collection-audit` — it reads a collection you already
-keep elsewhere (Discogs today) and diffs it against the library. Purely
-assistive: nothing in the import or sync path depends on it, it writes nothing
-you didn't ask for (a fetch cache, the ignore list, and `--html` where you point
-it), and it's inert until configured.
-
-Three design decisions worth carrying forward if this is ever extended:
-
-1. **Sources are pluggable, and a provider is one function** (account →
-   `list[CollectionItem]`), split into an impure client and a pure transformer.
-   Adding MusicBrainz collections, a CSV export, or Last.fm means one module and
-   a registry entry — no changes to the matcher or the CLI.
-2. **The library index is a union, not a choice.** beets and the SpindleBot DB
-   are each partial views that go stale in opposite directions; auditing against
-   either alone produced ~48 false "missing" reports on a real library. Anything
-   else that asks "do I have this?" should read `services/library_index.py`
-   rather than picking one.
-3. **An ignore list is what makes a report converge.** Without a way to say
-   "yes, missing, and that's fine", the list keeps a permanent floor of noise and
-   stops being opened. Ignoring is an overlay that never overwrites the match
-   verdict, so it's always reversible.
-
-Natural extensions, none scheduled:
-
-- **Other providers** — MusicBrainz collections would bring release MBIDs, which
-  short-circuit the string matcher entirely. The `mb_release_id` path exists and
-  is tested, and the `fixture` provider already reads the field; what's missing
-  is a *remote* source that supplies one, since Discogs exposes no MBID.
-- **Other media** — `--media vinyl` already works. A "what have I got on vinyl
+A personal music intelligence system. Near term: a clean, well-tested,
+configurable pipeline that anyone can run. Longer term: a complete local-first
+music management platform with remote streaming access — organized, resilient,
+and extensible.
+
+## In flight
+
+**Content-addressed library refactor.** Replacing "the library is whatever is at
+these known paths" with a SpindleBot-owned SQLite DB that is the system of
+record for content identity, every location a copy lives, and eventually version
+history. Phases A through 3 are merged — the DB, the reconciler, and the
+destructive mount-sync cutover are all in daily use.
+
+The active piece is **Phase 4, bidirectional lyric sync**. Once a `.lrc` exists
+in more than one place, edits can happen anywhere and "which copy is newest"
+stops being obvious. 4.0 (the causal-lineage substrate) is merged; 4.1
+(auto-propagating clean wins, preserving conflict files) and 4.2 (a `conflicts
+list|resolve` CLI) are not.
+
+Then: 5 — beets plugins and the AI re-timer wired into the pipeline proper;
+6 — DB snapshots; 7 — a daemon.
+
+[`CLAUDE.md`](CLAUDE.md) → "Content-addressed library refactor" is the live
+status.
+
+## Next
+
+### Error recovery and resilience
+
+Transient failures shouldn't silently drop data. Partly addressed — the
+lyric-completeness gate plus `finalize` means a failed lyric fetch can't strand
+an album — but the general case is still open:
+
+- A shared `retry_with_backoff(fn, attempts=3, base_delay=1.0)` around every
+  external API call (lrclib, iTunes, CAA, Telegram), respecting `Retry-After` on
+  a 429.
+- A failure journal at `~/.config/spindlebot/failed.jsonl` — one record per
+  failed stage, with `spindlebot retry-failed` to replay it and a count in
+  `spindlebot status`. Machine-readable, unlike today's log-and-hope.
+- Pre-flight checks: before an import, verify the Import area is readable and
+  beet is available; before a sync, verify the destination is reachable and has
+  space. Fail fast rather than partway through.
+
+### Input sources
+
+The pipeline takes CD rips and folder drops. What's missing is a dedicated
+digital-download path: downloads usually arrive with correct metadata already,
+so pretag should act in a "gentle mode" that normalizes rather than strips. A
+folder whose audio files carry consistent `ALBUM`, `ARTIST`, and `DATE` can be
+treated as a complete album and imported directly; sparse metadata falls back to
+a MusicBrainz search.
+
+### A plain-text lyric source
+
+lrclib is the only source, and when it misses there's nothing to fall back on.
+Shazam and Genius both have plain (unsynced) text.
+
+The alignment half of this problem is **already solved**: `lyric_timing retime`
+does Demucs vocal separation plus wav2vec2 CTC forced alignment, which is
+stronger than the timestamp-estimation heuristics originally sketched for this,
+and it reports per-line confidence. So the work is only the fetch side — get
+plain text from somewhere, hand it to `retime`, done. No "estimated" marker is
+needed either: quality is already surfaced by `lyric_timing audit` and by
+lrc-editor colouring sub-0.5-confidence markers orange.
+
+To be explicit, because the two get conflated: `retime` re-times lyric text
+that's *already in the `.lrc`*. It is not a lyric source and does nothing for a
+track lrclib has never heard of.
+
+### Collection audit extensions
+
+Shipped and in use; these are the natural next steps, none scheduled.
+
+- **Other providers.** A provider is one function (account →
+  `list[CollectionItem]`), split into an impure client and a pure transformer,
+  so MusicBrainz collections, a CSV export, or Last.fm each mean one module and
+  a registry entry — no changes to the matcher or the CLI. MusicBrainz is the
+  interesting one: it would bring release MBIDs, which short-circuit the string
+  matcher entirely. The `mb_release_id` path already exists and is tested, and
+  the `fixture` provider reads the field; what's missing is a *remote* source
+  that supplies one, since Discogs exposes no MBID.
+- **Other media.** `--media vinyl` already works — a "what have I got on vinyl
   but not digitally?" report is a flag away.
-- **Transliteration** — the one matching gap left is a library tagged in a
+- **Transliteration** is the one matching gap left: a library tagged in a
   different script than the collection lists it (`ベック` vs `Beck`). Solving it
   needs a transliteration dependency, which would violate the light-deps
-  boundary on `spindlebot/`; the ignore list covers it instead.
+  boundary on `spindlebot/`. The ignore list covers it instead, and that's the
+  intended answer rather than a stopgap.
+
+### Cloud backup destination
+
+`[[destinations]]` already supports `type = "rclone"`; what's missing is running
+one in anger. For a 1–2 TB FLAC library, Backblaze B2 + rclone is the pragmatic
+answer — $6/TB/month, $0.01/GB egress, incremental sync, checksum verification,
+and a dry-run mode. Wasabi ($6.99/TB, no egress fees) is better if you'd restore
+often; S3 Glacier Instant Retrieval (~$4/TB) is cheapest at scale with slower
+restores.
+
+iCloud Drive is **not** suitable. iCloud Music Library imposes a 200 MB per-file
+limit and transcodes unmatched tracks to 256 kbps AAC — both fatal for FLAC —
+and as a generic file sync target its reliability on directories of large files
+at scale is poor.
+
+## Later
+
+### Remote library access — use Navidrome
+
+Don't build this. Navidrome already does exactly what's needed: a lightweight
+self-hosted streaming server, single Go binary, ~200 MB RAM for 40,000 tracks,
+implementing the Subsonic/OpenSubsonic API so 20+ existing client apps work with
+it.
+
+It fits SpindleBot unusually well. It reads from a static music directory, which
+is precisely what the pipeline produces; it surfaces the metadata SpindleBot
+works to normalize (album artist, year, genre, MusicBrainz IDs); and it supports
+`.lrc` sidecars natively — the exact files the lyric fetch writes.
+
+Deployment: run it against the library on the retention drive, expose it via
+Tailscale or a reverse proxy, and no data leaves your infrastructure.
+
+Clients worth knowing: **Symfonium** and **Substreamer** on iOS/macOS (CarPlay
+support), **Symfonium**/**DSub** on Android, **Sonixd** or the built-in web UI on
+desktop. If Navidrome ever isn't enough, **Jellyfin** is heavier but adds video
+and official mobile apps, and **Plex + Plexamp** is the premium option at $120
+lifetime or $5/month for remote streaming.
+
+What SpindleBot contributes: the library Navidrome indexes is only as good as
+the metadata feeding it. Normalized tags, consistent album artist, embedded art,
+`.lrc` files — the two systems are naturally complementary.
+
+### A Mac app
+
+macOS-only is fine and true to the platform this was built for. The logical
+endpoint is a real app: a SwiftUI shell with an embedded Python runtime, the
+pipeline stages running as background processes, and the surface area that's
+currently config files and log tails becoming a config editor, a status
+dashboard, an import queue, and notification preferences. Navidrome runs as a
+bundled service; the launchd plists become internal app infrastructure.
+
+The core Python doesn't change — only the surface around it does. That's a real
+path to the App Store.
 
 ---
 
-## Summary: Work Order
-
-```
-Phase 1 — Config          ████████░░░░░░░░░░░░░░  Foundation — do this first
-Phase 2 — Modular / Tests ████████████████░░░░░░  Biggest lift, highest payoff
-Phase 3 — Destinations    ██████░░░░░░░░░░░░░░░░  Depends on Phase 1
-Phase 4 — Error Recovery  ██████░░░░░░░░░░░░░░░░  Depends on Phase 2
-Phase 5 — Input Sources   ████░░░░░░░░░░░░░░░░░░  After 1–4 are solid
-Phase 6 — Navidrome       ████░░░░░░░░░░░░░░░░░░  Can run in parallel with 2–4
-Mac App                   ██░░░░░░░░░░░░░░░░░░░░  Long-term; blocks on Phase 2
-```
-
-Phases 1 and 2 together are the real investment. Once the codebase is modular and tested, everything else — new destinations, new input sources, new lyrics providers, the Navidrome integration — becomes a matter of adding a module and a few config lines rather than editing shell scripts.
+The original 6-phase roadmap (Phases 1–2 delivered, the rest superseded by the
+content-addressed epic) is archived at
+[`docs/archive/original-roadmap.md`](docs/archive/original-roadmap.md).

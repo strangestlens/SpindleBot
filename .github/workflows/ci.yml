@@ -46,8 +46,11 @@ jobs:
       - name: Install shellcheck and bats
         run: sudo apt-get install -y shellcheck bats
 
+      # Every .sh in the repo, not a hand-maintained list — "shellcheck clean on
+      # all .sh files" is a stated non-negotiable, so CI should be what enforces
+      # it rather than a subset that silently drifts as scripts are added.
       - name: shellcheck
-        run: shellcheck music-import.sh music-sync.sh music-notify.sh
+        run: shellcheck ./*.sh
 
       - name: bats
         run: bats tests/shell/
