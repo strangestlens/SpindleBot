@@ -13,6 +13,28 @@ python3 -m spindlebot collection-audit --handle your-discogs-handle
 Put the handle in `config.toml` under `[collection]` and the flag becomes
 optional; `--handle` always overrides it.
 
+```
+discogs:your-discogs-handle — 212 item(s), 152 on cd
+library (beets 112, db 177) — 176 unique album(s)
+
+UNCERTAIN (1) — confirm these yourself
+  1506644   Tori Amos — Live At Montreux 1991 & 1992 (2008)
+      ≈ TORI AMOS — Live At Montreux: 1991/1992 (0.93)
+
+MISSING (47)
+  500883    Afro Celt Sound System — Volume 1 Sound Magic (1996)
+  21066448  Akercocke — Renaissance In Extremis (2021)
+  16500462  Beck — Hyperspace (2020)
+  ...
+
+104 owned · 1 uncertain · 47 missing
+
+Not going to rip one? spindlebot collection-ignore 500883
+```
+
+Every missing row leads with the id, because a list you can't act on from is
+just a list.
+
 | Flag | Effect |
 |------|--------|
 | `--source discogs\|fixture` | Where the collection comes from |
@@ -114,15 +136,21 @@ Neither backend is a complete picture, and they go stale in opposite directions:
 | `beets` | Everything it imported and still tracks | Albums that reached a drive without a `beet import` |
 | `db` | Everything `spindlebot inventory` has scanned at any location | A fresh import that hasn't synced yet |
 
-Measured on a real library: 67 albums existed **only** in the SpindleBot DB and
-2 existed **only** in beets. So `auto` (the default) unions them — an album
-counts as owned if either index knows it, which can only ever shrink the missing
-list. Every run prints the breakdown (`library (beets 112, db 177) — 176 unique
-album(s)`), because when an album is wrongly reported missing, the index is the
-first suspect.
+Measured on a real library: 67 albums existed **only** in the SpindleBot DB
+(copied-in files with no `beets_item_id`) and 2 existed **only** in beets.
+Auditing against beets alone reported **95 of 152 CDs missing — 48 of them
+owned**.
+
+So `auto` (the default) unions them: an album counts as owned if either index
+knows it, which can only ever shrink the missing list. Every run prints the
+breakdown (`library (beets 112, db 177) — 176 unique album(s)`), because when an
+album is wrongly reported missing, the index is the first suspect.
 
 If both indexes come back empty the audit **fails** rather than reporting your
 entire collection as missing.
+
+This generalizes: anything else that needs to answer "do I have this?" should
+read `services/library_index.py` rather than picking a single backend.
 
 ## Why matching is artist-scoped
 

@@ -76,6 +76,26 @@ To be explicit, because the two get conflated: `retime` re-times lyric text
 that's *already in the `.lrc`*. It is not a lyric source and does nothing for a
 track lrclib has never heard of.
 
+### Collection audit extensions
+
+Shipped and in use; these are the natural next steps, none scheduled.
+
+- **Other providers.** A provider is one function (account →
+  `list[CollectionItem]`), split into an impure client and a pure transformer,
+  so MusicBrainz collections, a CSV export, or Last.fm each mean one module and
+  a registry entry — no changes to the matcher or the CLI. MusicBrainz is the
+  interesting one: it would bring release MBIDs, which short-circuit the string
+  matcher entirely. The `mb_release_id` path already exists and is tested, and
+  the `fixture` provider reads the field; what's missing is a *remote* source
+  that supplies one, since Discogs exposes no MBID.
+- **Other media.** `--media vinyl` already works — a "what have I got on vinyl
+  but not digitally?" report is a flag away.
+- **Transliteration** is the one matching gap left: a library tagged in a
+  different script than the collection lists it (`ベック` vs `Beck`). Solving it
+  needs a transliteration dependency, which would violate the light-deps
+  boundary on `spindlebot/`. The ignore list covers it instead, and that's the
+  intended answer rather than a stopgap.
+
 ### Cloud backup destination
 
 `[[destinations]]` already supports `type = "rclone"`; what's missing is running
