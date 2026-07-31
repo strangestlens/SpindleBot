@@ -82,6 +82,25 @@ class ArtConfig:
 
 
 @dataclass
+class CollectionConfig:
+    """External collection audit — entirely optional; absent config leaves it off.
+
+    `media` stays raw strings rather than a validated MediaKind set on purpose.
+    config.load() bootstraps every shell script in the pipeline, so a typo in an
+    optional assistive feature's config must not take down import and sync. The
+    strings are resolved (and fail loud) in `resolve_media`, at the point of use.
+    """
+    source: str = "discogs"
+    account: str = ""
+    media: tuple = ("cd",)
+    index: str = "beets"          # "beets" | "db"
+    cache_dir: Path = field(
+        default_factory=lambda: CONFIG_DIR / "cache"
+    )
+    cache_ttl_hours: float = 24.0
+
+
+@dataclass
 class DestinationConfig:
     name: str
     type: str          # "local_drive" | "rclone"
@@ -111,9 +130,17 @@ class GeniusSecrets:
 
 
 @dataclass
+class DiscogsSecrets:
+    # Optional: a public collection reads without it. A token raises the rate
+    # limit from 25 to 60 req/min and is required for a private collection.
+    token: str = ""
+
+
+@dataclass
 class Secrets:
     telegram: TelegramSecrets = field(default_factory=TelegramSecrets)
     genius: GeniusSecrets = field(default_factory=GeniusSecrets)
+    discogs: DiscogsSecrets = field(default_factory=DiscogsSecrets)
 
 
 @dataclass
@@ -127,6 +154,7 @@ class SpindleBotConfig:
     locations: list     # list[LocationConfig]
     secrets: Secrets
     pipeline_dir: Path  # auto-detected from module location
+    collection: CollectionConfig = field(default_factory=CollectionConfig)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -236,6 +264,19 @@ def load() -> SpindleBotConfig:
         min_size_px=int(ar.get("min_size_px", 500)),
     )
 
+    # ── Collection audit (optional; unconfigured = feature simply off) ────────
+    col = raw.get("collection", {})
+    collection = CollectionConfig(
+        source=col.get("source", "discogs"),
+        account=os.environ.get(
+            "SPINDLEBOT_COLLECTION_ACCOUNT", col.get("account", "")
+        ),
+        media=tuple(col.get("media", ["cd"])),
+        index=col.get("index", "beets"),
+        cache_dir=_expand(col.get("cache_dir", str(CONFIG_DIR / "cache"))),
+        cache_ttl_hours=float(col.get("cache_ttl_hours", 24.0)),
+    )
+
     # ── Destinations ──────────────────────────────────────────────────────────
     destinations = [
         DestinationConfig(
@@ -263,6 +304,7 @@ def load() -> SpindleBotConfig:
     # ── Secrets (config file < env var override) ──────────────────────────────
     st = sec.get("telegram", {})
     sg = sec.get("genius", {})
+    sd = sec.get("discogs", {})
     secrets = Secrets(
         telegram=TelegramSecrets(
             bot_token=os.environ.get(
@@ -275,6 +317,11 @@ def load() -> SpindleBotConfig:
         genius=GeniusSecrets(
             api_key=os.environ.get(
                 "SPINDLEBOT_GENIUS_KEY", sg.get("api_key", "")
+            ),
+        ),
+        discogs=DiscogsSecrets(
+            token=os.environ.get(
+                "SPINDLEBOT_DISCOGS_TOKEN", sd.get("token", "")
             ),
         ),
     )
@@ -293,4 +340,5 @@ def load() -> SpindleBotConfig:
         locations=locations,
         secrets=secrets,
         pipeline_dir=pipeline_dir,
+        collection=collection,
     )

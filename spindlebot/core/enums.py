@@ -59,3 +59,18 @@ class ContentKind(StrEnum):
 class ConflictStatus(StrEnum):
     OPEN = "open"
     RESOLVED = "resolved"
+
+
+class MediaKind(StrEnum):
+    """Physical/digital medium an external collection item was released on.
+
+    Deliberately coarse: the collection audit only needs to answer "is this the
+    kind of thing I'd rip?", not to reproduce a discography database. Container
+    formats (Box Set, All Media) map to OTHER — they always appear alongside the
+    real medium, and every format entry on a release is inspected.
+    """
+    CD = "cd"
+    VINYL = "vinyl"
+    CASSETTE = "cassette"
+    DIGITAL = "digital"
+    OTHER = "other"

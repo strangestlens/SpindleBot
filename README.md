@@ -84,10 +84,48 @@ python3 -m spindlebot sync [--location <name>]       # execute acknowledged copi
 python3 -m spindlebot prune [--execute]              # release Pending copies verified on retention
 python3 -m spindlebot fetch-art  <dir> [--dry-run] [--force]
 python3 -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]
+python3 -m spindlebot collection-audit [--handle <name>]  # what's on the shelf but not ripped
 python3 -m spindlebot restart                        # restart the launchd agents
 ```
 
 `prune` and `delete` default to **dry-run** — pass `--execute` to touch bytes.
+
+## Collection audit (optional)
+
+Compares a collection you already maintain elsewhere against the digital
+library and lists the discs you own but haven't ripped. Entirely assistive — it
+reads the library and writes nothing but a fetch cache. Unconfigured, it simply
+doesn't run.
+
+```bash
+python3 -m spindlebot collection-audit --handle your-discogs-handle
+```
+
+Put the handle in `config.toml` under `[collection]` and the flag becomes
+optional; `--handle` always overrides it.
+
+| Flag | Effect |
+|------|--------|
+| `--source discogs\|fixture` | Where the collection comes from |
+| `--media cd,vinyl` | Which media count as rippable (default `cd`, which includes CDrs) |
+| `--index beets\|db` | Compare against the beets library (default) or what `inventory` has scanned |
+| `--refresh` | Re-fetch instead of using the cached collection |
+| `--strict` | Treat uncertain matches as missing |
+| `--all` | Also list what you already own |
+| `--json` | Structured output |
+
+**Discogs** needs no credentials for a public collection. A personal access
+token in `secrets.toml` (`[discogs] token`) raises the API rate limit from 25 to
+60 requests/minute and is required for a private collection.
+
+**Adding another source** means writing one provider: an impure client that
+fetches, and a pure transformer that maps its payload to `CollectionItem`. The
+`fixture` provider — a JSON file you write by hand — is a working example, and
+doubles as the way in for anyone not on Discogs.
+
+Results land in three buckets, not two. `uncertain` exists so that a
+normalization miss sends you to check a row rather than to re-rip a disc you
+already own.
 
 ## Scripts
 
