@@ -1,0 +1,232 @@
+#!/opt/homebrew/bin/python3
+"""
+collection-browser — local web UI for the SpindleBot collection audit.
+
+Usage: collection-browser [--handle <name>] [--media cd,vinyl] [--refresh]
+                          [--index auto|beets|db] [--port N]
+
+Shows what's on your shelf but not in the library, and lets you click discs you
+won't rip into the ignore list — and click them back out again.
+
+Sibling to lrc-editor, same palette, same shape: a single-file Flask app that
+opens a browser at localhost. It lives outside `spindlebot/` deliberately, so
+the pipeline package never grows a Flask dependency.
+"""
+
+import argparse
+import socket
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from flask import Flask, Response, jsonify, request
+except ImportError:
+    print("Installing flask...", flush=True)
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "flask",
+                           "--break-system-packages", "--quiet"])
+    from flask import Flask, Response, jsonify, request
+
+import logging
+
+from spindlebot import config as sb_config
+from spindlebot.core.collection import resolve_media
+from spindlebot.core.errors import SpindleBotError
+from spindlebot.services.collection_audit import run_audit
+from spindlebot.services.collection_ignore import IgnoreStore, resolve_key
+from spindlebot.services.collection_report import render_html
+
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+app = Flask(__name__)
+
+# Populated by main(); a dict so request handlers can re-read a fresh audit.
+state = {
+    "cfg": None,
+    "account": "",
+    "source": "discogs",
+    "media": None,
+    "index": "auto",
+    "report": None,
+}
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _audit(refresh: bool = False):
+    """Re-run the audit against the cached collection. Cheap once warm."""
+    return run_audit(
+        state["cfg"],
+        account=state["account"],
+        source=state["source"],
+        media=state["media"],
+        index=state["index"],
+        refresh=refresh,
+    )
+
+
+def _same_origin() -> bool:
+    """Reject cross-origin POSTs.
+
+    This binds to localhost, but any page in the browser can POST to a
+    localhost port. The blast radius is only an ignore-list edit, and it's
+    undoable — but a drive-by write is still a write, so refuse it.
+    """
+    origin = request.headers.get("Origin")
+    if origin is None:
+        return True  # curl and same-origin form posts send no Origin
+    return origin == request.host_url.rstrip("/")
+
+
+def _toggle(ignoring: bool):
+    if not _same_origin():
+        return jsonify({"ok": False, "error": "cross-origin request refused"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    raw = str(payload.get("key") or payload.get("id") or "").strip()
+    if not raw:
+        return jsonify({"ok": False, "error": "no id given"}), 400
+    try:
+        key = resolve_key(raw, source=state["source"])
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    try:
+        store = IgnoreStore.load(state["cfg"].collection.ignore_path)
+        if ignoring:
+            item = next(
+                (m.item for m in state["report"].matches if m.item.key == key), None
+            )
+            store.add(
+                key,
+                artist=item.artist if item else "",
+                title=item.title if item else "",
+                reason=str(payload.get("reason") or ""),
+            )
+        else:
+            store.remove(key)
+        store.save()
+    except SpindleBotError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    state["report"] = _audit()
+    return jsonify({
+        "ok": True,
+        "key": key,
+        "ignored": ignoring,
+        "counts": {
+            "missing": len(state["report"].missing),
+            "uncertain": len(state["report"].uncertain),
+            "owned": len(state["report"].owned),
+            "ignored": len(state["report"].ignored),
+        },
+    })
+
+
+@app.route("/")
+def index() -> Response:
+    state["report"] = _audit()
+    return Response(render_html(state["report"], interactive=True), mimetype="text/html")
+
+
+@app.route("/ignore", methods=["POST"])
+def ignore():
+    return _toggle(True)
+
+
+@app.route("/unignore", methods=["POST"])
+def unignore():
+    return _toggle(False)
+
+
+@app.route("/audit.json")
+def audit_json():
+    report = state["report"] or _audit()
+    return jsonify({
+        "source": report.source,
+        "account": report.account,
+        "library_sources": report.library_sources,
+        "counts": {
+            "missing": len(report.missing),
+            "uncertain": len(report.uncertain),
+            "owned": len(report.owned),
+            "ignored": len(report.ignored),
+        },
+        "items": [
+            {"key": m.item.key, "artist": m.item.artist, "title": m.item.title,
+             "status": m.status.value, "ignored": m.ignored}
+            for m in report.matches
+        ],
+    })
+
+
+def build_state(argv=None):
+    """Resolve config + flags into `state`. Separated from serving so tests
+    can drive the app without a socket."""
+    parser = argparse.ArgumentParser(prog="collection-browser", add_help=True)
+    parser.add_argument("--handle", "--account", dest="handle", default=None)
+    parser.add_argument("--source", default=None)
+    parser.add_argument("--media", default=None)
+    parser.add_argument("--index", default=None)
+    parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--no-open", dest="open_browser", action="store_false",
+                        help="don't launch a browser (for scripted use)")
+    args = parser.parse_args(argv)
+
+    cfg = sb_config.load()
+    account = args.handle or cfg.collection.account
+    if not account:
+        sys.exit(
+            "No collection account. Pass --handle <name>, or set\n"
+            '  [collection]\n  account = "<name>"\n'
+            "in ~/.config/spindlebot/config.toml"
+        )
+
+    state.update(
+        cfg=cfg,
+        account=account,
+        source=args.source or cfg.collection.source,
+        index=args.index or cfg.collection.index,
+        media=resolve_media(
+            args.media.split(",") if args.media else cfg.collection.media
+        ),
+    )
+    state["report"] = _audit(refresh=args.refresh)
+    return args
+
+
+def main() -> None:
+    args = build_state()
+    port = args.port or free_port()
+    url = f"http://localhost:{port}"
+    report = state["report"]
+
+    print("💿  collection-browser")
+    print(f"    Source : {report.source}:{report.account}")
+    print(f"    Library: {report.library_albums} albums "
+          f"({', '.join(f'{k} {v}' for k, v in sorted(report.library_sources.items()))})")
+    print(f"    Missing: {len(report.missing)}   "
+          f"uncertain {len(report.uncertain)}   ignored {len(report.ignored)}")
+    print(f"    URL    : {url}")
+    print("    Ctrl+C to quit\n")
+
+    if args.open_browser:
+        def open_browser():
+            import time
+            time.sleep(0.8)
+            subprocess.Popen(["open", url])
+
+        threading.Thread(target=open_browser, daemon=True).start()
+    app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
+
+
+if __name__ == "__main__":
+    main()

@@ -128,6 +128,111 @@ search.addEventListener('input', apply);
 apply();
 """
 
+# Only sent with the served page. The exported file must stay inert — a static
+# report with dead buttons would be worse than one with none.
+INTERACTIVE_CSS = """
+.card { position: relative; }
+.card .act {
+  margin-left: auto; align-self: center; flex-shrink: 0;
+  padding: 5px 11px; font-size: 11.5px;
+  background: #2a2a4a; color: #8899aa;
+}
+.card[data-status="ignored"] .act { background: #1b4332; color: #6fcf97; }
+.card .act:disabled { opacity: .4; cursor: default; }
+#toast {
+  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+  background: #16213e; border: 1px solid #0f3460; border-radius: 8px;
+  padding: 9px 14px; font-size: 12.5px; color: #e0e0e0;
+  display: flex; align-items: center; gap: 12px;
+  opacity: 0; pointer-events: none; transition: opacity .18s; z-index: 20;
+}
+#toast.show { opacity: 1; pointer-events: auto; }
+#toast.err { border-color: #e94560; color: #e94560; }
+#toast button { padding: 4px 10px; font-size: 11.5px;
+                background: #0f3460; color: #e0e0e0; }
+"""
+
+INTERACTIVE_JS = """
+const toast = document.getElementById('toast');
+const toastText = document.getElementById('toast-text');
+const toastUndo = document.getElementById('toast-undo');
+let toastTimer = null;
+let lastAction = null;
+
+function showToast(text, {error = false, undo = null} = {}) {
+  toastText.textContent = text;
+  toast.classList.toggle('err', error);
+  toastUndo.style.display = undo ? '' : 'none';
+  lastAction = undo;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  // An error you blink and miss is an error you'll hit again. Success toasts
+  // are disposable — the card's own undo button is the durable path.
+  toastTimer = setTimeout(() => toast.classList.remove('show'), error ? 15000 : 6000);
+}
+
+function recount() {
+  const tally = {missing: 0, uncertain: 0, owned: 0, ignored: 0};
+  for (const card of cards) tally[card.dataset.status] += 1;
+  for (const [slug, n] of Object.entries(tally)) {
+    document.querySelectorAll('[data-count="' + slug + '"]')
+      .forEach(el => { el.textContent = n; });
+  }
+}
+
+async function toggle(card, verb) {
+  const button = card.querySelector('.act');
+  button.disabled = true;
+  try {
+    let res;
+    try {
+      res = await fetch(verb === 'ignore' ? '/ignore' : '/unignore', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({key: card.dataset.key}),
+      });
+    } catch (netErr) {
+      // fetch only throws for network-level failures, and for a localhost tool
+      // that means one thing: the server is gone. This page outlives the
+      // process that served it — leaving a tab open overnight is the normal
+      // case, not an edge case — and "Failed to fetch" tells you nothing.
+      throw new Error(
+        'collection-browser is not running — restart it and reload this page'
+      );
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || ('request failed (' + res.status + ')'));
+    // The verdict never changed, so undoing is just restoring the bucket.
+    card.dataset.status = verb === 'ignore' ? 'ignored' : card.dataset.verdict;
+    button.dataset.act = verb === 'ignore' ? 'undo' : 'ignore';
+    button.textContent = button.dataset.act;
+    recount();
+    apply();
+    const title = card.querySelector('.title').textContent;
+    showToast(
+      (verb === 'ignore' ? 'Ignored ' : 'Restored ') + title,
+      {undo: () => toggle(card, verb === 'ignore' ? 'unignore' : 'ignore')},
+    );
+  } catch (err) {
+    showToast(String(err.message || err), {error: true});
+  } finally {
+    button.disabled = false;
+  }
+}
+
+document.getElementById('grid').addEventListener('click', (ev) => {
+  const button = ev.target.closest('.act');
+  if (!button) return;
+  toggle(button.closest('.card'), button.dataset.act === 'undo' ? 'unignore' : 'ignore');
+});
+
+toastUndo.addEventListener('click', () => {
+  const action = lastAction;
+  toast.classList.remove('show');
+  if (action) action();
+});
+"""
+
 SAFE_SCHEMES = {"http", "https"}
 
 
@@ -147,7 +252,7 @@ def _status_slug(match) -> str:
     return "ignored" if match.ignored else match.status.value
 
 
-def _card(match) -> str:
+def _card(match, *, interactive: bool = False) -> str:
     item = match.item
     e = html.escape
     thumb = _safe_url(item.thumb_url)
@@ -175,20 +280,39 @@ def _card(match) -> str:
     link = f'<div><a href="{e(url, quote=True)}" target="_blank" rel="noopener noreferrer">{e(item.source)} ↗</a></div>' if url else ""
 
     haystack = e(f"{item.artist} {item.title} {item.year or ''}".lower(), quote=True)
+    act = ""
+    if interactive:
+        # Owned albums have no ignore affordance — ignoring one is meaningless
+        # (the audit drops the flag anyway) and the button would only confuse.
+        if match.status is not MatchStatus.OWNED:
+            verb = "undo" if match.ignored else "ignore"
+            act = f'<button class="act" data-act="{verb}">{verb}</button>'
     return (
         f'<div class="card" data-status="{_status_slug(match)}" '
         f'data-id="{e(item.source_id, quote=True)}" '
+        f'data-key="{e(item.key, quote=True)}" '
+        f'data-verdict="{match.status.value}" '
         f'data-search="{haystack}">{img}'
         f'<div class="body">'
         f'<div class="artist">{e(item.artist)}</div>'
         f'<div class="title">{e(item.title)}</div>'
         f'<div class="sub">{sub}</div>{near}{link}'
-        f'</div></div>'
+        f'</div>{act}</div>'
     )
 
 
-def render_html(report: AuditReport, *, generated_utc: float | None = None) -> str:
-    """Render an audit as a standalone HTML page."""
+def render_html(
+    report: AuditReport,
+    *,
+    generated_utc: float | None = None,
+    interactive: bool = False,
+) -> str:
+    """Render an audit as a standalone HTML page.
+
+    `interactive` adds per-card ignore/undo buttons wired to a local server.
+    One renderer serves both the exported file and the served page so the
+    markup and palette can't drift apart; the export stays inert.
+    """
     e = html.escape
     # `is None`, not truthiness: 0.0 is a valid timestamp, and the signature
     # says None is the sentinel. Falsy-testing it makes an explicitly pinned
@@ -208,12 +332,16 @@ def render_html(report: AuditReport, *, generated_utc: float | None = None) -> s
         "ignored": len(report.ignored),
     }
 
+    # An empty ignore list isn't worth a tile in an export — but on the served
+    # page you can create one at any moment, so it always has a home.
+    def _shown(slug: str) -> bool:
+        return slug != "ignored" or counts[slug] or interactive
+
     stats = "".join(
-        f'<div class="stat {slug}"><div class="n">{n}</div>'
+        f'<div class="stat {slug}"><div class="n" data-count="{slug}">{n}</div>'
         f'<div class="l">{slug}</div></div>'
         for slug, n in counts.items()
-        # An empty ignore list is not worth a tile; the others always are.
-        if slug != "ignored" or n
+        if _shown(slug)
     )
     stats += (
         f'<div class="stat"><div class="n">{report.library_albums}</div>'
@@ -227,15 +355,21 @@ def render_html(report: AuditReport, *, generated_utc: float | None = None) -> s
         active = ' class="active"' if slug == "missing" else ""
         return (
             '<button data-status="' + slug + '"' + active + '>'
-            + slug.title() + " (" + str(counts[slug]) + ")</button>"
+            + slug.title() + ' (<span data-count="' + slug + '">'
+            + str(counts[slug]) + "</span>)</button>"
         )
 
-    order = ["missing", "uncertain", "owned"]
-    if counts["ignored"]:
-        order.append("ignored")
+    order = [s for s in ("missing", "uncertain", "owned", "ignored") if _shown(s)]
     tabs = "".join(_tab(s) for s in order) + '<button data-status="all">All</button>'
 
-    cards = "".join(_card(m) for m in report.matches)
+    cards = "".join(_card(m, interactive=interactive) for m in report.matches)
+    page_css = CSS + (INTERACTIVE_CSS if interactive else "")
+    page_js = JS + (INTERACTIVE_JS if interactive else "")
+    # Every ignore is one click from being taken back, right where you made it.
+    toast_html = (
+        '<div id="toast"><span id="toast-text"></span>'
+        '<button id="toast-undo">Undo</button></div>'
+    ) if interactive else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -243,7 +377,7 @@ def render_html(report: AuditReport, *, generated_utc: float | None = None) -> s
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Collection Audit — {e(report.account)}</title>
-<style>{CSS}</style>
+<style>{page_css}</style>
 </head>
 <body>
 <div id="toolbar">
@@ -259,7 +393,8 @@ def render_html(report: AuditReport, *, generated_utc: float | None = None) -> s
 <div id="summary">{stats}</div>
 <div id="grid">{cards}</div>
 <div id="empty">Nothing matches that filter.</div>
-<script>{JS}</script>
+{toast_html}
+<script>{page_js}</script>
 </body>
 </html>
 """

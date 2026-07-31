@@ -28,6 +28,10 @@ refactor epic is complete.
     `--remove`/`--unignore`, and `--clear --yes`. Ignoring preserves the underlying match
     verdict so un-ignoring restores it exactly, and an album you later rip is never
     reported as ignored. Stored as JSON, not a schema change
+- `collection-browser`: a local Flask UI for the audit with click-to-ignore and
+  click-to-undo, live counts, and an Undo toast. Sibling to `lrc-editor`, kept outside
+  `spindlebot/` so the pipeline package takes no Flask dependency. Binds to 127.0.0.1 and
+  refuses cross-origin POSTs
 
 ### Changed
 - CI now runs the Python suite on a 3.11 + 3.14 matrix. Testing only the 3.11 floor let

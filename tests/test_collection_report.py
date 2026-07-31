@@ -66,9 +66,9 @@ def test_counts_every_bucket():
         _match(_item(title="C"), MatchStatus.OWNED),
         library_albums=42,
     ))
-    assert '<div class="n">2</div><div class="l">missing</div>' in page
-    assert '<div class="n">1</div><div class="l">owned</div>' in page
-    assert '<div class="n">0</div><div class="l">uncertain</div>' in page
+    assert '<div class="n" data-count="missing">2</div>' in page
+    assert '<div class="n" data-count="owned">1</div>' in page
+    assert '<div class="n" data-count="uncertain">0</div>' in page
     assert '<div class="n">42</div><div class="l">in library</div>' in page
 
 

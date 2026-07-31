@@ -112,7 +112,7 @@ spindlebot/
                                      Ignoring NEVER overwrites the match verdict (ItemMatch
                                      keeps its status + an `ignored` flag), so un-ignoring is
                                      free. An OWNED album is never marked ignored.
-    collection_report.py         — render_html(): AuditReport → a self-contained HTML page
+    collection_report.py         — render_html(report, interactive=): AuditReport → HTML page
                                      (inline CSS/JS, lrc-editor palette). Pure: returns a
                                      string, the CLI writes the file
     locations.py                 — register_from_config; deterministic location_uuid
@@ -139,6 +139,11 @@ setup.sh                         — first-time environment setup: config files,
 (launchd agents com.strangestlens.music-watcher + com.strangestlens.music-sync
                                      are GENERATED per-machine by setup.sh — home dir, log dir, and
                                      the retention volume to watch all come from config, not baked in)
+collection-browser               — standalone Flask UI for the collection audit: the report
+                                     plus click-to-ignore / click-to-undo. Lives OUTSIDE
+                                     spindlebot/ on purpose so the pipeline package never takes
+                                     a Flask dependency (same reasoning as lrc-editor). Binds to
+                                     127.0.0.1 and refuses cross-origin POSTs.
 lrc-editor                       — standalone Flask/WaveSurfer.js lyrics timing editor (single
                                      executable); its "AI Arrange" button POSTs /ai-arrange, which runs
                                      lyric_timing retime as a background subprocess of the AI venv;
@@ -198,6 +203,9 @@ tests/
   test_collection_cli.py         — spindlebot collection-audit CLI (text + --json)
   test_collection_ignore.py      — ignore store round-trip, audit overlay, and the
                                      collection-ignore CLI (add/list/remove/clear)
+  test_collection_browser.py     — collection-browser Flask endpoints (ignore/unignore/
+                                     audit.json), the origin guard, and that the EXPORTED
+                                     report stays inert (no dead buttons)
   test_collection_report.py      — HTML report: structure, escaping, http(s)-only URL
                                      sanitization, self-containment, --html CLI wiring
   test_lyric_timing_lrc.py       — lyric_timing/lrc parse/format
