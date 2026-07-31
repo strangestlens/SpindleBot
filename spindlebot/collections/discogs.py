@@ -214,7 +214,7 @@ class DiscogsClient:
         safe = _SAFE_HANDLE.sub("_", account)
         return self.cache_dir / f"discogs-{safe}.json"
 
-    def _read_cache(self, account: str) -> list[dict] | None:
+    def _read_cache(self, account: str, *, ignore_ttl: bool = False) -> list[dict] | None:
         path = self.cache_path(account)
         if path is None or not path.exists():
             return None
@@ -222,9 +222,10 @@ class DiscogsClient:
             payload = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             return None
-        age_hours = (self.now() - float(payload.get("fetched_utc", 0))) / 3600.0
-        if age_hours > self.cache_ttl_hours:
-            return None
+        if not ignore_ttl:
+            age_hours = (self.now() - float(payload.get("fetched_utc", 0))) / 3600.0
+            if age_hours > self.cache_ttl_hours:
+                return None
         releases = payload.get("releases")
         return releases if isinstance(releases, list) else None
 
@@ -313,8 +314,18 @@ class DiscogsClient:
             "add a token to raise the limit from 25 to 60 requests/minute"
         )
 
-    def fetch_raw(self, account: str, *, refresh: bool = False) -> list[dict]:
-        """Every release in the account's collection, as raw Discogs payloads."""
+    def fetch_raw(
+        self, account: str, *, refresh: bool = False, cached_only: bool = False
+    ) -> list[dict]:
+        """Every release in the account's collection, as raw Discogs payloads.
+
+        `cached_only` never touches the network — callers that merely want nice
+        labels shouldn't be able to stall on HTTP. It deliberately ignores the
+        TTL: a release's artist and title don't go stale, so a day-old cache is
+        a perfectly good answer, and the alternative is no answer at all.
+        """
+        if cached_only:
+            return self._read_cache(account, ignore_ttl=True) or []
         if not refresh:
             cached = self._read_cache(account)
             if cached is not None:
@@ -353,5 +364,9 @@ class DiscogsProvider:
             cache_ttl_hours=cfg.collection.cache_ttl_hours,
         ))
 
-    def fetch(self, account: str, *, refresh: bool = False) -> list[CollectionItem]:
-        return to_items(self.client.fetch_raw(account, refresh=refresh))
+    def fetch(
+        self, account: str, *, refresh: bool = False, cached_only: bool = False
+    ) -> list[CollectionItem]:
+        return to_items(
+            self.client.fetch_raw(account, refresh=refresh, cached_only=cached_only)
+        )

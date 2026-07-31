@@ -98,6 +98,9 @@ class CollectionConfig:
         default_factory=lambda: CONFIG_DIR / "cache"
     )
     cache_ttl_hours: float = 24.0
+    ignore_path: Path = field(
+        default_factory=lambda: CONFIG_DIR / "collection-ignore.json"
+    )
 
 
 @dataclass
@@ -275,6 +278,9 @@ def load() -> SpindleBotConfig:
         index=col.get("index", "auto"),
         cache_dir=_expand(col.get("cache_dir", str(CONFIG_DIR / "cache"))),
         cache_ttl_hours=float(col.get("cache_ttl_hours", 24.0)),
+        ignore_path=_expand(
+            col.get("ignore_path", str(CONFIG_DIR / "collection-ignore.json"))
+        ),
     )
 
     # ── Destinations ──────────────────────────────────────────────────────────

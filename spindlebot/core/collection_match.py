@@ -72,6 +72,11 @@ class ItemMatch:
     matched: LibraryAlbum | None
     reason: str
     score: float = 0.0
+    # Set by the audit service from the ignore list, never by the matcher —
+    # being ignored is a decision about an item, not a fact about whether the
+    # library contains it. Keeping them separate means un-ignoring restores the
+    # original verdict with nothing to recompute.
+    ignored: bool = False
 
 
 # ── Normalization ────────────────────────────────────────────────────────────

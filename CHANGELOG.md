@@ -24,6 +24,10 @@ refactor epic is complete.
     is a hard failure rather than a "your whole collection is missing" report
   - `--html <file>` writes a self-contained browsable report (cover thumbnails, status tabs,
     live text filter) styled to match `lrc-editor`; no server, no build step
+  - `spindlebot collection-ignore` to stop reporting discs you won't rip, with `--list`,
+    `--remove`/`--unignore`, and `--clear --yes`. Ignoring preserves the underlying match
+    verdict so un-ignoring restores it exactly, and an album you later rip is never
+    reported as ignored. Stored as JSON, not a schema change
 
 ### Changed
 - CI now runs the Python suite on a 3.11 + 3.14 matrix. Testing only the 3.11 floor let

@@ -13,6 +13,7 @@ from spindlebot.core.collection import CollectionItem, LibraryAlbum
 from spindlebot.core.collection_match import ItemMatch, MatchStatus, match_items
 from spindlebot.core.enums import MediaKind
 from spindlebot.services import library_index
+from spindlebot.services.collection_ignore import IgnoreStore
 
 DEFAULT_MEDIA = frozenset({MediaKind.CD})
 
@@ -32,7 +33,10 @@ class AuditReport:
     library_errors: dict = field(default_factory=dict)
 
     def _of(self, status: MatchStatus) -> list[ItemMatch]:
-        return [m for m in self.matches if m.status is status]
+        # Ignored items are held out of the actionable buckets — that is the
+        # entire point of ignoring them — but keep their real match status, so
+        # un-ignoring restores the original verdict with nothing recomputed.
+        return [m for m in self.matches if m.status is status and not m.ignored]
 
     @property
     def owned(self) -> list[ItemMatch]:
@@ -45,6 +49,10 @@ class AuditReport:
     @property
     def missing(self) -> list[ItemMatch]:
         return self._of(MatchStatus.MISSING)
+
+    @property
+    def ignored(self) -> list[ItemMatch]:
+        return [m for m in self.matches if m.ignored]
 
 
 def filter_media(
@@ -71,6 +79,7 @@ def run_audit(
     strict: bool = False,
     provider=None,
     library: list[LibraryAlbum] | None = None,
+    ignore=None,
 ) -> AuditReport:
     """Fetch, filter, and match a collection against the library.
 
@@ -96,6 +105,16 @@ def run_audit(
             if m.status is MatchStatus.UNCERTAIN else m
             for m in matches
         ]
+
+    if ignore is None:
+        ignore = IgnoreStore.load(cfg.collection.ignore_path)
+    # An owned album is never "ignored" — if you ignored it and later ripped it,
+    # the rip wins and the stale entry stops mattering without any cleanup.
+    matches = [
+        replace(m, ignored=True)
+        if m.status is not MatchStatus.OWNED and m.item.key in ignore else m
+        for m in matches
+    ]
 
     return AuditReport(
         source=source,

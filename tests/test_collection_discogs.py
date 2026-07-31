@@ -307,6 +307,32 @@ def test_corrupt_cache_is_ignored(tmp_path):
     assert len(calls) == 1
 
 
+def test_cached_only_never_hits_the_network(tmp_path):
+    calls: list[str] = []
+    client = DiscogsClient(
+        fetcher=_fetcher([_page(1, 1, [{"id": 1}])], calls),
+        sleep=lambda _: None, cache_dir=tmp_path,
+    )
+    assert client.fetch_raw("someone", cached_only=True) == []
+    assert calls == []
+
+
+def test_cached_only_ignores_the_ttl(tmp_path):
+    """Artist and title don't go stale, so an expired cache still answers —
+    the alternative is no answer at all."""
+    calls: list[str] = []
+    clock = [1000.0]
+    client = DiscogsClient(
+        fetcher=_fetcher([_page(1, 1, [{"id": 1}])], calls),
+        sleep=lambda _: None, cache_dir=tmp_path, cache_ttl_hours=1.0,
+        now=lambda: clock[0],
+    )
+    client.fetch_raw("someone")          # warms the cache
+    clock[0] += 3600 * 48                # long expired
+    assert client.fetch_raw("someone", cached_only=True) == [{"id": 1}]
+    assert len(calls) == 1               # no second request
+
+
 def test_cache_filename_cannot_escape_the_cache_dir(tmp_path):
     client = DiscogsClient(cache_dir=tmp_path)
     path = client.cache_path("../../etc/passwd")

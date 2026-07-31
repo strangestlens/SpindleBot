@@ -19,6 +19,7 @@ def _cfg(tmp_path, account="", media=("cd",)):
         collection=SimpleNamespace(
             source="fixture", account=account, media=media, index="auto",
             cache_dir=tmp_path / "cache", cache_ttl_hours=24.0,
+            ignore_path=tmp_path / "collection-ignore.json",
         ),
         secrets=SimpleNamespace(discogs=SimpleNamespace(token="")),
     )
@@ -91,7 +92,9 @@ def test_json_output(tmp_path, collection_file, capsys):
     )
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert payload["counts"] == {"owned": 1, "uncertain": 0, "missing": 1}
+    assert payload["counts"] == {
+        "owned": 1, "uncertain": 0, "missing": 1, "ignored": 0,
+    }
     assert payload["fetched"] == 3
     assert payload["considered"] == 2
     assert payload["media"] == ["cd"]

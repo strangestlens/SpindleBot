@@ -23,6 +23,7 @@ def _cfg(tmp_path):
         collection=SimpleNamespace(
             source="fixture", account="", media=("cd",), index="beets",
             cache_dir=tmp_path / "cache", cache_ttl_hours=24.0,
+            ignore_path=tmp_path / "collection-ignore.json",
         ),
         secrets=SimpleNamespace(discogs=SimpleNamespace(token="")),
     )
