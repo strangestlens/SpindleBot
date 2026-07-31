@@ -85,7 +85,10 @@ def to_items(rows: list[dict], *, source: str = "fixture") -> list[CollectionIte
 class FixtureProvider:
     name: str = "fixture"
 
-    def fetch(self, account: str, *, refresh: bool = False) -> list[CollectionItem]:
+    def fetch(
+        self, account: str, *, refresh: bool = False, cached_only: bool = False
+    ) -> list[CollectionItem]:
+        # No remote to avoid: reading the file IS the local path.
         path = Path(account).expanduser()
         if not path.exists():
             raise CollectionFetchError(f"fixture collection not found: {path}")

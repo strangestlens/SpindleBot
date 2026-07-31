@@ -160,6 +160,19 @@ def test_resolve_key_rejects_empty():
         resolve_key("   ", source="discogs")
 
 
+@pytest.mark.parametrize("token", ["discogs:", ":26936627", ":"])
+def test_resolve_key_rejects_a_half_empty_key(token):
+    """These can never match a real item, so accepting them would write a dead
+    entry and leave you thinking you'd ignored something."""
+    with pytest.raises(ValueError, match="malformed key"):
+        resolve_key(token, source="discogs")
+
+
+def test_resolve_key_allows_a_colon_inside_the_id():
+    """Splits on the FIRST colon: a hand-written fixture id may contain one."""
+    assert resolve_key("fixture:disc:1", source="discogs") == "fixture:disc:1"
+
+
 # ── audit overlay ─────────────────────────────────────────────────────────────
 
 def test_ignored_item_leaves_the_missing_bucket(tmp_path):
@@ -285,6 +298,58 @@ def test_cli_removing_something_not_ignored_says_so(tmp_path, capsys):
 def test_cli_bare_invocation_lists(tmp_path, capsys):
     assert cmd_collection_ignore(_cfg(tmp_path), []) == 0
     assert "Nothing ignored." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("flag", ["--remove", "--unignore"])
+def test_cli_remove_without_ids_does_not_silently_list(tmp_path, capsys, flag):
+    """Asking to remove and being shown a listing is the wrong answer to the
+    wrong question."""
+    rc = cmd_collection_ignore(_cfg(tmp_path), [flag])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Usage" in err and "--remove <id>" in err
+
+
+def test_cli_rejects_a_malformed_key(tmp_path, capsys):
+    rc = cmd_collection_ignore(_cfg(tmp_path), ["discogs:"])
+    assert rc == 1
+    assert "invalid id" in capsys.readouterr().err
+    assert not _cfg(tmp_path).collection.ignore_path.exists()
+
+
+def test_cli_warns_when_an_id_is_not_in_the_collection(tmp_path, shelf, capsys):
+    """A mistyped id would otherwise be written and quietly do nothing forever."""
+    cfg = _cfg(tmp_path, account=str(shelf))
+    cfg.collection.source = "fixture"
+    assert cmd_collection_ignore(cfg, ["99999"]) == 0
+    captured = capsys.readouterr()
+    assert "isn't in the collection" in captured.err
+    # Still recorded — you may be ignoring something you've since removed.
+    assert "fixture:99999" in IgnoreStore.load(cfg.collection.ignore_path)
+
+
+def test_cli_does_not_warn_for_a_real_id(tmp_path, shelf, capsys):
+    cfg = _cfg(tmp_path, account=str(shelf))
+    cfg.collection.source = "fixture"
+    cmd_collection_ignore(cfg, ["1"])
+    assert "isn't in the collection" not in capsys.readouterr().err
+
+
+def test_cli_enrichment_never_touches_the_network(tmp_path, monkeypatch, capsys):
+    """A bookkeeping command must not stall on HTTP — "best-effort" has to
+    cover slow, not just broken."""
+    from spindlebot.collections.discogs import DiscogsProvider
+
+    seen = {}
+
+    def spy(self, account, *, refresh=False, cached_only=False):
+        seen["cached_only"] = cached_only
+        return []
+
+    monkeypatch.setattr(DiscogsProvider, "fetch", spy)
+    cfg = _cfg(tmp_path, account="someone")
+    assert cmd_collection_ignore(cfg, ["1"]) == 0
+    assert seen["cached_only"] is True
 
 
 def test_cli_clear_requires_confirmation(tmp_path, capsys):

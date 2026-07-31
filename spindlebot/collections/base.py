@@ -16,10 +16,16 @@ from spindlebot.core.errors import UnknownProvider
 class CollectionProvider(Protocol):
     name: str
 
-    def fetch(self, account: str, *, refresh: bool = False) -> list[CollectionItem]:
+    def fetch(
+        self, account: str, *, refresh: bool = False, cached_only: bool = False
+    ) -> list[CollectionItem]:
         """Return every item in `account`'s collection.
 
-        `refresh` bypasses any local cache.
+        `refresh` bypasses any local cache. `cached_only` is the opposite
+        promise: answer from local data or not at all, never from the network.
+        Callers that only want labels use it so a bookkeeping command can't
+        stall on HTTP. A provider with no remote (fixture) satisfies it for
+        free.
         """
         ...
 

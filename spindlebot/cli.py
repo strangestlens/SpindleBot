@@ -943,6 +943,11 @@ def cmd_collection_ignore(cfg, args: list[str]) -> int:
         return fail(str(e))
 
     # ── list ─────────────────────────────────────────────────────────────────
+    # A bare invocation lists, but `--remove` with no ids must NOT: asking to
+    # remove something and being shown a listing is the wrong answer to the
+    # wrong question.
+    if removing and not tokens:
+        return fail("Usage: spindlebot collection-ignore --remove <id> [<id>...]")
     if "--list" in args or (not tokens and "--clear" not in args):
         entries = store.listing()
         payload = {
@@ -1007,23 +1012,29 @@ def cmd_collection_ignore(cfg, args: list[str]) -> int:
         except ValueError:
             return fail(f"invalid id: {token!r}")
 
-    # Best-effort: pull artist/title off the cached collection so `--list` is
-    # readable later. A cache miss must never block an ignore, so this is
-    # wrapped rather than allowed to fail the command.
+    # Best-effort: pull artist/title off the LOCAL collection cache so `--list`
+    # is readable later. cached_only means this can never reach the network —
+    # a bookkeeping command must not stall on HTTP, and "best-effort" has to
+    # cover slow as well as broken. Still wrapped, for a corrupt cache.
     details: dict = {}
     try:
         from spindlebot.collections.base import get_provider
         account = cfg.collection.account
         if account:
             provider = get_provider(source, cfg)
-            details = {i.key: i for i in provider.fetch(account)}
+            details = {i.key: i for i in provider.fetch(account, cached_only=True)}
     except (SpindleBotError, ValueError, RuntimeError, OSError):
         details = {}
 
     reason = _opt("--reason") or ""
-    added = []
+    added, unknown = [], []
     for key in keys:
         item = details.get(key)
+        # Only meaningful when we actually know the collection. A mistyped id
+        # is otherwise written and quietly does nothing forever — you'd think
+        # you'd ignored a disc and it would keep showing up.
+        if details and item is None:
+            unknown.append(key)
         entry = store.add(
             key,
             artist=item.artist if item else "",
@@ -1039,10 +1050,13 @@ def cmd_collection_ignore(cfg, args: list[str]) -> int:
     payload = {
         "added": [{"key": e.key, "artist": e.artist, "title": e.title,
                    "reason": e.reason} for e in added],
+        "not_in_collection": unknown,
         "count": len(store),
     }
     lines = [f"Ignoring {len(added)} item(s):"]
     lines += [f"  ✓ {e.key}  {e.label}" for e in added]
+    for key in unknown:
+        print(f"  ⚠  {key} isn't in the collection — check the id", file=sys.stderr)
     lines.append(f"\nUndo:  spindlebot collection-ignore --remove {added[0].key}")
     return emit(payload, lines)
 

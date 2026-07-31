@@ -166,8 +166,22 @@ def resolve_key(token: str, *, source: str) -> str:
 
     The audit prints full keys, but nobody wants to retype `discogs:` — and a
     bare id is what you get from a Discogs URL.
+
+    Both halves must be non-empty. A key like `discogs:` can never match a real
+    CollectionItem, so accepting it would write a permanently dead entry and
+    leave you thinking you'd ignored something.
+
+    Splits on the FIRST colon only: `source` never contains one, but a
+    hand-written fixture id may, and `fixture:1:2` is a legitimate key.
     """
     token = token.strip()
     if not token:
         raise ValueError("empty id")
-    return token if ":" in token else f"{source}:{token}"
+    if ":" not in token:
+        return f"{source}:{token}"
+    prefix, _, rest = token.partition(":")
+    if not prefix or not rest:
+        raise ValueError(
+            f"malformed key {token!r} — expected <source>:<id> or a bare id"
+        )
+    return token
