@@ -70,6 +70,8 @@ Replacing "library = whatever is at known paths" with a **SpindleBot-owned SQLit
 
 **Workflow:** one feature branch per phase off latest `main`; sub-tasks are ordered commits on that branch (each green); push + open a PR only when asked; PRs squash-merge to `main`; `git pull` main before the next branch.
 
+**Branch naming:** use the conventional-commit style — `feat/<the-feature>`, `fix/<the-fix>`, `docs/<what>`, `chore/<what>`, `ci/<what>`, `refactor/<what>`. Do **not** use the auto-generated `claude/<random-words>-<hash>` form; if a tool creates a branch with that name, rename it before pushing. The point is that a branch name says what the work is, so `git branch` and the worktree list stay readable.
+
 ## Current file map
 
 ```
