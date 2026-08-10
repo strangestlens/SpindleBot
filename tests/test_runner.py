@@ -1446,3 +1446,85 @@ def test_unparseable_log_does_not_hold_the_album(tmp_path):
 
     assert result.success
     assert len(imported) == 2, "no usable log identity means no gate at all"
+
+
+def test_same_album_title_by_different_artists_does_not_cross_match(tmp_path):
+    """Keying logs by title alone would release a batch against another
+    album's log — defeating the gate in exactly the mixed Import it exists for."""
+    cfg = _make_config(tmp_path)
+    imp = cfg.import_dir
+    _xld_log(imp / "GH-A.log", "Artist A", "Greatest Hits")
+    cfg.trigger = imp / "GH-A.log"
+    _init_db(cfg)
+
+    _write_flac(imp / "a1.flac", tags={"albumartist": "Artist A", "album": "Greatest Hits",
+                                       "discnumber": 1, "disctotal": 1})
+    # Same album TITLE, different artist, and its rip is still in progress.
+    _write_flac(imp / "b1.flac", tags={"albumartist": "Artist B", "album": "Greatest Hits",
+                                       "discnumber": 1, "disctotal": 1})
+
+    imported: list = []
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_recording_stub_beet(imported)):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert len(imported) == 1, "only the album whose log landed may import"
+    assert imported[0][2] == ["a1.flac"]
+    assert (imp / "b1.flac").exists(), "Artist B's in-progress rip stays put"
+
+
+def test_all_logs_for_one_album_are_archived(tmp_path):
+    """A multi-disc set writes one log per disc, all with the same identity.
+
+    Archiving only one leaves the rest in Import to trigger a spurious empty
+    import on the next watcher fire.
+    """
+    cfg = _make_config(tmp_path)
+    imp = cfg.import_dir
+    # XLD's "Rename" collision rule gives the second disc's log a new filename
+    # with an identical body.
+    _xld_log(imp / "Set.log", "Band", "Double Album")
+    _xld_log(imp / "Set 1.log", "Band", "Double Album")
+    cfg.trigger = imp / "Set.log"
+    _init_db(cfg)
+
+    for i in (1, 2):
+        _write_flac(imp / f"d{i}.flac", tags={"albumartist": "Band", "album": "Double Album",
+                                              "discnumber": i, "disctotal": 2})
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_stub_beet):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert (cfg.archive / "Set.log").exists()
+    assert (cfg.archive / "Set 1.log").exists(), "every log for the album is archived"
+    assert not list(imp.glob("*.log")), "no stale log left to trigger an empty run"
+
+
+def test_artist_discrepancy_still_matches_on_a_unique_album_title(tmp_path):
+    """A log saying "Various Artists" against a tag saying "Various" must not
+    strand the rip when that album title is unambiguous across the logs."""
+    cfg = _make_config(tmp_path)
+    imp = cfg.import_dir
+    _xld_log(imp / "Comp.log", "Various Artists", "Some Compilation")
+    _xld_log(imp / "Other.log", "Band", "Another Record")
+    cfg.trigger = imp / "Comp.log"
+    _init_db(cfg)
+
+    _write_flac(imp / "c1.flac", tags={"albumartist": "Various", "album": "Some Compilation",
+                                       "discnumber": 1, "disctotal": 1})
+    _write_flac(imp / "o1.flac", tags={"albumartist": "Band", "album": "Another Record",
+                                       "discnumber": 1, "disctotal": 1})
+
+    imported: list = []
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_recording_stub_beet(imported)):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert len(imported) == 2, "an artist-name discrepancy must not hold a rip"

@@ -124,9 +124,9 @@ def _read_album_tags(path: Path) -> tuple[str | None, str | None, str | None]:
     return albumartist, album, mb_albumid
 
 
-def normalize_album_title(title: str) -> str:
-    """Casefolded, whitespace-collapsed album title for log↔tag matching."""
-    return " ".join(title.split()).casefold()
+def normalize_for_match(value: str) -> str:
+    """Casefolded, whitespace-collapsed artist or album for log↔tag matching."""
+    return " ".join(value.split()).casefold()
 
 
 def parse_xld_log(log_path: str | Path) -> tuple[str, str] | None:

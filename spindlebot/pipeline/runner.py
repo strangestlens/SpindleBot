@@ -38,6 +38,7 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +51,7 @@ from spindlebot.disc import (
     count_discs,
     find_audio_files,
     group_by_album,
-    normalize_album_title,
+    normalize_for_match,
     parse_xld_log,
 )
 from spindlebot.pipeline.stages.notify import notify
@@ -119,16 +120,17 @@ class _AlbumBatch:
                   duplicate is detected and the rip must be moved out of Import
     staged_dir  — set once the batch's files have been moved into their own
                   directory for import; None before staging and after unstaging
-    log_path    — the XLD .log that marked this album's rip complete, if any.
-                  Only these logs are archived, so a held batch keeps the log
-                  it needs to be picked up on a later run.
+    log_paths   — every XLD .log marking this album's rip complete (a
+                  multi-disc set writes one per disc). Only these are archived,
+                  so a held batch keeps the logs it needs to be picked up on a
+                  later run, and no stale log lingers to trigger an empty run.
     """
     label: str
     beet_target: list[str]
     disc_source: str | Path | list[Path]
     source_files: list[Path]
     staged_dir: Optional[Path] = None
-    log_path: Optional[Path] = None
+    log_paths: list[Path] = field(default_factory=list)
 
 
 @dataclass
@@ -434,7 +436,7 @@ class ImportRunner:
         # very signal the completeness gate needs to release that album later.
         if has_log:
             cfg.archive.mkdir(parents=True, exist_ok=True)
-            imported_logs = {b.log_path for b in ready if b.log_path is not None}
+            imported_logs = {p for b in ready for p in b.log_paths}
             to_archive = sorted(imported_logs) or sorted(cfg.import_dir.glob("*.log"))
             for logfile in to_archive:
                 if not logfile.exists():
@@ -572,36 +574,71 @@ class ImportRunner:
         - Logs present but none parseable (empty, truncated, some other tool's
           `.log`). No identity information, so no judgement to make; holding
           here would strand the rip forever on an unreadable file.
-        - Exactly one batch and exactly one log. One rip, one completion marker,
-          no ambiguity to resolve — match them without comparing titles, so a
-          metadata quirk can't strand the common single-album case.
+        - Exactly one batch and exactly one album identity. One rip, one
+          completion marker, no ambiguity to resolve — match them without
+          comparing titles, so a metadata quirk can't strand the common
+          single-album case.
+
+        Logs are keyed by (artist, album), not album alone: two artists sharing
+        an album title ("Greatest Hits", "Live", anything self-titled) would
+        otherwise collide and release a batch against a DIFFERENT album's log —
+        defeating the gate in exactly the mixed Import it exists for. An
+        album-title-only fallback still applies when that title is unambiguous
+        across the logs, so an artist-name discrepancy ("Various Artists" vs
+        "Various") can't strand a rip either.
+
+        Each identity maps to a LIST of logs. One album legitimately produces
+        several: a multi-disc set writes one log per disc, and XLD's "Rename"
+        collision rule gives the later ones distinct filenames with identical
+        bodies. Keeping only one would leave the rest in Import to trigger a
+        spurious empty import later.
         """
         logs = sorted(p for p in album_dir.glob("*.log") if p.is_file())
         if not logs:
             return list(batches), []
 
-        by_album: dict[str, Path] = {}
+        identities: dict[tuple[str, str], list[Path]] = {}
         for log in logs:
             parsed = parse_xld_log(log)
-            if parsed is not None:
-                by_album[normalize_album_title(parsed[1])] = log
+            if parsed is None:
+                continue
+            key = (normalize_for_match(parsed[0]), normalize_for_match(parsed[1]))
+            identities.setdefault(key, []).append(log)
 
-        if not by_album:
+        if not identities:
             return list(batches), []
 
-        if len(batches) == 1 and len(by_album) == 1:
-            batches[0].log_path = next(iter(by_album.values()))
+        if len(batches) == 1 and len(identities) == 1:
+            batches[0].log_paths = list(next(iter(identities.values())))
             return list(batches), []
+
+        # The album-title fallback may only fire where the title identifies ONE
+        # album on both sides. If two logs — or two batches — share a title, the
+        # artist is the only thing that can tell them apart, and falling back
+        # would release a batch against the other album's log.
+        batch_albums = [normalize_for_match(self._batch_album_ids(b)[1]) for b in batches]
+        log_album_counts = Counter(album for _, album in identities)
+        batch_album_counts = Counter(batch_albums)
+        unambiguous = {
+            key[1]: key for key in identities if log_album_counts[key[1]] == 1
+        }
 
         ready: list[_AlbumBatch] = []
         held: list[_AlbumBatch] = []
-        for batch in batches:
-            _, album, _ = self._batch_album_ids(batch)
-            log = by_album.get(normalize_album_title(album)) if album else None
-            if log is None:
+        for batch, album in zip(batches, batch_albums):
+            artist = normalize_for_match(self._batch_album_ids(batch)[0])
+            exact = (artist, album)
+            if exact in identities:
+                key = exact
+            elif batch_album_counts[album] == 1:
+                key = unambiguous.get(album)
+            else:
+                key = None
+
+            if key is None or not album:
                 held.append(batch)
             else:
-                batch.log_path = log
+                batch.log_paths = list(identities[key])
                 ready.append(batch)
         return ready, held
 

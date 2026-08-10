@@ -15,7 +15,7 @@ from spindlebot.disc import (
     check_wait,
     count_discs,
     group_by_album,
-    normalize_album_title,
+    normalize_for_match,
     parse_xld_log,
 )
 
@@ -245,15 +245,15 @@ class TestParseXLDLog(unittest.TestCase):
         self.assertIsNone(parse_xld_log(Path("/nonexistent/nope.log")))
 
 
-class TestNormalizeAlbumTitle(unittest.TestCase):
+class TestNormalizeForMatch(unittest.TestCase):
     def test_casefolds_and_collapses_whitespace(self):
         self.assertEqual(
-            normalize_album_title("  Wish  You   Were Here [Remaster] "),
+            normalize_for_match("  Wish  You   Were Here [Remaster] "),
             "wish you were here [remaster]",
         )
 
     def test_matches_across_case_only_differences(self):
         self.assertEqual(
-            normalize_album_title("Animals (2018 Remix)"),
-            normalize_album_title("animals (2018 remix)"),
+            normalize_for_match("Animals (2018 Remix)"),
+            normalize_for_match("animals (2018 remix)"),
         )
