@@ -411,3 +411,54 @@ def test_cmd_finalize_dry_run_never_fails(tmp_path, capsys):
 
     assert rc == 0
     assert not any(c.args[0][1] == "move" for c in mock_sub.call_args_list)
+
+
+# ── beet argv shape ───────────────────────────────────────────────────────────
+#
+# These assert the LITERAL argv, not just that a move happened. The suite
+# previously checked only `argv[1] == "move"` with a mock that always returned
+# 0, so `beet move --yes` — which real beets rejects with "no such option",
+# exit 2 — passed CI while stranding every album in Processing forever.
+
+
+# Options real `beet move` accepts (beets 2.x). A flag outside this set is a
+# crash in production no matter what a MagicMock returns.
+_BEET_MOVE_OPTIONS = {
+    "-h", "--help", "-d", "--dest", "-c", "--copy",
+    "-p", "--pretend", "-t", "--timid", "-e", "--export", "-a", "--album",
+}
+
+
+def test_promote_beet_move_argv_is_exactly_the_scoped_move(tmp_path):
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing, "Argv Album")
+    _complete_all(album)
+
+    with patch(_SUBPROCESS, side_effect=_beet_move_stub(pending)) as mock_sub:
+        promote_album(album, "/bin/beet")
+
+    argv = next(c.args[0] for c in mock_sub.call_args_list if c.args[0][1] == "move")
+    assert argv == ["/bin/beet", "move", f"path:{album}/"]
+
+
+def test_promote_passes_no_unknown_options_to_beet_move(tmp_path):
+    """Every dash-prefixed argument must be a real `beet move` option.
+
+    `beet move` is non-interactive already; there is no confirmation flag to
+    pass. This is the regression guard for --yes.
+    """
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing, "Flag Album")
+    _complete_all(album)
+
+    with patch(_SUBPROCESS, side_effect=_beet_move_stub(pending)) as mock_sub:
+        promote_album(album, "/bin/beet")
+
+    argv = next(c.args[0] for c in mock_sub.call_args_list if c.args[0][1] == "move")
+    flags = [a for a in argv[2:] if a.startswith("-")]
+    unknown = [f for f in flags if f.split("=")[0] not in _BEET_MOVE_OPTIONS]
+    assert not unknown, f"not valid `beet move` options: {unknown}"

@@ -111,8 +111,11 @@ def promote_album(album_dir: str | Path, beet: str | Path, *, label: str = "") -
         )
 
     # Trailing slash per beets gotcha #3 — without it a path: query can miss.
+    # No confirmation flag: `beet move` is non-interactive by default (it is
+    # -t/--timid that ADDS confirmation). Passing --yes makes beets exit 2 with
+    # "no such option", which silently stranded every album in Processing.
     proc = subprocess.run(
-        [str(beet), "move", "--yes", f"path:{album_dir}/"],
+        [str(beet), "move", f"path:{album_dir}/"],
         capture_output=True,
         text=True,
     )

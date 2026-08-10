@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -44,7 +45,14 @@ from typing import Callable, Optional
 
 import shutil
 
-from spindlebot.disc import check_wait, count_discs, find_audio_files, group_by_album
+from spindlebot.disc import (
+    check_wait,
+    count_discs,
+    find_audio_files,
+    group_by_album,
+    normalize_album_title,
+    parse_xld_log,
+)
 from spindlebot.pipeline.stages.notify import notify
 from spindlebot.pipeline.stages.pretag import posttag, pretag
 
@@ -100,18 +108,27 @@ class _AlbumBatch:
     """One album's worth of work resolved out of a (possibly mixed) Import dir.
 
     label       — human-readable identifier for logs
-    beet_target — argv tail passed to `beet import`: a single directory string
-                  (single-album/untagged case) or an explicit file-path list
-                  (one album out of a flat mixed dir)
+    beet_target — argv tail passed to `beet import`. ALWAYS a single directory
+                  string. Never a file list: beets treats each non-directory
+                  path as its own top-level import, so N files become N
+                  single-track albums and tracks 2..N are then duplicate-skipped
+                  against the album track 1 just created.
     disc_source — what disc.check_wait/count_discs read: the directory string or
-                  this album's file list, mirroring beet_target
+                  this album's file list
     source_files— the concrete audio files backing this batch, used when a
                   duplicate is detected and the rip must be moved out of Import
+    staged_dir  — set once the batch's files have been moved into their own
+                  directory for import; None before staging and after unstaging
+    log_path    — the XLD .log that marked this album's rip complete, if any.
+                  Only these logs are archived, so a held batch keeps the log
+                  it needs to be picked up on a later run.
     """
     label: str
     beet_target: list[str]
     disc_source: str | Path | list[Path]
     source_files: list[Path]
+    staged_dir: Optional[Path] = None
+    log_path: Optional[Path] = None
 
 
 @dataclass
@@ -215,6 +232,27 @@ class ImportRunner:
             self._log("✓  disc check")
             result.stages.append(StageResult("disc_check", success=True))
 
+        # Stage 3b: completeness gate — an album imports only once its XLD .log
+        # has landed. check_wait cannot cover this: a single-disc album reports
+        # ready at track 1 of N, so a rip still in progress would be swept in.
+        if cfg.force:
+            self._log("⏭  log check skipped (--force)", echo=False)
+        else:
+            ready, held = self._gate_on_logs(ready, album_dir)
+            for batch in held:
+                self._log(
+                    f"⏸  [{batch.label}]: no completed .log yet — waiting for the rip"
+                )
+            if held:
+                self._log("   (run with --force to import immediately)", echo=False)
+            if not ready:
+                result.success = True
+                result.stages.append(
+                    StageResult("log_check", success=True, message="waiting on .log")
+                )
+                return result
+            result.stages.append(StageResult("log_check", success=True))
+
         # Stage 4: pretag — per-file normalization over the whole directory.
         # Order-independent; running once matches prior behavior.
         self._log("🏷  pretagging")
@@ -227,13 +265,34 @@ class ImportRunner:
             result.stages.append(StageResult("pretag", success=False, message=str(exc)))
             return result
 
+        # Stage 4b: staging — a batch carved out of a flat multi-album Import has
+        # no directory of its own, and beets MUST be given a directory (see
+        # _stage_batch). A batch that already targets one (single album, or a
+        # dropped album directory) is left exactly as it was.
+        run_dir = None
+        if any(not b.beet_target for b in ready):
+            run_dir = Path(tempfile.mkdtemp(prefix="import-", dir=self._stage_root()))
+            for batch in ready:
+                if not batch.beet_target:
+                    self._stage_batch(batch, run_dir)
+
         # Stages 5 + 6: import each ready album on its own, then apply its
         # per-album multidisc fix. run_start scopes the later move/posttag/fetch
         # to everything imported in this run.
         run_start = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         for batch in ready:
             if not self._import_one_album(batch, result):
+                # Put every staged rip back in Import before bailing out — the
+                # files must never be left in a scratch dir the watcher and the
+                # user both ignore.
+                for staged in ready:
+                    self._unstage_batch(staged)
+                self._clear_run_dir(run_dir)
                 return result
+
+        for batch in ready:
+            self._clear_staging(batch)
+        self._clear_run_dir(run_dir)
 
         # Get artist/album name for notification (first album alphabetically).
         ls_proc = subprocess.run(
@@ -364,10 +423,17 @@ class ImportRunner:
                                     message=f"{pr.label} waiting: {waiting}")
                     )
 
-        # Stage 11: archive XLD logs (.log-triggered runs only)
+        # Stage 11: archive XLD logs (.log-triggered runs only).
+        # Only the logs belonging to albums that actually imported this run. A
+        # held batch keeps its log in Import — archiving it would delete the
+        # very signal the completeness gate needs to release that album later.
         if has_log:
             cfg.archive.mkdir(parents=True, exist_ok=True)
-            for logfile in sorted(cfg.import_dir.glob("*.log")):
+            imported_logs = {b.log_path for b in ready if b.log_path is not None}
+            to_archive = sorted(imported_logs) or sorted(cfg.import_dir.glob("*.log"))
+            for logfile in to_archive:
+                if not logfile.exists():
+                    continue
                 dest = cfg.archive / logfile.name
                 logfile.rename(dest)
                 self._log(f"Archived XLD log to: {dest}", echo=False)
@@ -473,13 +539,160 @@ class ImportRunner:
         batches: list[_AlbumBatch] = []
         for i, files in enumerate(groups.values(), start=1):
             label = self._batch_label(files) or f"{album_dir.name} #{i}"
+            # beet_target is filled in by _stage_batch: a multi-album batch has
+            # no directory of its own until its files are moved into one.
             batches.append(_AlbumBatch(
                 label=label,
-                beet_target=[str(p) for p in files],
+                beet_target=[],
                 disc_source=files,
                 source_files=list(files),
             ))
         return batches
+
+    def _gate_on_logs(
+        self, batches: list[_AlbumBatch], album_dir: Path
+    ) -> tuple[list[_AlbumBatch], list[_AlbumBatch]]:
+        """Split batches into (ready, held) on XLD .log presence.
+
+        An XLD .log is written when a rip FINISHES, so it is the only reliable
+        per-album completeness signal: `check_wait` can't help a single-disc
+        album, which reports ready at track 1 of N. A batch whose album has no
+        matching log is still being written and is held back.
+
+        The gate only ever holds an album when it can positively account for a
+        DIFFERENT one. It stays out of the way when it has nothing to say:
+
+        - No logs at all — a directory drop (Bandcamp download, manual
+          `spindlebot import <dir>`). There is no log to wait for.
+        - Logs present but none parseable (empty, truncated, some other tool's
+          `.log`). No identity information, so no judgement to make; holding
+          here would strand the rip forever on an unreadable file.
+        - Exactly one batch and exactly one log. One rip, one completion marker,
+          no ambiguity to resolve — match them without comparing titles, so a
+          metadata quirk can't strand the common single-album case.
+        """
+        logs = sorted(p for p in album_dir.glob("*.log") if p.is_file())
+        if not logs:
+            return list(batches), []
+
+        by_album: dict[str, Path] = {}
+        for log in logs:
+            parsed = parse_xld_log(log)
+            if parsed is not None:
+                by_album[normalize_album_title(parsed[1])] = log
+
+        if not by_album:
+            return list(batches), []
+
+        if len(batches) == 1 and len(by_album) == 1:
+            batches[0].log_path = next(iter(by_album.values()))
+            return list(batches), []
+
+        ready: list[_AlbumBatch] = []
+        held: list[_AlbumBatch] = []
+        for batch in batches:
+            _, album, _ = self._batch_album_ids(batch)
+            log = by_album.get(normalize_album_title(album)) if album else None
+            if log is None:
+                held.append(batch)
+            else:
+                batch.log_path = log
+                ready.append(batch)
+        return ready, held
+
+    def _stage_root(self) -> Path:
+        """Scratch parent for per-album import dirs.
+
+        A SIBLING of Import, never inside it: music-watcher.sh fires an import
+        on any directory created directly under the Import area, so staging
+        there would recursively re-trigger the pipeline. Same volume as Import
+        so moving a rip in is a rename, not a copy of several hundred MB.
+        """
+        root = self.cfg.import_dir.parent / ".spindlebot-import-work"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _stage_batch(self, batch: _AlbumBatch, run_dir: Path) -> None:
+        """Move one album's files into their own directory and retarget the batch.
+
+        beets must be handed a DIRECTORY. Given loose file paths it treats each
+        as its own top-level import and builds a single-track album per file.
+        """
+        staged = run_dir / _safe_name(batch.label)
+        staged.mkdir(parents=True, exist_ok=True)
+
+        moved: list[Path] = []
+        for src in batch.source_files:
+            if not src.exists():
+                continue
+            dest = staged / src.name
+            if dest.exists():
+                dest = _unique_dest(dest)
+            shutil.move(str(src), str(dest))
+            moved.append(dest)
+
+        batch.staged_dir = staged
+        batch.source_files = moved
+        batch.beet_target = [str(staged)]
+        batch.disc_source = str(staged)
+        self._log(f"Staged {len(moved)} file(s) for import [{batch.label}]", echo=False)
+
+    def _unstage_batch(self, batch: _AlbumBatch) -> None:
+        """Move a staged batch's files back to Import and drop the staging dir.
+
+        Import is where an unimported rip belongs — leaving files in a scratch
+        directory would strand them somewhere the watcher never looks.
+        """
+        if batch.staged_dir is None:
+            return
+
+        restored: list[Path] = []
+        for src in batch.source_files:
+            if not src.exists():
+                continue
+            dest = self.cfg.import_dir / src.name
+            if dest.exists():
+                dest = _unique_dest(dest)
+            shutil.move(str(src), str(dest))
+            restored.append(dest)
+
+        if restored:
+            self._log(
+                f"Restored {len(restored)} file(s) to Import [{batch.label}]", echo=False
+            )
+        shutil.rmtree(batch.staged_dir, ignore_errors=True)
+        batch.staged_dir = None
+        batch.source_files = restored
+        batch.beet_target = []
+        batch.disc_source = restored
+
+    def _clear_staging(self, batch: _AlbumBatch) -> None:
+        """Tear down a staging dir after a successful import.
+
+        beets is configured to MOVE on import, so the directory is normally
+        empty by now. If any audio survived (a `copy`-configured beets, a
+        partially skipped import) it is put back in Import rather than deleted —
+        never discard audio to tidy up a scratch dir.
+        """
+        if batch.staged_dir is None:
+            return
+        if find_audio_files(batch.staged_dir):
+            self._unstage_batch(batch)
+            return
+        shutil.rmtree(batch.staged_dir, ignore_errors=True)
+        batch.staged_dir = None
+
+    @staticmethod
+    def _clear_run_dir(run_dir: Optional[Path]) -> None:
+        """Remove the run's staging parent once every batch has been torn down.
+
+        Only removes it when empty — a leftover directory means a batch still
+        holds audio, and that is never something to delete on the way out.
+        """
+        if run_dir is None or not run_dir.exists():
+            return
+        if not any(run_dir.iterdir()):
+            run_dir.rmdir()
 
     @staticmethod
     def _batch_label(files: list[Path]) -> str:
@@ -628,6 +841,10 @@ class ImportRunner:
         the files where they are — never silently strand or discard them)."""
         existing = self._existing_album_dir(batch, import_start)
         if existing is None:
+            # Files belong back in Import, not in the scratch dir — this branch
+            # exists precisely to leave an unexplained no-op where the user
+            # (and the next watcher fire) will find it.
+            self._unstage_batch(batch)
             self._log(
                 f"⚠  {batch.label} — nothing imported and no matching album in the "
                 "library; leaving files in Import for inspection"

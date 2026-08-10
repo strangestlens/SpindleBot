@@ -359,6 +359,27 @@ def _fresh_import_stub_beet(argv, *args, **kwargs):
 _stub_beet = _fresh_import_stub_beet
 
 
+def _recording_stub_beet(recorder: list):
+    """_fresh_import_stub_beet that snapshots each `beet import` target.
+
+    Records (target, is_dir, sorted audio filenames inside) AT CALL TIME: the
+    runner tears its staging directories down before `run()` returns, so a test
+    cannot inspect them afterwards.
+    """
+    def stub(argv, *args, **kwargs):
+        argv = list(argv)
+        if len(argv) >= 2 and argv[1] == "import":
+            for target in argv[2:]:
+                p = Path(target)
+                names = (
+                    sorted(f.name for f in p.iterdir() if f.suffix == ".flac")
+                    if p.is_dir() else []
+                )
+                recorder.append((target, p.is_dir(), names))
+        return _fresh_import_stub_beet(argv, *args, **kwargs)
+    return stub
+
+
 def test_mixed_import_imports_each_album_separately(tmp_path):
     """Two complete albums in one flat Import → two isolated beet imports,
     each fed only its own files (never the mixed pile)."""
@@ -406,19 +427,20 @@ def test_waiting_multidisc_does_not_block_or_contaminate_complete_album(tmp_path
     _write_flac(imp / "dp1.flac", tags={"albumartist": "Daft Punk", "album": "Discovery",
                                         "discnumber": 1, "disctotal": 1})
 
+    imported: list = []
     with patch(_PRETAG, return_value=True), \
          patch(_POSTTAG, return_value=0), \
-         patch(_SUBPROCESS, side_effect=_stub_beet) as mock_sub:
+         patch(_SUBPROCESS, side_effect=_recording_stub_beet(imported)):
         result = ImportRunner(cfg).run()
 
     assert result.success
-    import_calls = _beet_import_calls(mock_sub)
-    # Exactly one album imported — the complete one.
-    assert len(import_calls) == 1
-    targets = import_calls[0][2:]
-    assert any("dp1.flac" in t for t in targets)
-    assert not any("rh_d1.flac" in t for t in targets), \
-        "the waiting multi-disc album must not be imported"
+    # Exactly one album imported — the complete one — and beets was handed a
+    # DIRECTORY holding only that album's files.
+    assert len(imported) == 1
+    target, is_dir, names = imported[0]
+    assert is_dir, f"beet import must receive a directory, got {target!r}"
+    assert names == ["dp1.flac"], \
+        "the waiting multi-disc album must not be imported alongside it"
 
     # The waiting album's file is left untouched in Import.
     assert (imp / "rh_d1.flac").exists()
@@ -1195,7 +1217,13 @@ def test_mixed_new_and_duplicate_in_one_run(tmp_path):
         backward = any(a.startswith("added:..") for a in argv)
 
         if cmd == "import":
-            last_import["targets"] = [str(t) for t in argv[2:]]
+            # Targets are staging DIRECTORIES; identify the album by what is
+            # inside, not by the argv string.
+            names = []
+            for t in argv[2:]:
+                p = Path(t)
+                names.extend(f.name for f in p.iterdir()) if p.is_dir() else names.append(p.name)
+            last_import["targets"] = names
             return MagicMock(returncode=0, stdout="", stderr="")
 
         if is_ls and forward:
@@ -1234,3 +1262,187 @@ def test_mixed_new_and_duplicate_in_one_run(tmp_path):
     # Both albums produced a beet_import success; exactly one was a duplicate.
     assert sum(1 for s in result.stages if s.name == "beet_import" and s.success) == 2
     assert sum(1 for s in result.stages if s.name == "duplicate_check") == 1
+
+
+# ── beets must be handed DIRECTORIES, never loose files ───────────────────────
+#
+# Regression guard for the 2026-08-09 incident: a flat Import holding two albums
+# fed `beet import` an explicit file list. beets treats each non-directory path
+# as its own top-level import, so five files became five single-track albums;
+# track 1 imported and tracks 2..5 were duplicate-skipped against it. Both
+# albums silently lost 4 of 5 tracks while the run reported success.
+
+
+def _xld_log(path: Path, artist: str, album: str) -> None:
+    """Write a minimal XLD log with the real header shape."""
+    path.write_text(
+        "X Lossless Decoder version 20250302 (157.2)\n\n"
+        "XLD extraction logfile from 2026-08-09 22:46:09 -0400\n\n"
+        f"{artist} / {album}\n\n"
+        "Used drive : HL-DT-ST DVDRAM GP75N (revision 1.01)\n",
+        encoding="utf-8",
+    )
+
+
+def test_mixed_import_never_passes_a_bare_file_to_beet(tmp_path):
+    """Every `beet import` target is a directory holding exactly one album."""
+    cfg = _make_config(tmp_path)
+    imp = cfg.import_dir
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    for i in (1, 2, 3):
+        _write_flac(imp / f"rh{i}.flac", tags={"albumartist": "Radiohead", "album": "Kid A",
+                                              "discnumber": 1, "disctotal": 1})
+    for i in (1, 2):
+        _write_flac(imp / f"dp{i}.flac", tags={"albumartist": "Daft Punk", "album": "Discovery",
+                                              "discnumber": 1, "disctotal": 1})
+
+    imported: list = []
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_recording_stub_beet(imported)):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert len(imported) == 2, "each album gets its own import"
+    for target, is_dir, names in imported:
+        assert is_dir, f"beet import must receive a directory, got {target!r}"
+    grouped = sorted(names for _, _, names in imported)
+    assert grouped == [["dp1.flac", "dp2.flac"],
+                       ["rh1.flac", "rh2.flac", "rh3.flac"]], \
+        "every track of an album must reach beets in one directory"
+
+
+def test_failed_import_returns_staged_files_to_import(tmp_path):
+    """A staged rip must never be left in the scratch dir when import fails."""
+    cfg = _make_config(tmp_path)
+    imp = cfg.import_dir
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    _write_flac(imp / "a1.flac", tags={"albumartist": "A", "album": "One",
+                                       "discnumber": 1, "disctotal": 1})
+    _write_flac(imp / "b1.flac", tags={"albumartist": "B", "album": "Two",
+                                       "discnumber": 1, "disctotal": 1})
+
+    def failing_import(argv, *args, **kwargs):
+        argv = list(argv)
+        if len(argv) >= 2 and argv[1] == "import":
+            return MagicMock(returncode=1, stdout="", stderr="boom")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=failing_import):
+        result = ImportRunner(cfg).run()
+
+    assert not result.success
+    assert (imp / "a1.flac").exists(), "staged files must be restored to Import"
+    assert (imp / "b1.flac").exists()
+    work = cfg.import_dir.parent / ".spindlebot-import-work"
+    assert not work.exists() or not any(work.iterdir()), "no scratch dirs left behind"
+
+
+# ── .log completeness gate ────────────────────────────────────────────────────
+
+
+def test_album_without_its_log_is_held(tmp_path):
+    """A rip still being written has no .log yet and must not be imported.
+
+    check_wait cannot catch this: a single-disc album reports ready at track 1
+    of N, so without the log gate a half-ripped album is swept in.
+    """
+    cfg = _make_config(tmp_path)
+    imp = cfg.import_dir
+    _xld_log(imp / "Done.log", "Finished", "Done")
+    cfg.trigger = imp / "Done.log"
+    _init_db(cfg)
+
+    _write_flac(imp / "done1.flac", tags={"albumartist": "Finished", "album": "Done",
+                                          "discnumber": 1, "disctotal": 1})
+    # Mid-rip: files present, no log of its own.
+    _write_flac(imp / "wip1.flac", tags={"albumartist": "Ripping", "album": "In Progress",
+                                         "discnumber": 1, "disctotal": 1})
+
+    imported: list = []
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_recording_stub_beet(imported)):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert len(imported) == 1
+    assert imported[0][2] == ["done1.flac"]
+    # The in-progress rip is untouched, still in Import.
+    assert (imp / "wip1.flac").exists()
+    assert log_contains(cfg, "no completed .log yet")
+
+
+def test_held_album_keeps_its_log_unarchived(tmp_path):
+    """Archiving a held album's log would destroy the signal that releases it."""
+    cfg = _make_config(tmp_path)
+    imp = cfg.import_dir
+    _xld_log(imp / "Done.log", "Finished", "Done")
+    _xld_log(imp / "Other.log", "Someone", "Unmatched Album")
+    cfg.trigger = imp / "Done.log"
+    _init_db(cfg)
+
+    _write_flac(imp / "done1.flac", tags={"albumartist": "Finished", "album": "Done",
+                                          "discnumber": 1, "disctotal": 1})
+    _write_flac(imp / "wip1.flac", tags={"albumartist": "Ripping", "album": "In Progress",
+                                         "discnumber": 1, "disctotal": 1})
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_stub_beet):
+        ImportRunner(cfg).run()
+
+    assert (cfg.archive / "Done.log").exists(), "the imported album's log is archived"
+    assert (imp / "Other.log").exists(), "an unmatched log stays in Import"
+
+
+def test_force_bypasses_the_log_gate(tmp_path):
+    cfg = _make_config(tmp_path, force=True)
+    imp = cfg.import_dir
+    _xld_log(imp / "Done.log", "Finished", "Done")
+    cfg.trigger = imp / "Done.log"
+    _init_db(cfg)
+
+    _write_flac(imp / "done1.flac", tags={"albumartist": "Finished", "album": "Done",
+                                          "discnumber": 1, "disctotal": 1})
+    _write_flac(imp / "wip1.flac", tags={"albumartist": "Ripping", "album": "In Progress",
+                                         "discnumber": 1, "disctotal": 1})
+
+    imported: list = []
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_recording_stub_beet(imported)):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert len(imported) == 2, "--force imports the un-logged album too"
+
+
+def test_unparseable_log_does_not_hold_the_album(tmp_path):
+    """An empty or truncated .log carries no identity — it must not strand a rip."""
+    cfg = _make_config(tmp_path)
+    imp = cfg.import_dir
+    (imp / "Empty.log").write_text("", encoding="utf-8")
+    (imp / "Junk.log").write_text("not an XLD log\n", encoding="utf-8")
+    cfg.trigger = imp / "Empty.log"
+    _init_db(cfg)
+
+    _write_flac(imp / "a1.flac", tags={"albumartist": "A", "album": "One",
+                                       "discnumber": 1, "disctotal": 1})
+    _write_flac(imp / "b1.flac", tags={"albumartist": "B", "album": "Two",
+                                       "discnumber": 1, "disctotal": 1})
+
+    imported: list = []
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_recording_stub_beet(imported)):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert len(imported) == 2, "no usable log identity means no gate at all"

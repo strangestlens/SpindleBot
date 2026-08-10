@@ -124,6 +124,49 @@ def _read_album_tags(path: Path) -> tuple[str | None, str | None, str | None]:
     return albumartist, album, mb_albumid
 
 
+def normalize_album_title(title: str) -> str:
+    """Casefolded, whitespace-collapsed album title for log↔tag matching."""
+    return " ".join(title.split()).casefold()
+
+
+def parse_xld_log(log_path: str | Path) -> tuple[str, str] | None:
+    """Return (artist, album) from an XLD log header, or None if unreadable.
+
+    XLD writes the rip identity as a bare ``Artist / Album`` line in the header
+    block, before the ``Key : Value`` settings section::
+
+        X Lossless Decoder version 20250302 (157.2)
+
+        XLD extraction logfile from 2026-08-09 22:46:09 -0400
+
+        Pink Floyd / Animals (2018 remix)
+
+    Parsed from the BODY rather than the filename on purpose: XLD substitutes
+    lookalike characters for "/" and ":" when building filenames, so the stem
+    does not round-trip to the tag value.
+    """
+    try:
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    for line in text.splitlines()[:20]:
+        line = line.strip()
+        if not line or " / " not in line:
+            continue
+        if line.startswith(("X Lossless", "XLD ")):
+            continue
+        # The settings block below the header is "Key : Value"; the identity
+        # line has no such separator.
+        if " : " in line:
+            continue
+        artist, _, album = line.partition(" / ")
+        artist, album = artist.strip(), album.strip()
+        if artist and album:
+            return artist, album
+    return None
+
+
 def group_by_album(album_dir: str | Path) -> dict[str, list[Path]]:
     """Group a directory's audio files by deterministic album_key.
 
