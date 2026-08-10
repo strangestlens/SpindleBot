@@ -7,6 +7,7 @@ CLI usage (called by shell scripts):
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -124,6 +125,12 @@ def _read_album_tags(path: Path) -> tuple[str | None, str | None, str | None]:
     return albumartist, album, mb_albumid
 
 
+# A settings line is "Key : Value". The key is required to be slash-free so an
+# identity line carrying a colon ("Artist / Album : Subtitle") is not mistaken
+# for one.
+_SETTINGS_KEY = re.compile(r"^[^/]{1,40} : ")
+
+
 def normalize_for_match(value: str) -> str:
     """Casefolded, whitespace-collapsed artist or album for log↔tag matching."""
     return " ".join(value.split()).casefold()
@@ -152,13 +159,17 @@ def parse_xld_log(log_path: str | Path) -> tuple[str, str] | None:
 
     for line in text.splitlines()[:20]:
         line = line.strip()
-        if not line or " / " not in line:
+        if not line or line.startswith(("X Lossless", "XLD ")):
             continue
-        if line.startswith(("X Lossless", "XLD ")):
-            continue
-        # The settings block below the header is "Key : Value"; the identity
-        # line has no such separator.
-        if " : " in line:
+        # The settings block ("Used drive : …") begins right below the header.
+        # Stop rather than skip: past this point nothing is the identity, and
+        # a setting whose VALUE holds a slash (a drive model, say) must never
+        # be mistaken for one. The key is required to be slash-free so that
+        # "Artist / Album : Subtitle" is read as an identity, not a setting —
+        # an album title may legitimately contain " : ".
+        if _SETTINGS_KEY.match(line):
+            break
+        if " / " not in line:
             continue
         artist, _, album = line.partition(" / ")
         artist, album = artist.strip(), album.strip()

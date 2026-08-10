@@ -1528,3 +1528,36 @@ def test_artist_discrepancy_still_matches_on_a_unique_album_title(tmp_path):
 
     assert result.success
     assert len(imported) == 2, "an artist-name discrepancy must not hold a rip"
+
+
+def test_batches_sharing_a_label_stage_separately(tmp_path):
+    """Labels are not unique; staging directories must be.
+
+    Batches split on album_key (which prefers mb_albumid) while the label is
+    only "albumartist - album" text. Two editions of one album — or one rip
+    where some tracks carry an MBID and some don't — yield distinct batches
+    with identical labels. Sharing a staging dir would merge them back into the
+    mixed pile the split exists to prevent.
+    """
+    cfg = _make_config(tmp_path)
+    imp = cfg.import_dir
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    common = {"albumartist": "Band", "album": "Same Title",
+              "discnumber": 1, "disctotal": 1}
+    _write_flac(imp / "ed1.flac", tags={**common, "musicbrainz_albumid": "aaaa-1111"})
+    _write_flac(imp / "ed2.flac", tags={**common, "musicbrainz_albumid": "bbbb-2222"})
+
+    imported: list = []
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_recording_stub_beet(imported)):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert len(imported) == 2
+    targets = [t for t, _, _ in imported]
+    assert len(set(targets)) == 2, f"batches shared a staging dir: {targets}"
+    # Each directory holds only its own edition, not both files.
+    assert sorted(names for _, _, names in imported) == [["ed1.flac"], ["ed2.flac"]]

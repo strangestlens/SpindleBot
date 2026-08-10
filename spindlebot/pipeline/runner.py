@@ -274,9 +274,9 @@ class ImportRunner:
         run_dir = None
         if any(not b.beet_target for b in ready):
             run_dir = Path(tempfile.mkdtemp(prefix="import-", dir=self._stage_root()))
-            for batch in ready:
+            for i, batch in enumerate(ready, start=1):
                 if not batch.beet_target:
-                    self._stage_batch(batch, run_dir)
+                    self._stage_batch(batch, run_dir, i)
 
         # Stages 5 + 6: import each ready album on its own, then apply its
         # per-album multidisc fix. run_start scopes the later move/posttag/fetch
@@ -654,13 +654,21 @@ class ImportRunner:
         root.mkdir(parents=True, exist_ok=True)
         return root
 
-    def _stage_batch(self, batch: _AlbumBatch, run_dir: Path) -> None:
+    def _stage_batch(self, batch: _AlbumBatch, run_dir: Path, index: int) -> None:
         """Move one album's files into their own directory and retarget the batch.
 
         beets must be handed a DIRECTORY. Given loose file paths it treats each
         as its own top-level import and builds a single-track album per file.
+
+        The directory is prefixed with the batch index because labels are NOT
+        unique. Batches are split on album_key, which prefers mb_albumid, while
+        the label is only "albumartist - album" text — two editions of one album
+        (or one rip where some tracks carry an MBID and some don't) produce
+        distinct batches with identical labels. Sharing a staging directory
+        would merge them back into the single mixed pile the split exists to
+        prevent, and hand beets the same directory twice.
         """
-        staged = run_dir / _safe_name(batch.label)
+        staged = run_dir / f"{index:02d} - {_safe_name(batch.label)}"
         staged.mkdir(parents=True, exist_ok=True)
 
         moved: list[Path] = []

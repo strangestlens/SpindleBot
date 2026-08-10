@@ -257,3 +257,33 @@ class TestNormalizeForMatch(unittest.TestCase):
             normalize_for_match("Animals (2018 Remix)"),
             normalize_for_match("animals (2018 remix)"),
         )
+
+
+class TestParseXLDLogEdgeCases(unittest.TestCase):
+    """The identity line is found by stopping at the settings block, not by
+    rejecting colons — an album title may legitimately contain " : "."""
+
+    def test_album_title_with_a_spaced_colon_parses(self):
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "rip.log"
+            log.write_text(
+                "X Lossless Decoder version 20250302 (157.2)\n\n"
+                "XLD extraction logfile from 2026-08-09 22:46:09 -0400\n\n"
+                "Artist / Album : The Subtitle\n\n"
+                "Used drive : HL-DT-ST DVDRAM GP75N\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(parse_xld_log(log), ("Artist", "Album : The Subtitle"))
+
+    def test_a_slash_in_a_settings_value_is_not_an_identity(self):
+        """Scanning must STOP at the settings block, not merely skip lines:
+        a drive model containing a slash would otherwise be read as the album."""
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "rip.log"
+            log.write_text(
+                "X Lossless Decoder version 20250302 (157.2)\n\n"
+                "XLD extraction logfile from 2026-08-09 22:46:09 -0400\n\n"
+                "Used drive : Vendor / Model\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(parse_xld_log(log))
