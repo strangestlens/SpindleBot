@@ -7,6 +7,7 @@ CLI usage (called by shell scripts):
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -122,6 +123,60 @@ def _read_album_tags(path: Path) -> tuple[str | None, str | None, str | None]:
     album = first("album")
     mb_albumid = first("musicbrainz_albumid")
     return albumartist, album, mb_albumid
+
+
+# A settings line is "Key : Value". The key is required to be slash-free so an
+# identity line carrying a colon ("Artist / Album : Subtitle") is not mistaken
+# for one. Deliberately unbounded in length: a cap would let a long-keyed
+# setting slip past, and its value could then be read as the identity.
+_SETTINGS_KEY = re.compile(r"^[^/]+ : ")
+
+
+def normalize_for_match(value: str) -> str:
+    """Casefolded, whitespace-collapsed artist or album for log↔tag matching."""
+    return " ".join(value.split()).casefold()
+
+
+def parse_xld_log(log_path: str | Path) -> tuple[str, str] | None:
+    """Return (artist, album) from an XLD log header, or None if unreadable.
+
+    XLD writes the rip identity as a bare ``Artist / Album`` line in the header
+    block, before the ``Key : Value`` settings section::
+
+        X Lossless Decoder version 20250302 (157.2)
+
+        XLD extraction logfile from 2026-08-09 22:46:09 -0400
+
+        Pink Floyd / Animals (2018 remix)
+
+    Parsed from the BODY rather than the filename on purpose: XLD substitutes
+    lookalike characters for "/" and ":" when building filenames, so the stem
+    does not round-trip to the tag value.
+    """
+    try:
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    for line in text.splitlines()[:20]:
+        line = line.strip()
+        if not line or line.startswith(("X Lossless", "XLD ")):
+            continue
+        # The settings block ("Used drive : …") begins right below the header.
+        # Stop rather than skip: past this point nothing is the identity, and
+        # a setting whose VALUE holds a slash (a drive model, say) must never
+        # be mistaken for one. The key is required to be slash-free so that
+        # "Artist / Album : Subtitle" is read as an identity, not a setting —
+        # an album title may legitimately contain " : ".
+        if _SETTINGS_KEY.match(line):
+            break
+        if " / " not in line:
+            continue
+        artist, _, album = line.partition(" / ")
+        artist, album = artist.strip(), album.strip()
+        if artist and album:
+            return artist, album
+    return None
 
 
 def group_by_album(album_dir: str | Path) -> dict[str, list[Path]]:

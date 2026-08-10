@@ -3,6 +3,7 @@ Tests for spindlebot.disc — disc-detection logic used by music-import.sh.
 """
 import contextlib
 import struct
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -10,7 +11,13 @@ from unittest.mock import MagicMock, patch
 import mutagen.flac
 
 from spindlebot.core.albums import album_key
-from spindlebot.disc import check_wait, count_discs, group_by_album
+from spindlebot.disc import (
+    check_wait,
+    count_discs,
+    group_by_album,
+    normalize_for_match,
+    parse_xld_log,
+)
 
 
 def _mock_flac(discnumber: int = 1, disctotal: int = 1) -> MagicMock:
@@ -171,6 +178,111 @@ def test_group_by_album_untagged_files_stay_together(tmp_path):
     groups = group_by_album(tmp_path)
     assert len(groups) == 1
     assert sum(len(v) for v in groups.values()) == 2
+
+
+class TestParseXLDLog(unittest.TestCase):
+    """The .log is the only per-album completeness signal the pipeline has.
+
+    Parsed from the BODY, never the filename: XLD substitutes lookalike
+    characters for "/" and ":" when building filenames, so a real archived log
+    is named `Electronic Toys： …` (fullwidth colon) while the tag — and the
+    log body — carry a plain ASCII colon.
+    """
+
+    HEADER = (
+        "X Lossless Decoder version 20250302 (157.2)\n"
+        "\n"
+        "XLD extraction logfile from 2026-08-09 22:46:09 -0400\n"
+        "\n"
+        "{identity}\n"
+        "\n"
+        "Used drive : HL-DT-ST DVDRAM GP75N (revision 1.01)\n"
+        "Media type : Pressed CD\n"
+    )
+
+    def _log(self, tmp: Path, identity: str, name: str = "rip.log") -> Path:
+        path = tmp / name
+        path.write_text(self.HEADER.format(identity=identity), encoding="utf-8")
+        return path
+
+    def test_parses_artist_and_album(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            log = self._log(tmp, "Pink Floyd / Animals (2018 remix)")
+            self.assertEqual(parse_xld_log(log), ("Pink Floyd", "Animals (2018 remix)"))
+
+    def test_album_may_contain_a_colon(self):
+        """The settings block is skipped by ' : ', which a title must survive."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            log = self._log(
+                tmp, "Various Artists / Electronic Toys: A Retrospective"
+            )
+            self.assertEqual(
+                parse_xld_log(log),
+                ("Various Artists", "Electronic Toys: A Retrospective"),
+            )
+
+    def test_empty_log_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            log = tmp / "empty.log"
+            log.write_text("", encoding="utf-8")
+            self.assertIsNone(parse_xld_log(log))
+
+    def test_non_xld_log_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            log = tmp / "junk.log"
+            log.write_text("some other tool's output\n", encoding="utf-8")
+            self.assertIsNone(parse_xld_log(log))
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(parse_xld_log(Path("/nonexistent/nope.log")))
+
+
+class TestNormalizeForMatch(unittest.TestCase):
+    def test_casefolds_and_collapses_whitespace(self):
+        self.assertEqual(
+            normalize_for_match("  Wish  You   Were Here [Remaster] "),
+            "wish you were here [remaster]",
+        )
+
+    def test_matches_across_case_only_differences(self):
+        self.assertEqual(
+            normalize_for_match("Animals (2018 Remix)"),
+            normalize_for_match("animals (2018 remix)"),
+        )
+
+
+class TestParseXLDLogEdgeCases(unittest.TestCase):
+    """The identity line is found by stopping at the settings block, not by
+    rejecting colons — an album title may legitimately contain " : "."""
+
+    def test_album_title_with_a_spaced_colon_parses(self):
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "rip.log"
+            log.write_text(
+                "X Lossless Decoder version 20250302 (157.2)\n\n"
+                "XLD extraction logfile from 2026-08-09 22:46:09 -0400\n\n"
+                "Artist / Album : The Subtitle\n\n"
+                "Used drive : HL-DT-ST DVDRAM GP75N\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(parse_xld_log(log), ("Artist", "Album : The Subtitle"))
+
+    def test_a_slash_in_a_settings_value_is_not_an_identity(self):
+        """Scanning must STOP at the settings block, not merely skip lines:
+        a drive model containing a slash would otherwise be read as the album."""
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "rip.log"
+            log.write_text(
+                "X Lossless Decoder version 20250302 (157.2)\n\n"
+                "XLD extraction logfile from 2026-08-09 22:46:09 -0400\n\n"
+                "Used drive : Vendor / Model\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(parse_xld_log(log))
 
 
 if __name__ == "__main__":
