@@ -129,3 +129,12 @@ use; the active line of work is bidirectional lyric sync across locations. See
 for per-phase detail.
 
 Requires macOS on Apple Silicon, Python 3.11+, and beets.
+
+## License
+
+[Apache License 2.0](LICENSE) — Copyright 2026 Daniel Williams.
+
+Note for anyone packaging this: SpindleBot imports **mutagen**, which is
+GPL-2.0-or-later. Installing it as a dependency alongside SpindleBot is
+ordinary aggregation, but bundling the two into a single distributed
+binary is a combined work and pulls the GPL in with it.
