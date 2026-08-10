@@ -431,9 +431,17 @@ class ImportRunner:
                     )
 
         # Stage 11: archive XLD logs (.log-triggered runs only).
-        # Only the logs belonging to albums that actually imported this run. A
-        # held batch keeps its log in Import — archiving it would delete the
-        # very signal the completeness gate needs to release that album later.
+        #
+        # When the gate ran, archive ONLY the logs of albums that imported: a
+        # held batch keeps its log in Import, because archiving it would delete
+        # the very signal the gate needs to release that album later.
+        #
+        # When no batch carries a log, fall back to archiving every log present.
+        # That is not a weaker version of the rule above, it covers the runs
+        # where the gate never assigned any: --force skips the gate outright,
+        # and the gate stands down entirely when no log is parseable. Without
+        # the fallback the trigger log would survive the run, and the watcher
+        # would re-fire on it forever.
         if has_log:
             cfg.archive.mkdir(parents=True, exist_ok=True)
             imported_logs = {p for b in ready for p in b.log_paths}

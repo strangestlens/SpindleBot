@@ -1564,3 +1564,29 @@ def test_batches_sharing_a_label_stage_separately(tmp_path):
     assert len(set(targets)) == 2, f"batches shared a staging dir: {targets}"
     # Each directory holds only its own edition, not both files.
     assert sorted(names for _, _, names in imported) == [["ed1.flac"], ["ed2.flac"]]
+
+
+def test_force_still_archives_the_log(tmp_path):
+    """--force skips the gate, so no batch carries a log_path.
+
+    The archive fallback exists for exactly this run: without it the trigger
+    log survives and the watcher re-fires on it forever. Asserted here so the
+    fallback is contract-backed rather than comment-backed.
+    """
+    cfg = _make_config(tmp_path, force=True)
+    imp = cfg.import_dir
+    _xld_log(imp / "Forced.log", "Band", "Forced Album")
+    cfg.trigger = imp / "Forced.log"
+    _init_db(cfg)
+
+    _write_flac(imp / "f1.flac", tags={"albumartist": "Band", "album": "Forced Album",
+                                       "discnumber": 1, "disctotal": 1})
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch(_SUBPROCESS, side_effect=_stub_beet):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert (cfg.archive / "Forced.log").exists()
+    assert not list(imp.glob("*.log")), "a surviving log would re-fire the watcher"
