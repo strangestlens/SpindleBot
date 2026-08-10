@@ -22,6 +22,7 @@ the configured `directory` (Pending). It must NEVER be scoped to a whole-run
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,10 @@ class PromoteResult:
     # failed (nonzero exit): promoted stays False, the album stays in Processing,
     # and finalize will retry it on a later sweep.
     move_error: str = ""
+    # Set when the audio moved but its sidecars could not follow. The album IS
+    # promoted (the audio is in Pending), but that album is NOT complete, so the
+    # caller must surface this rather than report a clean promote.
+    sidecar_error: str = ""
 
 
 @dataclass
@@ -88,6 +93,54 @@ def _default_label(album_dir: Path) -> str:
     return f"{parent} - {album_dir.name}" if parent else album_dir.name
 
 
+def _beet_lines(beet: str | Path, *args: str) -> list[str]:
+    """Non-empty stdout lines from a `beet` query, or [] if the call failed."""
+    proc = subprocess.run(
+        [str(beet), *args], capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return []
+    return [ln for ln in proc.stdout.splitlines() if ln.strip()]
+
+
+def _relocate_sidecars(album_dir: Path, dest_dir: Path) -> None:
+    """Move every non-audio file left in album_dir to dest_dir, then clean up.
+
+    `beet move` relocates the ITEMS beets knows about — the audio. Sidecars are
+    invisible to it, so an album promoted without this step arrives in Pending
+    with no .lrc and no cover.jpg. That silently breaks the whole reason the
+    Processing area exists: Pending is supposed to be complete-by-construction
+    so sync and prune can trust it.
+
+    Sidecar basenames already match the audio basenames beets wrote (lyrics and
+    art are fetched AFTER the move into Processing), so names carry over as-is.
+    """
+    if not album_dir.is_dir():
+        # Nothing left behind — the move already took the whole directory with
+        # it. Not an error, and nothing to clean up.
+        return
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for src in sorted(album_dir.iterdir()):
+        if src.is_dir():
+            continue
+        if src.suffix.lower().lstrip(".") in AUDIO_EXTENSIONS:
+            continue
+        dest = dest_dir / src.name
+        if dest.exists():
+            dest.unlink()
+        shutil.move(str(src), str(dest))
+
+    # Only prune the emptied album dir (and a then-empty artist dir) — never a
+    # directory that still holds anything.
+    for candidate in (album_dir, album_dir.parent):
+        try:
+            if candidate.is_dir() and not any(candidate.iterdir()):
+                candidate.rmdir()
+        except OSError:
+            break
+
+
 def promote_album(album_dir: str | Path, beet: str | Path, *, label: str = "") -> PromoteResult:
     """Promote a single Processing album to Pending iff it is lyric-complete.
 
@@ -110,6 +163,11 @@ def promote_album(album_dir: str | Path, beet: str | Path, *, label: str = "") -
             waiting_on=_incomplete_tracks(album_dir),
         )
 
+    # Item ids are captured BEFORE the move: afterwards the path: query points
+    # at a location beets no longer has anything at, so ids are the only stable
+    # handle on where this album ended up.
+    item_ids = _beet_lines(beet, "ls", "-f", "$id", f"path:{album_dir}/")
+
     # Trailing slash per beets gotcha #3 — without it a path: query can miss.
     # No confirmation flag: `beet move` is non-interactive by default (it is
     # -t/--timid that ADDS confirmation). Passing --yes makes beets exit 2 with
@@ -127,7 +185,24 @@ def promote_album(album_dir: str | Path, beet: str | Path, *, label: str = "") -
             label=label,
             move_error=err,
         )
-    return PromoteResult(album_dir=album_dir, promoted=True, label=label)
+
+    sidecar_error = ""
+    moved_paths = (
+        _beet_lines(beet, "ls", "-f", "$path", f"id:{item_ids[0]}") if item_ids else []
+    )
+    if moved_paths:
+        _relocate_sidecars(album_dir, Path(moved_paths[0]).parent)
+    else:
+        sidecar_error = (
+            "could not resolve the album's new location; sidecars left in Processing"
+        )
+
+    return PromoteResult(
+        album_dir=album_dir,
+        promoted=True,
+        label=label,
+        sidecar_error=sidecar_error,
+    )
 
 
 def _album_dirs(processing_dir: Path) -> list[Path]:

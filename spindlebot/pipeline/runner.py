@@ -404,6 +404,11 @@ class ImportRunner:
                     result.stages.append(
                         StageResult("promote", success=True, message=f"{pr.label} → Pending")
                     )
+                    if pr.sidecar_error:
+                        # Audio reached Pending but its lyrics/art did not, so
+                        # that album is NOT complete-by-construction. Loud, but
+                        # not a run failure — the audio did move.
+                        self._log(f"⚠  {pr.label} — sidecars: {pr.sidecar_error}")
                 elif pr.move_error:
                     # Lyric-complete but the move to Pending failed — the album
                     # stays in Processing; `spindlebot finalize` will retry it.

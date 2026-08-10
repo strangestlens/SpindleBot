@@ -76,24 +76,47 @@ def _complete_all(album_dir: Path) -> None:
 def _beet_move_stub(pending_dir: Path):
     """subprocess.run side_effect modeling `beet move path:<album_dir>/`.
 
-    Parses the album dir out of the `path:...` argument and relocates that dir's
-    files (audio + sidecars) into the NESTED pending_dir/<albumartist>/<album>/
-    layout — mirroring this repo's beets `paths.default`
-    (`$albumartist/…/$track. $title`), where the artist is the source album
-    dir's parent (VA albums use `Compilations`).
+    Relocates into the NESTED pending_dir/<albumartist>/<album>/ layout —
+    mirroring this repo's beets `paths.default` (`$albumartist/…/$track. $title`),
+    where the artist is the source album dir's parent (VA albums use
+    `Compilations`).
+
+    Moves ONLY audio, because that is all real `beet move` does: it relocates
+    the ITEMS in the beets DB. Sidecars (.lrc, cover.jpg) are invisible to beets
+    and stay put. An earlier version of this stub moved every file in the
+    directory, which modelled beets wrongly and hid a live bug — promoted albums
+    were arriving in Pending with their lyrics and art orphaned in Processing.
+
+    Also answers the `$id` / `$path` item queries promote uses to discover where
+    beets actually put the album.
     """
+    moved: dict[str, Path] = {}
+
     def stub(argv, *args, **kwargs):
         argv = list(argv)
-        if len(argv) >= 2 and argv[1] == "move":
-            path_arg = next((a for a in argv if a.startswith("path:")), None)
-            if path_arg:
-                src = Path(path_arg[len("path:"):].rstrip("/"))
-                if src.exists():
-                    dest = pending_dir / src.parent.name / src.name
-                    dest.mkdir(parents=True, exist_ok=True)
-                    for f in list(src.iterdir()):
-                        shutil.move(str(f), str(dest / f.name))
-                    src.rmdir()
+        cmd = argv[1] if len(argv) >= 2 else ""
+        path_arg = next((a for a in argv if a.startswith("path:")), None)
+        id_arg = next((a for a in argv if a.startswith("id:")), None)
+
+        if cmd == "ls" and "$id" in argv and path_arg:
+            src = Path(path_arg[len("path:"):].rstrip("/"))
+            ids = [str(i) for i, _ in enumerate(sorted(src.glob("*.flac")), start=1)]
+            return MagicMock(returncode=0, stdout="\n".join(ids) + "\n", stderr="")
+
+        if cmd == "ls" and "$path" in argv and id_arg:
+            hit = moved.get(id_arg[len("id:"):])
+            return MagicMock(
+                returncode=0, stdout=(f"{hit}\n" if hit else ""), stderr=""
+            )
+
+        if cmd == "move" and path_arg:
+            src = Path(path_arg[len("path:"):].rstrip("/"))
+            if src.exists():
+                dest = pending_dir / src.parent.name / src.name
+                dest.mkdir(parents=True, exist_ok=True)
+                for i, f in enumerate(sorted(src.glob("*.flac")), start=1):
+                    shutil.move(str(f), str(dest / f.name))
+                    moved[str(i)] = dest / f.name
         return MagicMock(returncode=0, stdout="", stderr="")
 
     return stub
@@ -462,3 +485,56 @@ def test_promote_passes_no_unknown_options_to_beet_move(tmp_path):
     flags = [a for a in argv[2:] if a.startswith("-")]
     unknown = [f for f in flags if f.split("=")[0] not in _BEET_MOVE_OPTIONS]
     assert not unknown, f"not valid `beet move` options: {unknown}"
+
+
+def test_promote_carries_sidecars_into_pending(tmp_path):
+    """Pending is complete-by-construction — the .lrc and art must come along.
+
+    `beet move` only relocates the audio items beets knows about, so without an
+    explicit sidecar step an album arrives in Pending with zero lyrics and no
+    cover, while sync and prune treat Pending as trustworthy.
+    """
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing, "Sidecar Album", n_tracks=3)
+    _complete_all(album)
+    (album / "cover.jpg").write_bytes(b"\xff\xd8\xff\xe0jpeg")
+
+    with patch(_SUBPROCESS, side_effect=_beet_move_stub(pending)):
+        result = promote_album(album, "/bin/beet")
+
+    assert result.promoted
+    assert result.sidecar_error == ""
+
+    dest = pending / "Artist" / "Sidecar Album"
+    assert sorted(p.name for p in dest.glob("*.lrc")) == [
+        "01. Track.lrc", "02. Track.lrc", "03. Track.lrc",
+    ]
+    assert (dest / "cover.jpg").exists()
+    assert (dest / "cover.jpg").read_bytes() == b"\xff\xd8\xff\xe0jpeg"
+    # Nothing left orphaned behind in Processing.
+    assert not album.exists()
+
+
+def test_promote_reports_when_sidecars_cannot_follow(tmp_path):
+    """If the album's new location can't be resolved, say so — don't lie."""
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing, "Lost Album")
+    _complete_all(album)
+
+    def no_ids(argv, *args, **kwargs):
+        argv = list(argv)
+        if len(argv) >= 2 and argv[1] == "ls":
+            return MagicMock(returncode=1, stdout="", stderr="boom")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch(_SUBPROCESS, side_effect=no_ids):
+        result = promote_album(album, "/bin/beet")
+
+    assert result.promoted
+    assert "sidecars left in Processing" in result.sidecar_error
+    # The sidecars really are still there — the report matches reality.
+    assert sorted(p.name for p in album.glob("*.lrc")) == ["01. Track.lrc", "02. Track.lrc"]
