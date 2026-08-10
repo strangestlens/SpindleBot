@@ -180,10 +180,6 @@ def test_group_by_album_untagged_files_stay_together(tmp_path):
     assert sum(len(v) for v in groups.values()) == 2
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class TestParseXLDLog(unittest.TestCase):
     """The .log is the only per-album completeness signal the pipeline has.
 
@@ -287,3 +283,7 @@ class TestParseXLDLogEdgeCases(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertIsNone(parse_xld_log(log))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
