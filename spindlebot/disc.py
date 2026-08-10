@@ -127,8 +127,9 @@ def _read_album_tags(path: Path) -> tuple[str | None, str | None, str | None]:
 
 # A settings line is "Key : Value". The key is required to be slash-free so an
 # identity line carrying a colon ("Artist / Album : Subtitle") is not mistaken
-# for one.
-_SETTINGS_KEY = re.compile(r"^[^/]{1,40} : ")
+# for one. Deliberately unbounded in length: a cap would let a long-keyed
+# setting slip past, and its value could then be read as the identity.
+_SETTINGS_KEY = re.compile(r"^[^/]+ : ")
 
 
 def normalize_for_match(value: str) -> str:

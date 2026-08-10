@@ -616,7 +616,9 @@ class ImportRunner:
         # album on both sides. If two logs — or two batches — share a title, the
         # artist is the only thing that can tell them apart, and falling back
         # would release a batch against the other album's log.
-        batch_albums = [normalize_for_match(self._batch_album_ids(b)[1]) for b in batches]
+        # Read tags once per batch: _batch_album_ids opens files with mutagen.
+        batch_ids = [self._batch_album_ids(b) for b in batches]
+        batch_albums = [normalize_for_match(album) for _, album, _ in batch_ids]
         log_album_counts = Counter(album for _, album in identities)
         batch_album_counts = Counter(batch_albums)
         unambiguous = {
@@ -625,9 +627,8 @@ class ImportRunner:
 
         ready: list[_AlbumBatch] = []
         held: list[_AlbumBatch] = []
-        for batch, album in zip(batches, batch_albums):
-            artist = normalize_for_match(self._batch_album_ids(batch)[0])
-            exact = (artist, album)
+        for batch, (raw_artist, _, _), album in zip(batches, batch_ids, batch_albums):
+            exact = (normalize_for_match(raw_artist), album)
             if exact in identities:
                 key = exact
             elif batch_album_counts[album] == 1:

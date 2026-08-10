@@ -93,6 +93,24 @@ def _default_label(album_dir: Path) -> str:
     return f"{parent} - {album_dir.name}" if parent else album_dir.name
 
 
+def _same_bytes(a: Path, b: Path) -> bool:
+    """True if two files have identical contents. Sidecars are tiny."""
+    try:
+        return a.stat().st_size == b.stat().st_size and a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
+
+
+def _unique_dest(dest: Path) -> Path:
+    """A non-colliding sibling path, suffixing ' (2)', ' (3)', … before the ext."""
+    n = 2
+    while True:
+        candidate = dest.parent / f"{dest.stem} ({n}){dest.suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
 def _beet_lines(beet: str | Path, *args: str) -> list[str]:
     """Non-empty stdout lines from a `beet` query, or [] if the call failed."""
     proc = subprocess.run(
@@ -103,7 +121,7 @@ def _beet_lines(beet: str | Path, *args: str) -> list[str]:
     return [ln for ln in proc.stdout.splitlines() if ln.strip()]
 
 
-def _relocate_sidecars(album_dir: Path, dest_dir: Path) -> None:
+def _relocate_sidecars(album_dir: Path, dest_dir: Path) -> list[str]:
     """Move every non-audio file left in album_dir to dest_dir, then clean up.
 
     `beet move` relocates the ITEMS beets knows about — the audio. Sidecars are
@@ -114,21 +132,36 @@ def _relocate_sidecars(album_dir: Path, dest_dir: Path) -> None:
 
     Sidecar basenames already match the audio basenames beets wrote (lyrics and
     art are fetched AFTER the move into Processing), so names carry over as-is.
+
+    A destination sidecar is NEVER overwritten. A .lrc in Pending may be
+    hand-timed in lrc-editor or AI-retimed, and clobbering it with a freshly
+    fetched lrclib copy would destroy that work silently. Byte-identical
+    incoming files are dropped; differing ones are parked alongside under a
+    non-colliding name and reported, so a human resolves it.
+
+    Returns the names of any parked files.
     """
     if not album_dir.is_dir():
         # Nothing left behind — the move already took the whole directory with
         # it. Not an error, and nothing to clean up.
-        return
+        return []
 
+    parked: list[str] = []
     dest_dir.mkdir(parents=True, exist_ok=True)
     for src in sorted(album_dir.iterdir()):
         if src.is_dir():
             continue
         if src.suffix.lower().lstrip(".") in AUDIO_EXTENSIONS:
             continue
+
         dest = dest_dir / src.name
         if dest.exists():
-            dest.unlink()
+            if _same_bytes(src, dest):
+                # Identical content — the destination copy already IS this file.
+                src.unlink()
+                continue
+            dest = _unique_dest(dest)
+            parked.append(dest.name)
         shutil.move(str(src), str(dest))
 
     # Only prune the emptied album dir (and a then-empty artist dir) — never a
@@ -139,6 +172,8 @@ def _relocate_sidecars(album_dir: Path, dest_dir: Path) -> None:
                 candidate.rmdir()
         except OSError:
             break
+
+    return parked
 
 
 def promote_album(album_dir: str | Path, beet: str | Path, *, label: str = "") -> PromoteResult:
@@ -191,7 +226,12 @@ def promote_album(album_dir: str | Path, beet: str | Path, *, label: str = "") -
         _beet_lines(beet, "ls", "-f", "$path", f"id:{item_ids[0]}") if item_ids else []
     )
     if moved_paths:
-        _relocate_sidecars(album_dir, Path(moved_paths[0]).parent)
+        parked = _relocate_sidecars(album_dir, Path(moved_paths[0]).parent)
+        if parked:
+            sidecar_error = (
+                "destination sidecars already existed and differ; kept both — "
+                + ", ".join(parked)
+            )
     else:
         sidecar_error = (
             "could not resolve the album's new location; sidecars left in Processing"

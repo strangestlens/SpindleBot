@@ -1222,7 +1222,10 @@ def test_mixed_new_and_duplicate_in_one_run(tmp_path):
             names = []
             for t in argv[2:]:
                 p = Path(t)
-                names.extend(f.name for f in p.iterdir()) if p.is_dir() else names.append(p.name)
+                if p.is_dir():
+                    names.extend(f.name for f in p.iterdir())
+                else:
+                    names.append(p.name)
             last_import["targets"] = names
             return MagicMock(returncode=0, stdout="", stderr="")
 

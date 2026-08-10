@@ -538,3 +538,54 @@ def test_promote_reports_when_sidecars_cannot_follow(tmp_path):
     assert "sidecars left in Processing" in result.sidecar_error
     # The sidecars really are still there — the report matches reality.
     assert sorted(p.name for p in album.glob("*.lrc")) == ["01. Track.lrc", "02. Track.lrc"]
+
+
+def test_promote_never_clobbers_an_existing_sidecar(tmp_path):
+    """A .lrc in Pending may be hand-timed in lrc-editor or AI-retimed.
+
+    Overwriting it with a freshly fetched lrclib copy would destroy that work
+    silently, so a differing destination file is kept and the incoming one is
+    parked alongside for a human to resolve.
+    """
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing, "Retimed Album", n_tracks=1)
+    _complete_all(album)
+    (album / "01. Track.lrc").write_text("[00:00.00] freshly fetched\n")
+
+    # An edited sidecar already sits at the destination.
+    dest = pending / "Artist" / "Retimed Album"
+    dest.mkdir(parents=True)
+    (dest / "01. Track.lrc").write_text("[00:12.34] hand timed, do not lose\n")
+
+    with patch(_SUBPROCESS, side_effect=_beet_move_stub(pending)):
+        result = promote_album(album, "/bin/beet")
+
+    assert result.promoted
+    # The edited file is untouched.
+    assert (dest / "01. Track.lrc").read_text() == "[00:12.34] hand timed, do not lose\n"
+    # The incoming one is preserved under a distinct name, and reported.
+    assert (dest / "01. Track (2).lrc").read_text() == "[00:00.00] freshly fetched\n"
+    assert "01. Track (2).lrc" in result.sidecar_error
+
+
+def test_promote_drops_a_byte_identical_sidecar(tmp_path):
+    """Same content is not a conflict — no stray '(2)' copies for a re-promote."""
+    processing = tmp_path / "Processing"
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    album = _make_album(processing, "Same Album", n_tracks=1)
+    _complete_all(album)
+
+    dest = pending / "Artist" / "Same Album"
+    dest.mkdir(parents=True)
+    (dest / "01. Track.lrc").write_text((album / "01. Track.lrc").read_text())
+
+    with patch(_SUBPROCESS, side_effect=_beet_move_stub(pending)):
+        result = promote_album(album, "/bin/beet")
+
+    assert result.promoted
+    assert result.sidecar_error == ""
+    assert sorted(p.name for p in dest.glob("*.lrc")) == ["01. Track.lrc"]
+    assert not album.exists()
