@@ -56,25 +56,25 @@ def _propose_copy(conn, *, audio, src_loc, dst_loc, rel_path, now=0):
 
 def _setup(conn, tmp_path):
     pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", is_retention=True)
     audio = _audio(conn)
     rel = "Artist/Album/01.flac"
     src = Path(pending.root_path) / rel
     src.parent.mkdir(parents=True, exist_ok=True)
     src.write_bytes(b"FLACDATA" * 4096)
-    _propose_copy(conn, audio=audio, src_loc=pending, dst_loc=rugged, rel_path=rel)
-    return pending, rugged, audio, rel, src
+    _propose_copy(conn, audio=audio, src_loc=pending, dst_loc=retention_drive, rel_path=rel)
+    return pending, retention_drive, audio, rel, src
 
 
 def test_copy_verifies_and_records_presence(conn, tmp_path):
-    pending, rugged, audio, rel, src = _setup(conn, tmp_path)
+    pending, retention_drive, audio, rel, src = _setup(conn, tmp_path)
     result = execute_pending(conn, copy_fn=_good_copy, now=1000)
 
     assert result.copied == 1 and result.failed == 0
-    dst = Path(rugged.root_path) / rel
+    dst = Path(retention_drive.root_path) / rel
     assert dst.is_file()
     assert file_sha256(dst) == file_sha256(src)              # byte-faithful copy
-    pres = presence_repo.get(conn, audio.id, rugged.id)
+    pres = presence_repo.get(conn, audio.id, retention_drive.id)
     assert pres is not None and pres.present is True
     assert pres.file_sha256 == file_sha256(src) and pres.rel_path == rel
 
@@ -88,7 +88,7 @@ def test_copies_a_sidecar_and_records_sidecar_presence(conn, tmp_path):
         sidecar_repo,
     )
     pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", is_retention=True)
     album = album_repo.upsert(conn, album_key="k", now=0)
     sc = sidecar_repo.upsert(conn, parent_kind=SidecarParentKind.ALBUM,
                              parent_id=album.id, role=SidecarRole.COVER,
@@ -103,20 +103,20 @@ def test_copies_a_sidecar_and_records_sidecar_presence(conn, tmp_path):
     run_id = run_repo.start_run(conn, RunKind.RECONCILE, now=0)
     a = action_repo.add(conn, run_id=run_id, action_kind=ActionKind.COPY,
                         content_kind=ContentKind.SIDECAR, content_id=sc.id,
-                        source_location_id=pending.id, dest_location_id=rugged.id,
+                        source_location_id=pending.id, dest_location_id=retention_drive.id,
                         rel_path=rel, now=0)
     action_repo.acknowledge(conn, [a.id], now=0)
 
     result = execute_pending(conn, copy_fn=_good_copy, now=1000)
     assert result.copied == 1 and result.failed == 0
-    dst = Path(rugged.root_path) / rel
+    dst = Path(retention_drive.root_path) / rel
     assert dst.is_file() and file_sha256(dst) == file_sha256(src)
-    pres = sidecar_presence_repo.get(conn, sc.id, rugged.id)
+    pres = sidecar_presence_repo.get(conn, sc.id, retention_drive.id)
     assert pres is not None and pres.present is True and pres.rel_path == rel
 
 
 def test_copy_marks_action_executed_and_is_idempotent(conn, tmp_path):
-    pending, rugged, audio, rel, src = _setup(conn, tmp_path)
+    pending, retention_drive, audio, rel, src = _setup(conn, tmp_path)
     execute_pending(conn, copy_fn=_good_copy, now=1000)
     # the action is now executed → a second run re-copies nothing
     second = execute_pending(conn, copy_fn=_good_copy, now=2000)
@@ -125,23 +125,23 @@ def test_copy_marks_action_executed_and_is_idempotent(conn, tmp_path):
 
 
 def test_sync_scoped_to_a_destination_ignores_other_dests(conn, tmp_path):
-    # The DwRugged mount agent must only execute DwRugged's copies, not queued
+    # The RetentionDrive mount agent must only execute RetentionDrive's copies, not queued
     # copies for another (possibly unmounted) destination like a DAP.
     pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", is_retention=True)
     dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", is_retention=True)
     x, y = _audio(conn, "x" * 32), _audio(conn, "y" * 32)
     for a, rel in [(x, "x.flac"), (y, "y.flac")]:
         src = Path(pending.root_path) / rel
         src.parent.mkdir(parents=True, exist_ok=True)
         src.write_bytes(rel.encode() * 50)
-    _propose_copy(conn, audio=x, src_loc=pending, dst_loc=rugged, rel_path="x.flac")
+    _propose_copy(conn, audio=x, src_loc=pending, dst_loc=retention_drive, rel_path="x.flac")
     _propose_copy(conn, audio=y, src_loc=pending, dst_loc=dap, rel_path="y.flac")
 
-    result = execute_pending(conn, copy_fn=_good_copy, now=1000, dest_location_id=rugged.id)
+    result = execute_pending(conn, copy_fn=_good_copy, now=1000, dest_location_id=retention_drive.id)
 
-    assert result.copied == 1                                   # only the DwRugged copy ran
-    assert (Path(rugged.root_path) / "x.flac").is_file()
+    assert result.copied == 1                                   # only the RetentionDrive copy ran
+    assert (Path(retention_drive.root_path) / "x.flac").is_file()
     assert not (Path(dap.root_path) / "y.flac").exists()        # DAP copy untouched
     # the DAP action is still queued (acknowledged, unexecuted)
     assert len(action_repo.list_pending_execution(conn)) == 1
@@ -149,14 +149,14 @@ def test_sync_scoped_to_a_destination_ignores_other_dests(conn, tmp_path):
 
 def test_source_bytes_survive_the_copy(conn, tmp_path):
     # The COPY-not-MOVE regression guard vs the old rsync --remove-source-files.
-    pending, rugged, audio, rel, src = _setup(conn, tmp_path)
+    pending, retention_drive, audio, rel, src = _setup(conn, tmp_path)
     before = src.read_bytes()
     execute_pending(conn, copy_fn=_good_copy, now=1000)
     assert src.is_file() and src.read_bytes() == before     # source untouched
 
 
 def test_hash_mismatch_fails_without_recording_presence(conn, tmp_path):
-    pending, rugged, audio, rel, src = _setup(conn, tmp_path)
+    pending, retention_drive, audio, rel, src = _setup(conn, tmp_path)
 
     def _corrupting_copy(s: Path, d: Path) -> None:
         d.parent.mkdir(parents=True, exist_ok=True)
@@ -164,38 +164,38 @@ def test_hash_mismatch_fails_without_recording_presence(conn, tmp_path):
 
     result = execute_pending(conn, copy_fn=_corrupting_copy, now=1000)
     assert result.copied == 0 and result.failed == 1
-    assert presence_repo.get(conn, audio.id, rugged.id) is None   # no presence on a bad copy
+    assert presence_repo.get(conn, audio.id, retention_drive.id) is None   # no presence on a bad copy
     assert len(action_repo.list_pending_execution(conn)) == 1     # left for retry
     assert src.is_file()                                          # source still there
 
 
 def test_unacknowledged_actions_are_not_executed(conn, tmp_path):
     pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", is_retention=True)
     audio = _audio(conn)
     rel = "x.flac"
     (Path(pending.root_path) / rel).write_bytes(b"data")
     run_id = run_repo.start_run(conn, RunKind.RECONCILE, now=0)
     action_repo.add(conn, run_id=run_id, action_kind=ActionKind.COPY,
                     content_kind=ContentKind.AUDIO, content_id=audio.id,
-                    source_location_id=pending.id, dest_location_id=rugged.id,
+                    source_location_id=pending.id, dest_location_id=retention_drive.id,
                     rel_path=rel, now=0)   # NOT acknowledged
 
     result = execute_pending(conn, copy_fn=_good_copy, now=1000)
     assert result.copied == 0
-    assert not (Path(rugged.root_path) / rel).exists()       # nothing copied
+    assert not (Path(retention_drive.root_path) / rel).exists()       # nothing copied
 
 
 def test_skips_when_destination_not_mounted(conn, tmp_path):
     pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
     # dest registered but its root doesn't exist (not mounted) → no marker/dir
-    rugged = location_repo.upsert(conn, uuid="rug", name="DwRugged",
+    retention_drive = location_repo.upsert(conn, uuid="rug", name="RetentionDrive",
                                   kind="local_drive", is_retention=True,
                                   root_path=str(tmp_path / "GONE"))
     audio = _audio(conn)
     rel = "x.flac"
     (Path(pending.root_path) / rel).write_bytes(b"data")
-    _propose_copy(conn, audio=audio, src_loc=pending, dst_loc=rugged, rel_path=rel)
+    _propose_copy(conn, audio=audio, src_loc=pending, dst_loc=retention_drive, rel_path=rel)
 
     result = execute_pending(conn, copy_fn=_good_copy, now=1000)
     assert result.copied == 0 and result.skipped == 1
@@ -261,11 +261,11 @@ def test_each_copy_is_committed_so_a_crash_keeps_done_work(tmp_path):
     db = tmp_path / "spindlebot.db"
     conn = open_db(db)
     pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", is_retention=True)
     a1, a2 = _audio(conn, "a" * 32), _audio(conn, "b" * 32)
     for a, rel in [(a1, "1.flac"), (a2, "2.flac")]:
         (Path(pending.root_path) / rel).write_bytes(rel.encode() * 100)
-        _propose_copy(conn, audio=a, src_loc=pending, dst_loc=rugged, rel_path=rel)
+        _propose_copy(conn, audio=a, src_loc=pending, dst_loc=retention_drive, rel_path=rel)
     conn.commit()
 
     calls = {"n": 0}
@@ -281,19 +281,19 @@ def test_each_copy_is_committed_so_a_crash_keeps_done_work(tmp_path):
     conn.close()
 
     other = open_db(db)
-    assert presence_repo.get(other, a1.id, rugged.id) is not None   # first copy durable
-    assert presence_repo.get(other, a2.id, rugged.id) is None       # second never recorded
+    assert presence_repo.get(other, a1.id, retention_drive.id) is not None   # first copy durable
+    assert presence_repo.get(other, a2.id, retention_drive.id) is None       # second never recorded
     assert len(action_repo.list_pending_execution(other)) == 1      # only the un-done one
     other.close()
 
 
 def test_progress_reaches_total_even_with_a_skip(conn, tmp_path):
     pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", is_retention=True)
     good, orphan = _audio(conn, "a" * 32), _audio(conn, "b" * 32)
     (Path(pending.root_path) / "good.flac").write_bytes(b"x" * 200)
-    _propose_copy(conn, audio=good, src_loc=pending, dst_loc=rugged, rel_path="good.flac")
-    _propose_copy(conn, audio=orphan, src_loc=pending, dst_loc=rugged,
+    _propose_copy(conn, audio=good, src_loc=pending, dst_loc=retention_drive, rel_path="good.flac")
+    _propose_copy(conn, audio=orphan, src_loc=pending, dst_loc=retention_drive,
                   rel_path="missing.flac")   # no source file → skipped
 
     events = []
@@ -315,17 +315,17 @@ def test_cmd_sync_nonzero_when_acknowledged_copy_skipped_with_error(tmp_path, ca
     pending_dir = tmp_path / "Pending"
     core = SimpleNamespace(db_path=db, min_copies=2, pending_dir=pending_dir)
     # dest configured but its root doesn't exist → "unmounted"
-    locs = [LocationConfig(name="DwRugged", kind=LocationKind.LOCAL_DRIVE,
+    locs = [LocationConfig(name="RetentionDrive", kind=LocationKind.LOCAL_DRIVE,
                            root_path=str(tmp_path / "GONE"), is_retention=True)]
     cfg = SimpleNamespace(core=core, locations=locs, destinations=[])
 
     conn = open_db(db)
     register_from_config(conn, cfg, 0)
-    pending, rugged = get_by_name(conn, "Pending"), get_by_name(conn, "DwRugged")
+    pending, retention_drive = get_by_name(conn, "Pending"), get_by_name(conn, "RetentionDrive")
     audio = _audio(conn)
     pending_dir.mkdir(parents=True, exist_ok=True)
     (pending_dir / "x.flac").write_bytes(b"data")
-    _propose_copy(conn, audio=audio, src_loc=pending, dst_loc=rugged, rel_path="x.flac")
+    _propose_copy(conn, audio=audio, src_loc=pending, dst_loc=retention_drive, rel_path="x.flac")
     conn.commit()
     conn.close()
 
@@ -334,3 +334,61 @@ def test_cmd_sync_nonzero_when_acknowledged_copy_skipped_with_error(tmp_path, ca
     # an acknowledged copy we couldn't do (dest unmounted) is a failure signal
     assert rc == 1
     assert data["copied"] == 0 and data["skipped"] == 1 and data["errors"]
+
+
+# ── presence rows must be skippable by the next inventory ─────────────────────
+
+
+def test_copy_records_mtime_so_the_next_inventory_can_skip(conn, tmp_path):
+    """A synced copy must record the destination's mtime.
+
+    inventory's incremental rescan only skips a file whose stored mtime is
+    non-NULL and still matches on disk. A presence row written without one
+    condemns that file to a full re-hash on every future scan — and sync copies
+    are exactly the files most likely to be inventoried next, so omitting it
+    makes inventory slower the more you sync.
+    """
+    pending, retention_drive, audio, rel, src = _setup(conn, tmp_path)
+    execute_pending(conn, copy_fn=_good_copy, now=1000)
+
+    dst = Path(retention_drive.root_path) / rel
+    pres = presence_repo.get(conn, audio.id, retention_drive.id)
+    assert pres.mtime is not None, "a NULL mtime forces a full re-hash forever"
+    assert pres.mtime == dst.stat().st_mtime_ns
+    assert pres.byte_size == dst.stat().st_size
+
+
+def test_copied_sidecar_records_mtime(conn, tmp_path):
+    from spindlebot.core.enums import ActionKind, ContentKind, SidecarParentKind, SidecarRole
+    from spindlebot.db.repositories import (
+        album_repo,
+        run_repo,
+        sidecar_presence_repo,
+        sidecar_repo,
+    )
+    pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", is_retention=True)
+    album = album_repo.upsert(conn, album_key="k", now=0)
+    sc = sidecar_repo.upsert(conn, parent_kind=SidecarParentKind.ALBUM,
+                             parent_id=album.id, role=SidecarRole.COVER,
+                             sha256="h", now=0)
+    rel = "Artist/Album/cover.jpg"
+    src = Path(pending.root_path) / rel
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"\xff\xd8jpeg-bytes" * 100)
+    sidecar_presence_repo.set_presence(conn, sidecar_id=sc.id, location_id=pending.id,
+                                       present=True, observed_utc=0, rel_path=rel,
+                                       file_sha256=file_sha256(src), byte_size=src.stat().st_size)
+    run_id = run_repo.start_run(conn, RunKind.RECONCILE, now=0)
+    a = action_repo.add(conn, run_id=run_id, action_kind=ActionKind.COPY,
+                        content_kind=ContentKind.SIDECAR, content_id=sc.id,
+                        source_location_id=pending.id, dest_location_id=retention_drive.id,
+                        rel_path=rel, reason="test", now=0)
+    action_repo.acknowledge(conn, [a.id], now=0)
+
+    execute_pending(conn, copy_fn=_good_copy, now=1000)
+
+    dst = Path(retention_drive.root_path) / rel
+    pres = sidecar_presence_repo.get(conn, sc.id, retention_drive.id)
+    assert pres.mtime is not None
+    assert pres.mtime == dst.stat().st_mtime_ns

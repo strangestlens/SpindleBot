@@ -31,7 +31,7 @@ def _cfg(pending_dir, *, locations=None, destinations=None):
 
 
 def test_location_uuid_is_stable_and_case_insensitive():
-    assert location_uuid("DwRugged") == location_uuid(" dwrugged ")
+    assert location_uuid("RetentionDrive") == location_uuid(" retentiondrive ")
     assert location_uuid("A") != location_uuid("B")
 
 
@@ -54,13 +54,13 @@ def test_register_creates_pending_authoring_location(conn, tmp_path):
 
 
 def test_register_explicit_location(conn, tmp_path):
-    loc = LocationConfig(name="DwRugged", kind=LocationKind.LOCAL_DRIVE,
-                         root_path="/Volumes/DwRugged/Music/Library", is_retention=True)
+    loc = LocationConfig(name="RetentionDrive", kind=LocationKind.LOCAL_DRIVE,
+                         root_path="/Volumes/RetentionDrive/Music/Library", is_retention=True)
     register_from_config(conn, _cfg(tmp_path / "Pending", locations=[loc]), now=100)
-    rugged = get_by_name(conn, "DwRugged")
-    assert rugged.kind == LocationKind.LOCAL_DRIVE
-    assert rugged.is_retention is True
-    assert rugged.root_path == "/Volumes/DwRugged/Music/Library"
+    retention_drive = get_by_name(conn, "RetentionDrive")
+    assert retention_drive.kind == LocationKind.LOCAL_DRIVE
+    assert retention_drive.is_retention is True
+    assert retention_drive.root_path == "/Volumes/RetentionDrive/Music/Library"
 
 
 def test_legacy_destination_becomes_retention_location(conn, tmp_path):
@@ -73,14 +73,14 @@ def test_legacy_destination_becomes_retention_location(conn, tmp_path):
 
 
 def test_explicit_location_wins_over_same_named_destination(conn, tmp_path):
-    loc = LocationConfig(name="DwRugged", kind=LocationKind.LOCAL_DRIVE,
-                         root_path="/Volumes/DwRugged/Music/Library")
-    dest = DestinationConfig(name="DwRugged", type="local_drive", path="/old/path")
+    loc = LocationConfig(name="RetentionDrive", kind=LocationKind.LOCAL_DRIVE,
+                         root_path="/Volumes/RetentionDrive/Music/Library")
+    dest = DestinationConfig(name="RetentionDrive", type="local_drive", path="/old/path")
     register_from_config(conn, _cfg(tmp_path / "Pending",
                                     locations=[loc], destinations=[dest]), now=100)
-    rugged = get_by_name(conn, "DwRugged")
-    assert rugged.root_path == "/Volumes/DwRugged/Music/Library"  # not the destination's
-    # Pending + DwRugged only — destination did not create a second row
+    retention_drive = get_by_name(conn, "RetentionDrive")
+    assert retention_drive.root_path == "/Volumes/RetentionDrive/Music/Library"  # not the destination's
+    # Pending + RetentionDrive only — destination did not create a second row
     from spindlebot.db.repositories import location_repo
     assert len(location_repo.list_all(conn)) == 2
 
@@ -95,8 +95,8 @@ def test_disabled_entries_are_skipped(conn, tmp_path):
 
 
 def test_register_is_idempotent(conn, tmp_path):
-    loc = LocationConfig(name="DwRugged", kind=LocationKind.LOCAL_DRIVE,
-                         root_path="/Volumes/DwRugged/Music/Library")
+    loc = LocationConfig(name="RetentionDrive", kind=LocationKind.LOCAL_DRIVE,
+                         root_path="/Volumes/RetentionDrive/Music/Library")
     cfg = _cfg(tmp_path / "Pending", locations=[loc])
     first = register_from_config(conn, cfg, now=100)
     second = register_from_config(conn, cfg, now=200)

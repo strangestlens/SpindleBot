@@ -13,7 +13,7 @@ setup() {
   export BATS_TMPDIR
   BATS_TMPDIR="$(mktemp -d)"
   mkdir -p "$BATS_TMPDIR/bin" "$BATS_TMPDIR/pipeline" "$BATS_TMPDIR/logs" \
-           "$BATS_TMPDIR/Pending" "$BATS_TMPDIR/DwRugged"
+           "$BATS_TMPDIR/Pending" "$BATS_TMPDIR/RetentionDrive"
   cp "$FIXTURES/bin/python" "$BATS_TMPDIR/bin/python"
   cp "$FIXTURES/pipeline/music-notify.sh" "$BATS_TMPDIR/pipeline/music-notify.sh"
   chmod +x "$BATS_TMPDIR/pipeline/music-notify.sh"
@@ -43,7 +43,7 @@ teardown() {
 
 @test "skips when the drive is not mounted" {
   echo x > "$BATS_TMPDIR/Pending/track.flac"
-  rmdir "$BATS_TMPDIR/DwRugged"
+  rmdir "$BATS_TMPDIR/RetentionDrive"
   run bash "$SCRIPT"
   [ "$status" -eq 0 ]
   [ ! -f "$MOCK_LOG" ]
@@ -54,8 +54,8 @@ teardown() {
   run bash "$SCRIPT"
   [ "$status" -eq 0 ]
   grep -qF "spindlebot inventory" "$MOCK_LOG"
-  grep -qF "spindlebot review --location DwRugged --yes" "$MOCK_LOG"
-  grep -qF "spindlebot sync --location DwRugged" "$MOCK_LOG"
+  grep -qF "spindlebot review --location RetentionDrive --yes" "$MOCK_LOG"
+  grep -qF "spindlebot sync --location RetentionDrive" "$MOCK_LOG"
   grep -qF "spindlebot prune --execute" "$MOCK_LOG"
   sync_line=$(grep -n "spindlebot sync" "$MOCK_LOG" | head -1 | cut -d: -f1)
   prune_line=$(grep -n "spindlebot prune" "$MOCK_LOG" | head -1 | cut -d: -f1)

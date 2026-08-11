@@ -33,18 +33,18 @@ def test_truncate_middle():
 
 def test_plain_mode_has_no_control_chars_and_steps(tmp_path):
     buf = io.StringIO()
-    r = ProgressReporter(stream=buf, label="inventory DwRugged",
+    r = ProgressReporter(stream=buf, label="inventory RetentionDrive",
                          isatty=False, plain_step=25)
     for done in range(0, 11):                       # 0..10 of 10  → 0,10,...,100%
         r.update(_ev(done, 10, done_bytes=done, total_bytes=10))
     r.close()
     out = buf.getvalue()
     assert "\x1b" not in out and "\r" not in out     # logs stay clean
-    assert "inventory DwRugged" in out
+    assert "inventory RetentionDrive" in out
     # only step crossings (25%) + final emit, not every single event
     lines = [ln for ln in out.splitlines() if ln]
     assert len(lines) <= 6
-    assert lines[-1].startswith("inventory DwRugged: 100%")
+    assert lines[-1].startswith("inventory RetentionDrive: 100%")
 
 
 def test_plain_indeterminate_stays_quiet(tmp_path):

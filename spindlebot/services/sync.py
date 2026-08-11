@@ -124,17 +124,26 @@ def execute_pending(
                         f"action {action.id}: {dst} hash {actual[:12]} != "
                         f"source {expected[:12]}")
 
+                # Record the DESTINATION's mtime alongside size and hash.
+                # inventory's incremental rescan skips a file only when its
+                # stored mtime is non-NULL and still matches on disk, so a
+                # presence row written without one condemns that file to a full
+                # re-hash on every future scan. Sync copies are precisely the
+                # files most likely to be inventoried next, and omitting it
+                # scales backwards: the more you sync, the slower inventory
+                # gets. One stat() serves both fields.
+                st = dst.stat()
                 if action.content_kind == ContentKind.AUDIO:
                     presence_repo.set_presence(
                         conn, audio_id=action.content_id, location_id=dst_loc.id,
                         present=True, observed_utc=now, rel_path=action.rel_path,
-                        file_sha256=actual, byte_size=dst.stat().st_size,
+                        file_sha256=actual, byte_size=st.st_size, mtime=st.st_mtime_ns,
                     )
                 else:  # SIDECAR (the only other kind that reaches here)
                     sidecar_presence_repo.set_presence(
                         conn, sidecar_id=action.content_id, location_id=dst_loc.id,
                         present=True, observed_utc=now, rel_path=action.rel_path,
-                        file_sha256=actual, byte_size=dst.stat().st_size,
+                        file_sha256=actual, byte_size=st.st_size, mtime=st.st_mtime_ns,
                     )
                 action_repo.mark_executed(conn, action.id, now)
                 result.copied += 1

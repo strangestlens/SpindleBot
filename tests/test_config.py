@@ -263,9 +263,9 @@ class TestConfigLoading(unittest.TestCase):
             import_dir  = "/tmp/Import"
 
             [[locations]]
-            name = "DwRugged"
+            name = "RetentionDrive"
             kind = "local_drive"
-            root_path = "/Volumes/DwRugged/Music/Library"
+            root_path = "/Volumes/RetentionDrive/Music/Library"
             is_retention = true
         """
         _write(self.tmp, "config.toml", config)
@@ -273,9 +273,9 @@ class TestConfigLoading(unittest.TestCase):
         cfg = _load_with_dir(self.tmp)
         self.assertEqual(len(cfg.locations), 1)
         loc = cfg.locations[0]
-        self.assertEqual(loc.name, "DwRugged")
+        self.assertEqual(loc.name, "RetentionDrive")
         self.assertEqual(loc.kind, "local_drive")
-        self.assertEqual(loc.root_path, "/Volumes/DwRugged/Music/Library")
+        self.assertEqual(loc.root_path, "/Volumes/RetentionDrive/Music/Library")
         self.assertTrue(loc.is_retention)
 
     def test_locations_default_to_empty_list(self):
@@ -416,20 +416,20 @@ class TestDestinations(unittest.TestCase):
             enabled = true
 
             [[destinations]]
-            name    = "DwRugged"
+            name    = "RetentionDrive"
             type    = "local_drive"
-            path    = "/Volumes/DwRugged/Music/Library"
+            path    = "/Volumes/RetentionDrive/Music/Library"
             enabled = true
         """)
         _write(self.tmp, "config.toml", config)
         cfg = _load_with_dir(self.tmp)
         self.assertEqual(
             _retention_path(cfg.destinations),
-            Path("/Volumes/DwRugged/Music/Library"),
+            Path("/Volumes/RetentionDrive/Music/Library"),
         )
 
     def test_config_shell_destination_path_prefers_local_drive(self):
-        # music-sync-rugged.sh uses SPINDLEBOT_DESTINATION_PATH as REMOTE for
+        # music-sync-retention_drive.sh uses SPINDLEBOT_DESTINATION_PATH as REMOTE for
         # its own `[ ! -d "$REMOTE" ]` mount check — an enabled rclone
         # destination listed first must not be exported, or the script would
         # silently no-op even with the drive mounted.
@@ -446,9 +446,9 @@ class TestDestinations(unittest.TestCase):
             enabled = true
 
             [[destinations]]
-            name    = "DwRugged"
+            name    = "RetentionDrive"
             type    = "local_drive"
-            path    = "/Volumes/DwRugged/Music/Library"
+            path    = "/Volumes/RetentionDrive/Music/Library"
             enabled = true
         """)
         _write(self.tmp, "config.toml", config)
@@ -458,18 +458,18 @@ class TestDestinations(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             cmd_config_shell(cfg)
         self.assertIn(
-            "export SPINDLEBOT_DESTINATION_PATH='/Volumes/DwRugged/Music/Library'",
+            "export SPINDLEBOT_DESTINATION_PATH='/Volumes/RetentionDrive/Music/Library'",
             out.getvalue(),
         )
         # Name + watch volume come from the SAME (first enabled local_drive)
         # destination — the sync agent and its launchd trigger key off these,
         # so nothing is hardcoded to a particular drive.
         self.assertIn(
-            "export SPINDLEBOT_DESTINATION_NAME='DwRugged'",
+            "export SPINDLEBOT_DESTINATION_NAME='RetentionDrive'",
             out.getvalue(),
         )
         self.assertIn(
-            "export SPINDLEBOT_WATCH_VOLUME='/Volumes/DwRugged'",
+            "export SPINDLEBOT_WATCH_VOLUME='/Volumes/RetentionDrive'",
             out.getvalue(),
         )
         self.assertNotIn("b2:my-bucket", out.getvalue())

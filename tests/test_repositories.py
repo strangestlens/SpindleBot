@@ -157,7 +157,7 @@ def test_list_for_location_present_filter(conn):
 def test_count_retention_copies_only_counts_present_retention(conn):
     pending = location_repo.upsert(conn, uuid="lib", name="Pending", kind="library",
                                    is_authoritative_audio=True, is_retention=False)
-    rugged = location_repo.upsert(conn, uuid="rug", name="DwRugged", kind="local_drive",
+    retention_drive = location_repo.upsert(conn, uuid="rug", name="RetentionDrive", kind="local_drive",
                                   is_retention=True)
     sdcard = location_repo.upsert(conn, uuid="sd", name="DAP", kind="local_drive",
                                   is_retention=True)
@@ -165,8 +165,8 @@ def test_count_retention_copies_only_counts_present_retention(conn):
     # present on non-retention Pending — must NOT count
     presence_repo.set_presence(conn, audio_id=a.id, location_id=pending.id,
                                present=True, observed_utc=1)
-    # present on retention DwRugged — counts
-    presence_repo.set_presence(conn, audio_id=a.id, location_id=rugged.id,
+    # present on retention RetentionDrive — counts
+    presence_repo.set_presence(conn, audio_id=a.id, location_id=retention_drive.id,
                                present=True, observed_utc=1)
     # absent on retention SD card — must NOT count
     presence_repo.set_presence(conn, audio_id=a.id, location_id=sdcard.id,

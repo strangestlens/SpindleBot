@@ -18,17 +18,17 @@ def conn(tmp_path):
 # ── run_repo ──────────────────────────────────────────────────────────────────
 
 def test_start_and_finish_run(conn):
-    rid = run_repo.start_run(conn, RunKind.RECONCILE, now=1000, note="dwrugged")
+    rid = run_repo.start_run(conn, RunKind.RECONCILE, now=1000, note="retention-drive-note")
     r = run_repo.get(conn, rid)
     assert r.kind == RunKind.RECONCILE
     assert r.status == ScanStatus.RUNNING
-    assert r.finished_utc is None and r.note == "dwrugged"
+    assert r.finished_utc is None and r.note == "retention-drive-note"
 
     run_repo.finish_run(conn, rid, status=ScanStatus.OK, now=2000)
     done = run_repo.get(conn, rid)
     assert done.status == ScanStatus.OK
     assert done.finished_utc == 2000
-    assert done.note == "dwrugged"   # COALESCE preserved the note
+    assert done.note == "retention-drive-note"   # COALESCE preserved the note
 
 
 def test_latest_filters_by_kind(conn):
@@ -52,7 +52,7 @@ def _run(conn):
 
 def test_add_action_is_proposed_not_acknowledged(conn):
     rid = _run(conn)
-    dest = location_repo.upsert(conn, uuid="rug", name="DwRugged",
+    dest = location_repo.upsert(conn, uuid="rug", name="RetentionDrive",
                                 kind="local_drive", is_retention=True)
     a = action_repo.add(conn, run_id=rid, action_kind=ActionKind.COPY,
                         content_kind=ContentKind.AUDIO, content_id=7, now=1000,

@@ -1070,6 +1070,15 @@ def main(argv: list[str] | None = None) -> int:
         print(__doc__)
         return 0
 
+    # A SUBCOMMAND's --help must print help, never run the subcommand. Asking
+    # `spindlebot sync --help` used to execute a real sync, because the flag was
+    # passed through to a cmd_* that simply ignored it; on `delete` that
+    # surprise is destructive. Checked before the config load for the same
+    # reason the top-level check is: help must work on a broken config.
+    if any(a in ("-h", "--help") for a in args[1:]):
+        print(__doc__)
+        return 0
+
     # Lazy import so `--help` works without a valid config
     from spindlebot.config import load
     try:

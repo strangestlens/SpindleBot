@@ -26,7 +26,7 @@ _seed_db() {
     "INSERT INTO items (path) VALUES ('$LEGACY_PENDING/Artist/Album/01. Track.flac');"
   # A path outside the pending area must be left untouched.
   sqlite3 "$BEETS_DB" \
-    "INSERT INTO items (path) VALUES ('/Volumes/DwRugged/Music/Library/Other/x.flac');"
+    "INSERT INTO items (path) VALUES ('/Volumes/RetentionDrive/Music/Library/Other/x.flac');"
 }
 
 @test "relocates import + pending contents and reconciles beets DB" {
@@ -51,10 +51,10 @@ _seed_db() {
   [ -d "$LEGACY_IMPORT" ]
   [ -d "$LEGACY_PENDING" ]
 
-  # beets path under pending rewritten; the DwRugged path untouched
+  # beets path under pending rewritten; the RetentionDrive path untouched
   run sqlite3 "$BEETS_DB" "SELECT path FROM items ORDER BY id;"
   [ "${lines[0]}" = "$NEW_PENDING/Artist/Album/01. Track.flac" ]
-  [ "${lines[1]}" = "/Volumes/DwRugged/Music/Library/Other/x.flac" ]
+  [ "${lines[1]}" = "/Volumes/RetentionDrive/Music/Library/Other/x.flac" ]
 }
 
 @test "is idempotent — second run is a no-op and leaves DB stable" {

@@ -512,6 +512,14 @@ def inventory_location(
         raise
     finally:
         result.albums = len(seen_albums)
-        scan_repo.finish_scan(conn, scan_id, files_seen=result.scanned, status=status, now=now)
+        # Stamp the ACTUAL finish time. Reusing `now` — the scan's start —
+        # recorded every scan as zero-duration, which hides exactly the signal
+        # you need to tell an incremental rescan from a full re-hash. An
+        # injected `now` still pins the start for deterministic tests; only the
+        # finish is read from the clock.
+        finished = int(time.time())
+        scan_repo.finish_scan(
+            conn, scan_id, files_seen=result.scanned, status=status, now=finished
+        )
 
     return result
