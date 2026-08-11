@@ -42,8 +42,8 @@ def test_a_real_subcommand_invocation_is_unaffected():
     """The guard keys on -h/--help only; ordinary flags still dispatch."""
     with patch("spindlebot.config.load", return_value=object()), \
          patch("spindlebot.cli.cmd_inventory", return_value=0) as cmd:
-        rc = main(["spindlebot", "inventory", "--location", "M0Pro", "--json"])
+        rc = main(["spindlebot", "inventory", "--location", "RetentionDrive", "--json"])
 
     assert rc == 0
     cmd.assert_called_once()
-    assert cmd.call_args.args[1] == ["--location", "M0Pro", "--json"]
+    assert cmd.call_args.args[1] == ["--location", "RetentionDrive", "--json"]
