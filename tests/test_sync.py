@@ -334,3 +334,61 @@ def test_cmd_sync_nonzero_when_acknowledged_copy_skipped_with_error(tmp_path, ca
     # an acknowledged copy we couldn't do (dest unmounted) is a failure signal
     assert rc == 1
     assert data["copied"] == 0 and data["skipped"] == 1 and data["errors"]
+
+
+# ── presence rows must be skippable by the next inventory ─────────────────────
+
+
+def test_copy_records_mtime_so_the_next_inventory_can_skip(conn, tmp_path):
+    """A synced copy must record the destination's mtime.
+
+    inventory's incremental rescan only skips a file whose stored mtime is
+    non-NULL and still matches on disk. A presence row written without one
+    condemns that file to a full re-hash on every future scan — and sync copies
+    are exactly the files most likely to be inventoried next, so omitting it
+    makes inventory slower the more you sync.
+    """
+    pending, rugged, audio, rel, src = _setup(conn, tmp_path)
+    execute_pending(conn, copy_fn=_good_copy, now=1000)
+
+    dst = Path(rugged.root_path) / rel
+    pres = presence_repo.get(conn, audio.id, rugged.id)
+    assert pres.mtime is not None, "a NULL mtime forces a full re-hash forever"
+    assert pres.mtime == dst.stat().st_mtime_ns
+    assert pres.byte_size == dst.stat().st_size
+
+
+def test_copied_sidecar_records_mtime(conn, tmp_path):
+    from spindlebot.core.enums import ActionKind, ContentKind, SidecarParentKind, SidecarRole
+    from spindlebot.db.repositories import (
+        album_repo,
+        run_repo,
+        sidecar_presence_repo,
+        sidecar_repo,
+    )
+    pending = _loc(conn, "pending", "Pending", tmp_path / "Pending")
+    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", is_retention=True)
+    album = album_repo.upsert(conn, album_key="k", now=0)
+    sc = sidecar_repo.upsert(conn, parent_kind=SidecarParentKind.ALBUM,
+                             parent_id=album.id, role=SidecarRole.COVER,
+                             sha256="h", now=0)
+    rel = "Artist/Album/cover.jpg"
+    src = Path(pending.root_path) / rel
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"\xff\xd8jpeg-bytes" * 100)
+    sidecar_presence_repo.set_presence(conn, sidecar_id=sc.id, location_id=pending.id,
+                                       present=True, observed_utc=0, rel_path=rel,
+                                       file_sha256=file_sha256(src), byte_size=src.stat().st_size)
+    run_id = run_repo.start_run(conn, RunKind.RECONCILE, now=0)
+    a = action_repo.add(conn, run_id=run_id, action_kind=ActionKind.COPY,
+                        content_kind=ContentKind.SIDECAR, content_id=sc.id,
+                        source_location_id=pending.id, dest_location_id=rugged.id,
+                        rel_path=rel, reason="test", now=0)
+    action_repo.acknowledge(conn, [a.id], now=0)
+
+    execute_pending(conn, copy_fn=_good_copy, now=1000)
+
+    dst = Path(rugged.root_path) / rel
+    pres = sidecar_presence_repo.get(conn, sc.id, rugged.id)
+    assert pres.mtime is not None
+    assert pres.mtime == dst.stat().st_mtime_ns

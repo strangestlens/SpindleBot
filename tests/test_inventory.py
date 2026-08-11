@@ -239,7 +239,10 @@ def test_inventory_writes_marker_and_records_scan(conn, tmp_path):
     scan = scan_repo.latest_scan(conn, loc.id)
     assert scan["status"] == "ok"
     assert scan["files_seen"] == result.scanned == 1
-    assert scan["finished_utc"] == 1234
+    assert scan["started_utc"] == 1234
+    # finished_utc is read from the clock, NOT the injected start — a scan that
+    # reports zero duration cannot be told apart from a full re-hash.
+    assert scan["finished_utc"] > scan["started_utc"]
 
 
 def test_inventory_links_beets_item_id(conn, tmp_path):
@@ -905,3 +908,23 @@ def test_noninventory_update_keeps_mtime_so_next_scan_still_skips(conn, tmp_path
     id_spy, sha_spy = _install_hash_spies(monkeypatch)
     _run(conn, root, now=2000)
     assert id_spy.calls == 0 and sha_spy.calls == 0
+
+
+def test_scan_records_a_real_finish_time(conn, tmp_path):
+    """finished_utc is the actual finish, not the injected start.
+
+    Reusing the start timestamp recorded every scan as zero-duration, hiding
+    the one signal that distinguishes an incremental rescan from a full
+    re-hash — precisely the measurement needed when a rescan runs slow.
+    """
+    import time as _time
+
+    root = tmp_path / "Pending"
+    _write_flac(root / "01.flac", audio_md5_bytes=bytes(range(1, 17)))
+
+    before = int(_time.time())
+    _result, loc = _run(conn, root, now=1)   # a start far in the past
+    scan = scan_repo.latest_scan(conn, loc.id)
+
+    assert scan["started_utc"] == 1
+    assert scan["finished_utc"] >= before
