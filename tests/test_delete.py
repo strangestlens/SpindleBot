@@ -60,12 +60,12 @@ def _propose_delete(conn, *, audio, loc, rel, now=0, acknowledge=True):
 
 def test_deletes_when_retention_stays_at_or_above_floor(conn, tmp_path):
     # two retention copies, min_copies=1 → deleting one leaves 1 ≥ floor.
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", retention=True)
     dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "Artist/Album/01.flac"
-    rf, df = _put(rugged, rel), _put(dap, rel)
-    _present(conn, a, rugged, rel, rf)
+    rf, df = _put(retention_drive, rel), _put(dap, rel)
+    _present(conn, a, retention_drive, rel, rf)
     _present(conn, a, dap, rel, df)
     action = _propose_delete(conn, audio=a, loc=dap, rel=rel)
 
@@ -75,18 +75,18 @@ def test_deletes_when_retention_stays_at_or_above_floor(conn, tmp_path):
     assert not df.exists()                                # DAP copy removed
     assert rf.exists()                                   # other retention copy untouched
     assert presence_repo.get(conn, a.id, dap.id).present is False
-    assert presence_repo.get(conn, a.id, rugged.id).present is True
+    assert presence_repo.get(conn, a.id, retention_drive.id).present is True
     assert action_repo.get(conn, action.id).executed_utc == 1000
 
 
 def test_refuses_when_delete_would_drop_below_min_copies(conn, tmp_path):
     # only one retention copy; deleting it would leave 0 < min_copies=1 → refuse.
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "Artist/Album/01.flac"
-    rf = _put(rugged, rel)
-    _present(conn, a, rugged, rel, rf)
-    action = _propose_delete(conn, audio=a, loc=rugged, rel=rel)
+    rf = _put(retention_drive, rel)
+    _present(conn, a, retention_drive, rel, rf)
+    action = _propose_delete(conn, audio=a, loc=retention_drive, rel=rel)
 
     result = execute_deletes(conn, now=1000, dry_run=False, min_copies=1)
 
@@ -94,7 +94,7 @@ def test_refuses_when_delete_would_drop_below_min_copies(conn, tmp_path):
     assert result.deleted == 0 and result.refused == 1
     assert result.refused_reasons and not result.errors
     assert rf.exists()                                   # file untouched
-    assert presence_repo.get(conn, a.id, rugged.id).present is True   # unchanged
+    assert presence_repo.get(conn, a.id, retention_drive.id).present is True   # unchanged
     assert action_repo.get(conn, action.id).executed_utc is None     # not executed
 
 
@@ -103,12 +103,12 @@ def test_refuses_when_source_is_not_a_retention_location(conn, tmp_path):
     # refused outright — delete never unlinks authoring bytes (that's prune's job).
     # Even with a retention copy elsewhere (so the floor would pass), it's refused.
     pending = _loc(conn, "pending", "Pending", tmp_path / "Pending", authoritative=True)
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "Artist/Album/01.flac"
-    pf, rf = _put(pending, rel), _put(rugged, rel)
+    pf, rf = _put(pending, rel), _put(retention_drive, rel)
     _present(conn, a, pending, rel, pf)
-    _present(conn, a, rugged, rel, rf)
+    _present(conn, a, retention_drive, rel, rf)
     action = _propose_delete(conn, audio=a, loc=pending, rel=rel)
 
     result = execute_deletes(conn, now=1000, dry_run=False, min_copies=1)
@@ -121,12 +121,12 @@ def test_refuses_when_source_is_not_a_retention_location(conn, tmp_path):
 
 
 def test_unacknowledged_delete_never_runs(conn, tmp_path):
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", retention=True)
     dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "Artist/Album/01.flac"
-    rf, df = _put(rugged, rel), _put(dap, rel)
-    _present(conn, a, rugged, rel, rf)
+    rf, df = _put(retention_drive, rel), _put(dap, rel)
+    _present(conn, a, retention_drive, rel, rf)
     _present(conn, a, dap, rel, df)
     action = _propose_delete(conn, audio=a, loc=dap, rel=rel, acknowledge=False)
 
@@ -138,12 +138,12 @@ def test_unacknowledged_delete_never_runs(conn, tmp_path):
 
 
 def test_dry_run_touches_nothing(conn, tmp_path):
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", retention=True)
     dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "Artist/Album/01.flac"
-    rf, df = _put(rugged, rel), _put(dap, rel)
-    _present(conn, a, rugged, rel, rf)
+    rf, df = _put(retention_drive, rel), _put(dap, rel)
+    _present(conn, a, retention_drive, rel, rf)
     _present(conn, a, dap, rel, df)
     action = _propose_delete(conn, audio=a, loc=dap, rel=rel)
 
@@ -160,13 +160,13 @@ def test_non_retention_pending_copy_does_not_count_toward_floor(conn, tmp_path):
     # Deleting the retention copy would leave 0 retention copies — the Pending
     # copy must NOT make it look safe → refuse (proves the floor ignores Pending).
     pending = _loc(conn, "pending", "Pending", tmp_path / "Pending", authoritative=True)
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "Artist/Album/01.flac"
-    pf, rf = _put(pending, rel), _put(rugged, rel)
+    pf, rf = _put(pending, rel), _put(retention_drive, rel)
     _present(conn, a, pending, rel, pf)
-    _present(conn, a, rugged, rel, rf)
-    action = _propose_delete(conn, audio=a, loc=rugged, rel=rel)
+    _present(conn, a, retention_drive, rel, rf)
+    action = _propose_delete(conn, audio=a, loc=retention_drive, rel=rel)
 
     result = execute_deletes(conn, now=1000, dry_run=False, min_copies=1)
 
@@ -177,12 +177,12 @@ def test_non_retention_pending_copy_does_not_count_toward_floor(conn, tmp_path):
 
 def test_refuses_at_higher_min_copies(conn, tmp_path):
     # two retention copies but min_copies=2 → deleting one would leave 1 < 2 → refuse.
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", retention=True)
     dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "Artist/Album/01.flac"
-    rf, df = _put(rugged, rel), _put(dap, rel)
-    _present(conn, a, rugged, rel, rf)
+    rf, df = _put(retention_drive, rel), _put(dap, rel)
+    _present(conn, a, retention_drive, rel, rf)
     _present(conn, a, dap, rel, df)
     _propose_delete(conn, audio=a, loc=dap, rel=rel)
 
@@ -196,14 +196,14 @@ def test_refuses_at_higher_min_copies(conn, tmp_path):
 def test_unmounted_source_is_a_genuine_error(conn, tmp_path):
     # DB says the copy is on a retention drive, but the drive isn't mounted (root
     # dir absent) → resolve_root fails → genuine error, NOT a refusal.
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "Artist/Album/01.flac"
-    rf = _put(rugged, rel)
-    _present(conn, a, rugged, rel, rf)
-    _propose_delete(conn, audio=a, loc=rugged, rel=rel)
+    rf = _put(retention_drive, rel)
+    _present(conn, a, retention_drive, rel, rf)
+    _propose_delete(conn, audio=a, loc=retention_drive, rel=rel)
     import shutil
-    shutil.rmtree(rugged.root_path)                      # "unmount" the drive
+    shutil.rmtree(retention_drive.root_path)                      # "unmount" the drive
 
     result = execute_deletes(conn, now=1000, dry_run=False, min_copies=1)
 
@@ -217,15 +217,15 @@ def test_unmounted_source_is_a_genuine_error(conn, tmp_path):
 def test_unsafe_rel_path_is_refused_and_deletes_nothing(conn, tmp_path, bad_rel):
     # An absolute or `..`-containing rel_path could unlink OUTSIDE the location
     # root — validate before building the target; record an error, delete nothing.
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", retention=True)
     dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     # a sentinel file OUTSIDE any location root that a traversal could target
     outside = tmp_path / "outside.flac"
     outside.write_bytes(b"do not touch")
     good = "Artist/Album/01.flac"
-    rf, df = _put(rugged, good), _put(dap, good)
-    _present(conn, a, rugged, good, rf)
+    rf, df = _put(retention_drive, good), _put(dap, good)
+    _present(conn, a, retention_drive, good, rf)
     _present(conn, a, dap, good, df)
     action = _propose_delete(conn, audio=a, loc=dap, rel=bad_rel)
 
@@ -241,17 +241,17 @@ def test_unsafe_rel_path_is_refused_and_deletes_nothing(conn, tmp_path, bad_rel)
 def test_only_processes_delete_actions(conn, tmp_path):
     # A COPY action in the queue must be ignored by the delete executor.
     from spindlebot.db.repositories import run_repo as rr
-    rugged = _loc(conn, "rugged", "DwRugged", tmp_path / "DwRugged", retention=True)
+    retention_drive = _loc(conn, "retention_drive", "RetentionDrive", tmp_path / "RetentionDrive", retention=True)
     dap = _loc(conn, "dap", "DAP", tmp_path / "DAP", retention=True)
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "Artist/Album/01.flac"
-    rf, df = _put(rugged, rel), _put(dap, rel)
-    _present(conn, a, rugged, rel, rf)
+    rf, df = _put(retention_drive, rel), _put(dap, rel)
+    _present(conn, a, retention_drive, rel, rf)
     _present(conn, a, dap, rel, df)
     run_id = rr.start_run(conn, RunKind.RECONCILE, now=0)
     copy = action_repo.add(conn, run_id=run_id, action_kind=ActionKind.COPY,
                            content_kind=ContentKind.AUDIO, content_id=a.id,
-                           source_location_id=rugged.id, dest_location_id=dap.id,
+                           source_location_id=retention_drive.id, dest_location_id=dap.id,
                            rel_path=rel, now=0)
     action_repo.acknowledge(conn, [copy.id], now=0)
 
@@ -266,7 +266,7 @@ def test_only_processes_delete_actions(conn, tmp_path):
 
 def _cli_cfg_and_seed(tmp_path, *, min_copies=1, delete_from="DAP"):
     """Seed a two-retention-drive + Pending library; queue a DELETE from
-    `delete_from` ("DAP", "DwRugged", or "Pending"). Returns cfg + the file paths."""
+    `delete_from` ("DAP", "RetentionDrive", or "Pending"). Returns cfg + the file paths."""
     from types import SimpleNamespace
 
     from spindlebot.config import LocationConfig
@@ -276,28 +276,28 @@ def _cli_cfg_and_seed(tmp_path, *, min_copies=1, delete_from="DAP"):
     core = SimpleNamespace(db_path=tmp_path / "spindlebot.db", min_copies=min_copies,
                            pending_dir=tmp_path / "Pending")
     locs = [
-        LocationConfig(name="DwRugged", kind=LocationKind.LOCAL_DRIVE,
-                       root_path=str(tmp_path / "DwRugged"), is_retention=True),
+        LocationConfig(name="RetentionDrive", kind=LocationKind.LOCAL_DRIVE,
+                       root_path=str(tmp_path / "RetentionDrive"), is_retention=True),
         LocationConfig(name="DAP", kind=LocationKind.LOCAL_DRIVE,
                        root_path=str(tmp_path / "DAP"), is_retention=True),
     ]
     cfg = SimpleNamespace(core=core, locations=locs, destinations=[])
 
-    for name in ("DwRugged", "DAP", "Pending"):
+    for name in ("RetentionDrive", "DAP", "Pending"):
         (tmp_path / name).mkdir(parents=True, exist_ok=True)
 
     conn = open_db(core.db_path)
     register_from_config(conn, cfg, 0)
-    rugged = get_by_name(conn, "DwRugged")
+    retention_drive = get_by_name(conn, "RetentionDrive")
     dap = get_by_name(conn, "DAP")
     pending = get_by_name(conn, "Pending")
     a = audio_repo.upsert(conn, ContentId("audio_md5", "a" * 32), now=0)
     rel = "A/B/01.flac"
-    rf, df, pf = _put(rugged, rel), _put(dap, rel), _put(pending, rel)
-    _present(conn, a, rugged, rel, rf)
+    rf, df, pf = _put(retention_drive, rel), _put(dap, rel), _put(pending, rel)
+    _present(conn, a, retention_drive, rel, rf)
     _present(conn, a, dap, rel, df)
     _present(conn, a, pending, rel, pf)
-    src = {"DwRugged": rugged, "DAP": dap, "Pending": pending}[delete_from]
+    src = {"RetentionDrive": retention_drive, "DAP": dap, "Pending": pending}[delete_from]
     _propose_delete(conn, audio=a, loc=src, rel=rel)
     conn.commit()
     conn.close()

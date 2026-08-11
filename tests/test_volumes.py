@@ -14,7 +14,7 @@ from spindlebot.core.models import Location
 from spindlebot.services import volumes
 
 
-def _loc(uuid="u-rugged", root_path=None, name="DwRugged"):
+def _loc(uuid="u-retention_drive", root_path=None, name="RetentionDrive"):
     return Location(
         id=1, uuid=uuid, name=name, kind=LocationKind.LOCAL_DRIVE,
         is_authoritative_audio=False, is_retention=True, enabled=True,
@@ -23,10 +23,10 @@ def _loc(uuid="u-rugged", root_path=None, name="DwRugged"):
 
 
 def test_write_then_read_marker_roundtrip(tmp_path):
-    volumes.write_marker(tmp_path, uuid="u1", name="DwRugged", now=123)
+    volumes.write_marker(tmp_path, uuid="u1", name="RetentionDrive", now=123)
     assert volumes.read_marker(tmp_path) == "u1"
     body = json.loads((tmp_path / ".spindlebot-location-u1").read_text())
-    assert body == {"uuid": "u1", "name": "DwRugged", "written_utc": 123}
+    assert body == {"uuid": "u1", "name": "RetentionDrive", "written_utc": 123}
 
 
 def test_read_marker_absent_or_missing_dir(tmp_path):
@@ -49,7 +49,7 @@ def test_ensure_marker_raises_on_conflict(tmp_path):
 
 
 def test_resolve_root_present_with_own_marker(tmp_path):
-    volumes.write_marker(tmp_path, uuid="u-rugged", name="DwRugged")
+    volumes.write_marker(tmp_path, uuid="u-retention_drive", name="RetentionDrive")
     assert volumes.resolve_root(_loc(root_path=tmp_path)) == tmp_path
 
 

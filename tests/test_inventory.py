@@ -123,14 +123,14 @@ def test_inventory_skips_appledouble_files(conn, tmp_path):
     # macOS writes ._<name> AppleDouble companions onto exFAT/FAT (DAP cards).
     # They carry a real file's extension but are resource-fork junk — must be
     # skipped before classification, never hashed or recorded.
-    root = tmp_path / "M0Pro"
+    root = tmp_path / "PortablePlayer"
     album = root / "Artist" / "Album"
     _write_flac(album / "01.flac",
                 audio_md5_bytes=bytes(range(1, 17)),
                 tags={"artist": "Artist", "album": "Album", "title": "One"})
     (album / "cover.jpg").write_bytes(b"real cover")
     # AppleDouble companions — sort before their real counterparts, so a naive
-    # walk would hit these first (this is what crashed the M0Pro scan at 0/N).
+    # walk would hit these first (this is what crashed the PortablePlayer scan at 0/N).
     (album / "._01.flac").write_bytes(b"Mac OS X\x00\x00\x00\x02")
     (album / "._cover.jpg").write_bytes(b"Mac OS X\x00\x00\x00\x02")
     (album / "._01.lrc").write_bytes(b"Mac OS X\x00\x00\x00\x02")
@@ -146,7 +146,7 @@ def test_inventory_skips_appledouble_files(conn, tmp_path):
 
 
 def test_read_tags_returns_full_shape_for_unreadable_file(tmp_path):
-    # The contract that KeyError'd the M0Pro scan: an unreadable audio file must
+    # The contract that KeyError'd the PortablePlayer scan: an unreadable audio file must
     # yield the full key set (all None), never a dict missing keys.
     bad = tmp_path / "garbage.flac"
     bad.write_bytes(b"this is not a flac file")
@@ -468,12 +468,12 @@ def test_inventory_registers_orphan_sidecars_from_another_location(conn, tmp_pat
     # only late sidecars whose parents were never scanned there. Both the
     # track-level .lrc and the album-level cover.jpg must link to the identities
     # recorded from the other location.
-    rugged_root = tmp_path / "DwRugged"
+    rugged_root = tmp_path / "RetentionDrive"
     _write_flac(rugged_root / "AA" / "Album" / "01.flac",
                 audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
-    rugged = location_repo.upsert(conn, uuid="rugged", name="DwRugged",
+    retention_drive = location_repo.upsert(conn, uuid="retention_drive", name="RetentionDrive",
                                   kind="local_drive", is_retention=True)
-    inventory_location(conn, location=rugged, root=rugged_root, now=1000)
+    inventory_location(conn, location=retention_drive, root=rugged_root, now=1000)
 
     pending_root = tmp_path / "Pending"
     (pending_root / "AA" / "Album").mkdir(parents=True)
@@ -530,17 +530,17 @@ def test_inventory_orphan_lrc_ambiguous_parent_is_skipped(conn, tmp_path):
 
 
 def test_registered_orphan_lrc_yields_a_reconciler_copy(conn, tmp_path):
-    # End-to-end: the orphan .lrc registered against DwRugged's audio is now
+    # End-to-end: the orphan .lrc registered against RetentionDrive's audio is now
     # visible to the reconciler, which proposes copying it back to retention.
     from spindlebot.core.enums import ActionKind
     from spindlebot.services.reconciler import reconcile_location
 
-    rugged_root = tmp_path / "DwRugged"
+    rugged_root = tmp_path / "RetentionDrive"
     _write_flac(rugged_root / "AA" / "Album" / "01.flac",
                 audio_md5_bytes=bytes(range(1, 17)), tags=_album_tags("One", 1))
-    rugged = location_repo.upsert(conn, uuid="rugged", name="DwRugged",
+    retention_drive = location_repo.upsert(conn, uuid="retention_drive", name="RetentionDrive",
                                   kind="local_drive", is_retention=True)
-    inventory_location(conn, location=rugged, root=rugged_root, now=1000)
+    inventory_location(conn, location=retention_drive, root=rugged_root, now=1000)
 
     pending_root = tmp_path / "Pending"
     (pending_root / "AA" / "Album").mkdir(parents=True)
@@ -549,7 +549,7 @@ def test_registered_orphan_lrc_yields_a_reconciler_copy(conn, tmp_path):
                                    kind="library", is_authoritative_audio=True)
     inventory_location(conn, location=pending, root=pending_root, now=1000)
 
-    result = reconcile_location(conn, target=rugged,
+    result = reconcile_location(conn, target=retention_drive,
                                 source_locations=[pending], now=2000)
     audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
     lrc = sidecar_repo.get(conn, parent_kind=SidecarParentKind.TRACK,
@@ -558,7 +558,7 @@ def test_registered_orphan_lrc_yields_a_reconciler_copy(conn, tmp_path):
                       if a.action_kind == ActionKind.COPY and a.content_kind == "sidecar"]
     assert len(sidecar_copies) == 1
     assert sidecar_copies[0].content_id == lrc.id
-    assert sidecar_copies[0].dest_location_id == rugged.id
+    assert sidecar_copies[0].dest_location_id == retention_drive.id
 
 
 def test_inventory_bare_nolrc_still_album_level(conn, tmp_path):
@@ -678,7 +678,7 @@ def test_inventory_progress_optional_and_safe(conn, tmp_path):
 
 
 def test_inventory_multidisc_sibling_folders_collapse_to_one_album(conn, tmp_path):
-    # Real DwRugged layout: multidisc = sibling album folders ("Album [Disc 1]",
+    # Real RetentionDrive layout: multidisc = sibling album folders ("Album [Disc 1]",
     # "Album [Disc 2]"), tracks + a cover directly inside each, sharing one album
     # tag. They must collapse to a single album keyed on tags, not folder names.
     root = tmp_path / "Pending"

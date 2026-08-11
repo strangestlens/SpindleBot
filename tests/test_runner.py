@@ -51,7 +51,7 @@ def _make_config(tmp_path: Path, *, force: bool = False, trigger: Path | None = 
         duplicates_dir=tmp_path / "Duplicates",
         pipeline_dir=tmp_path / "pipeline",
         log_file=tmp_path / "logs" / "watcher.log",
-        destination_name="DwRugged",
+        destination_name="RetentionDrive",
     )
 
 
@@ -868,7 +868,7 @@ def test_auto_sync_hint_uses_configured_sync_script(tmp_path):
     result = _run_complete_processing_import(cfg, sync_runner=MagicMock(return_value=0))
 
     assert result.success
-    assert log_contains(cfg, f"Run {cfg.sync_script} to push to DwRugged")
+    assert log_contains(cfg, f"Run {cfg.sync_script} to push to RetentionDrive")
 
 
 def test_auto_sync_true_mounted_invokes_sync(tmp_path):
@@ -885,7 +885,7 @@ def test_auto_sync_true_mounted_invokes_sync(tmp_path):
 
     assert result.success
     sync.assert_called_once_with(cfg.sync_script)
-    assert log_contains(cfg, "auto-syncing to DwRugged")
+    assert log_contains(cfg, "auto-syncing to RetentionDrive")
     assert not log_contains(cfg, "isn't mounted")
 
 
@@ -895,7 +895,7 @@ def test_auto_sync_true_not_mounted_does_not_invoke(tmp_path):
     _init_db(cfg)
     cfg.spindlebot_cfg = MagicMock()
     cfg.auto_sync_on_import = True
-    cfg.retention_path = tmp_path / "DwRugged" / "does-not-exist"  # not mounted
+    cfg.retention_path = tmp_path / "RetentionDrive" / "does-not-exist"  # not mounted
 
     sync = MagicMock(return_value=0)
     result = _run_complete_processing_import(cfg, sync_runner=sync)
@@ -938,7 +938,7 @@ def test_failed_import_never_auto_syncs(tmp_path):
 
     assert not result.success
     sync.assert_not_called()
-    assert not log_contains(cfg, "auto-syncing to DwRugged")
+    assert not log_contains(cfg, "auto-syncing to RetentionDrive")
 
 
 def test_default_sync_runner_logs_stderr_tail_on_failure(tmp_path):
@@ -1029,7 +1029,7 @@ def test_duplicate_album_moved_to_duplicates(tmp_path):
     fake_cfg = MagicMock()  # stand-in SpindleBotConfig so notify() is attempted
     cfg.spindlebot_cfg = fake_cfg
 
-    fake = _make_beet_fake({"Radiohead": "/Volumes/DwRugged/Music/Radiohead/Kid A"})
+    fake = _make_beet_fake({"Radiohead": "/Volumes/RetentionDrive/Music/Radiohead/Kid A"})
 
     with patch(_PRETAG, return_value=True), \
          patch(_POSTTAG, return_value=0), \
@@ -1041,7 +1041,7 @@ def test_duplicate_album_moved_to_duplicates(tmp_path):
     assert result.success
     assert log_contains(cfg, "⏭")
     assert log_contains(cfg, "already in library")
-    assert log_contains(cfg, "/Volumes/DwRugged/Music/Radiohead/Kid A")
+    assert log_contains(cfg, "/Volumes/RetentionDrive/Music/Radiohead/Kid A")
 
     # File relocated, not left in Import.
     assert not (imp / "dup1.flac").exists()
