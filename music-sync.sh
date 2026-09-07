@@ -95,8 +95,14 @@ if ! sb prune --execute --quiet; then
 fi
 
 # 5. Point beets at the retention path for anything that left the Pending area.
+#    The CAST is load-bearing, not decoration: beets stores items.path as a BLOB
+#    and PathQuery.col_clause() binds its pattern as a BLOB too, but SQLite's
+#    replace() always returns TEXT. SQLite never compares a TEXT value equal to
+#    a BLOB one, so dropping the CAST silently converts every rewritten row to
+#    TEXT and `beet ls path:...` stops matching it — which breaks the promote
+#    step (`beet move path:<dir>/`) with a misleading "No matching items found".
 if sqlite3 "$DB" \
-    "UPDATE items SET path = replace(path, '${PENDING}', '${REMOTE}') WHERE path LIKE '${PENDING}/%';" 2>/dev/null; then
+    "UPDATE items SET path = CAST(replace(path, '${PENDING}', '${REMOTE}') AS BLOB) WHERE path LIKE '${PENDING}/%';" 2>/dev/null; then
   log "Beets DB paths updated to $DEST_NAME"
 else
   log "WARNING: beets DB path update failed"

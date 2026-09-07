@@ -307,6 +307,28 @@ Always use a trailing slash: `path:/full/path/` — without it, matches may be m
 After rsync, the beets DB still has local paths. The sync script updates them via `sqlite3
 UPDATE`. This must happen before any lyrics fetch on DwRugged.
 
+**4a. `items.path` is a BLOB — any raw SQL rewrite must `CAST(... AS BLOB)`**
+beets stores `items.path` as a BLOB and `PathQuery.col_clause()` binds its pattern as one
+too, but SQLite's `replace()` returns TEXT — and SQLite never compares TEXT equal to BLOB.
+So a bare `UPDATE items SET path = replace(path, …)` silently retypes every row it touches,
+after which **`beet ls path:…` matches nothing** library-wide. Nothing errors; the failure
+surfaces far away, as `beet move path:<dir>/` reporting "No matching items found" and albums
+stranding in Processing. `music-sync.sh` step 5 is the one place that does this, and it is
+covered by the `typeof(path)='blob'` assertions in `tests/shell/test_music_sync.bats` —
+a value-only assertion passes against the bug, so any new test must check the storage class.
+To repair a library already retyped: `UPDATE items SET path = CAST(path AS BLOB) WHERE
+typeof(path)='text';`
+
+**4b. Unreadable album names use `album_dir`, never a retagged `$album`**
+Some album names sanitize into noise (`/\/\ /\ Y /\` becomes `____ __ Y __`, since `/`
+and `\` cannot appear in a filename). The path template resolves this with
+`%ifdef{album_dir,,$album}`: set an `album_dir` flex field and it becomes the directory name,
+leave it unset — the case for nearly every album — and `$album` is used exactly as before.
+Set it on the **items**, not the album, because `tmpl_ifdef` checks `field in self.item`:
+`beet modify album_dir='MAYA' mb_albumid:<id> && beet move`. Do **not** instead retag
+`$album` to a readable value: `mbsync` is an enabled plugin and reverts MusicBrainz-derived
+fields on the next metadata sync, which sends the directory straight back to the noise name.
+
 **5. bootstrap.sh sourcing**
 Every shell script sources `~/.config/spindlebot/bootstrap.sh`, which evals
 `python -m spindlebot config shell`. If Python or the config fails, all `$SPINDLEBOT_*` vars

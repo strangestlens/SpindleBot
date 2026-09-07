@@ -21,7 +21,13 @@ plugins:
 paths:
   # Single disc:  Artist/Album/NN. Title.flac
   # Multi disc:   Artist/Album [Disk N]/NN. Title.flac
-  default: $albumartist/%if{$multidisc,$album [Disk $disc],$album}/$track. $title
+  # album_dir: optional per-album directory-name override, for albums whose real
+  # name sanitizes into something unreadable (e.g. '/\/\ /\ Y /\' -> '____ __ Y __').
+  # Set it on the ITEMS, not the album (%ifdef checks the item's own fields):
+  #   beet modify album_dir='MAYA' mb_albumid:<id> && beet move
+  # Unset for almost every album, in which case $album is used as before. Preferred
+  # over retagging $album, which mbsync would revert on the next metadata sync.
+  default: $albumartist/%if{$multidisc,%ifdef{album_dir,,$album} [Disk $disc],%ifdef{album_dir,,$album}}/$track. $title
 
 inline:
   # Numeric comparison beets can't do in path templates.
