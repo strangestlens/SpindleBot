@@ -168,6 +168,15 @@ music-fetch-lyrics.py            — legacy root-level script (superseded by sta
 music-fetch-art.py               — legacy root-level script (superseded by stages/fetch_art.py)
 setup.sh                         — first-time environment setup: config files, bootstrap.sh,
                                      music-watcher.sh → ~/.local/bin/, plists → ~/Library/LaunchAgents/
+install-beets-config.sh          — sourceable helper: installs beets-config.yaml to
+                                     tools.beets_config when absent, NEVER overwriting an
+                                     existing one (it holds the user's Genius key). Functions
+                                     only, no top-level side effects — same pattern as
+                                     migrate-work-dirs.sh, so bats can exercise it.
+beets-config.yaml                — the ONE shipped beets config template (there used to be a
+                                     drifted duplicate at config.yaml). Ships an empty
+                                     genius_api_key; a real key belongs only in the installed
+                                     copy.
 (launchd agents com.strangestlens.music-watcher + com.strangestlens.music-sync
                                      are GENERATED per-machine by setup.sh — home dir, log dir, and
                                      the retention volume to watch all come from config, not baked in)
@@ -252,7 +261,13 @@ tests/
                                      LYRIC_TIMING_IT_AUDIO/LYRIC_TIMING_IT_LRC set (never in CI)
   test_lrc_editor_ai.py          — lrc-editor /ai-arrange job orchestration (mock backend)
   test_lrc_editor_audit.py       — lrc-editor /audit page: run job, saved-state recall, /load
+  test_beets_config_template.py  — guards on the SHIPPED beets-config.yaml: no committed
+                                     secret, the album_dir path override survives, one
+                                     template only. Text-parsed, NOT PyYAML — requirements.txt
+                                     stays light and a template guard isn't worth a dep.
   shell/                         — bats shell tests (shellcheck + integration)
+    test_install_beets_config.bats — install-beets-config.sh: installs when absent, and
+                                     NEVER overwrites an existing beets config
 ```
 
 ## ImportRunner stage sequence

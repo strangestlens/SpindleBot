@@ -114,16 +114,9 @@ ARCHIVE_DIR="$(resolve_cfg core.archive_dir)"
 # must match core.pending_dir or beet files albums where SpindleBot isn't looking.
 # Copy it only when nothing is there — an existing beets config is the user's and
 # is never overwritten, because it holds a Genius key and any local tuning.
-BEETS_CONFIG="$(resolve_cfg tools.beets_config)"
-if [ -n "$BEETS_CONFIG" ]; then
-  if [ ! -f "$BEETS_CONFIG" ]; then
-    mkdir -p "$(dirname "$BEETS_CONFIG")"
-    cp "$PIPELINE_DIR/beets-config.yaml" "$BEETS_CONFIG"
-    echo "Created $BEETS_CONFIG — set lyrics.genius_api_key if you want beets' own lyrics fetch."
-  else
-    echo "beets config already exists at $BEETS_CONFIG — skipping."
-  fi
-fi
+# shellcheck source=install-beets-config.sh
+source "$PIPELINE_DIR/install-beets-config.sh"
+install_beets_config "$(resolve_cfg tools.beets_config)" "$PIPELINE_DIR/beets-config.yaml" || true
 
 # ── 6. Install music-watcher.sh ───────────────────────────────────────────────
 mkdir -p "$HOME/.local/bin"
