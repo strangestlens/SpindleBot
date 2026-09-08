@@ -679,6 +679,25 @@ class TestQueryLrclibRetry:
             assert _query_lrclib("a", "t", "al", 100, 0.0) == (None, None)
         assert op.call_count == 1
 
+    def test_attempt_count_follows_the_module_constant(self):
+        # The seam the removed `attempts=` parameter was meant to provide: the
+        # bound is a module constant, so it is patchable and cannot be handed a
+        # nonsense value (attempts=0 would have left last_exc None -> raise None).
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.LRCLIB_RETRY_ATTEMPTS", 2), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=self._http_error(503)) as op:
+            with pytest.raises(urllib.error.HTTPError):
+                _query_lrclib("a", "t", "al", 100, 0.0)
+        assert op.call_count == 2
+
+    def test_query_takes_no_attempts_override(self):
+        # Removed rather than guarded: nothing passed it, and a caller-supplied
+        # 0 would skip the loop and `raise None`. Keeping the surface small means
+        # that state is unreachable instead of merely rejected.
+        import inspect
+        assert "attempts" not in inspect.signature(_query_lrclib).parameters
+
     def test_backoff_grows_between_attempts(self):
         with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep") as slp, \
              patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",

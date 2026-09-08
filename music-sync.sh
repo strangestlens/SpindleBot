@@ -66,7 +66,7 @@ fi
 #    Guarded on Processing actually having content so a spurious mount still does
 #    no work at all, and non-fatal: promotion is a convenience, never a reason to
 #    skip syncing what is already in Pending.
-if [ -n "$PROCESSING" ] && [ -n "$(find "$PROCESSING" -type f ! -name '.*' 2>/dev/null)" ]; then
+if [ -n "$PROCESSING" ] && [ -n "$(find "$PROCESSING" -type f ! -name '.*' -print -quit 2>/dev/null)" ]; then
   log "Processing has albums awaiting promotion — running finalize"
   sb finalize || log "finalize reported issues — continuing"
 fi
@@ -75,7 +75,9 @@ fi
 # .DS_Store, ._ AppleDouble files, and the .nolrc marker, so macOS junk alone
 # doesn't trigger a spurious no-op run. Runs after finalize so an album promoted
 # just above is seen here rather than waiting for the next mount.
-if [ -z "$(find "$PENDING" -type f ! -name '.*' 2>/dev/null)" ]; then
+# `-print -quit` stops at the first match: this only ever asks "is there
+# anything?", so listing a whole area into a shell string is wasted work.
+if [ -z "$(find "$PENDING" -type f ! -name '.*' -print -quit 2>/dev/null)" ]; then
   log "Nothing pending to sync."
   exit 0
 fi

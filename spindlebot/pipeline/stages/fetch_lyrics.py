@@ -181,14 +181,13 @@ def _query_lrclib(
     album: str,
     duration: int | None,
     request_delay: float,
-    *,
-    attempts: int = LRCLIB_RETRY_ATTEMPTS,
 ) -> tuple[str | None, str | None]:
     """Return (synced_lrc, plain_lyrics) from lrclib, or (None, None) on miss.
 
     A 200 with no lyrics and a 404 are both definitive misses. Everything else
     raises, and the caller treats that as transient. Retryable failures get up to
-    `attempts` tries with exponential backoff before the last one is re-raised.
+    LRCLIB_RETRY_ATTEMPTS tries with exponential backoff before the last one is
+    re-raised.
     """
     params: dict = {"artist_name": artist, "track_name": title, "album_name": album}
     if duration:
@@ -198,7 +197,7 @@ def _query_lrclib(
     req = urllib.request.Request(url, headers={"User-Agent": "SpindleBot/2.0"})
 
     last_exc: BaseException | None = None
-    for attempt in range(attempts):
+    for attempt in range(LRCLIB_RETRY_ATTEMPTS):
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.load(resp)
@@ -212,7 +211,7 @@ def _query_lrclib(
         except Exception as exc:
             last_exc = exc
 
-        if not _is_retryable(last_exc) or attempt + 1 >= attempts:
+        if not _is_retryable(last_exc) or attempt + 1 >= LRCLIB_RETRY_ATTEMPTS:
             break
         time.sleep(LRCLIB_RETRY_BACKOFF * (2 ** attempt))
 
