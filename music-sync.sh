@@ -114,14 +114,23 @@ if ! sb prune --execute --quiet; then
 fi
 
 # 5. Point beets at the retention path for anything that left the Pending area.
-#    The CAST is load-bearing, not decoration: beets stores items.path as a BLOB
-#    and PathQuery.col_clause() binds its pattern as a BLOB too, but SQLite's
-#    replace() always returns TEXT. SQLite never compares a TEXT value equal to
-#    a BLOB one, so dropping the CAST silently converts every rewritten row to
-#    TEXT and `beet ls path:...` stops matching it — which breaks the promote
-#    step (`beet move path:<dir>/`) with a misleading "No matching items found".
+#    Both CASTs are load-bearing, not decoration.
+#
+#    Writing: beets stores items.path as a BLOB and PathQuery.col_clause() binds
+#    its pattern as a BLOB too, but SQLite's replace() always returns TEXT, and
+#    SQLite never compares a TEXT value equal to a BLOB one. Without the outer
+#    CAST every rewritten row silently becomes TEXT and `beet ls path:...` stops
+#    matching it — which breaks the promote step (`beet move path:<dir>/`) with a
+#    misleading "No matching items found".
+#
+#    Matching: a bare `path LIKE ...` against a BLOB column is version-dependent.
+#    SQLite's LIKE optimization can rewrite a prefix match into a range compare,
+#    and in storage-class ordering a BLOB sorts after every TEXT value, so the
+#    range matches nothing. Newer SQLite coerces and matches; CI's older build
+#    does not, which surfaced the moment the column was correctly BLOB rather
+#    than TEXT. Read through CAST(... AS TEXT) so neither behaviour is relied on.
 if sqlite3 "$DB" \
-    "UPDATE items SET path = CAST(replace(path, '${PENDING}', '${REMOTE}') AS BLOB) WHERE path LIKE '${PENDING}/%';" 2>/dev/null; then
+    "UPDATE items SET path = CAST(replace(CAST(path AS TEXT), '${PENDING}', '${REMOTE}') AS BLOB) WHERE CAST(path AS TEXT) LIKE '${PENDING}/%';" 2>/dev/null; then
   log "Beets DB paths updated to $DEST_NAME"
 else
   log "WARNING: beets DB path update failed"

@@ -335,6 +335,12 @@ covered by the `typeof(path)='blob'` assertions in `tests/shell/test_music_sync.
 a value-only assertion passes against the bug, so any new test must check the storage class.
 To repair a library already retyped: `UPDATE items SET path = CAST(path AS BLOB) WHERE
 typeof(path)='text';`
+The **match** side needs a cast too: a bare `path LIKE '…%'` against a BLOB column is
+version-dependent — SQLite's LIKE optimization can become a range comparison, and in
+storage-class ordering a BLOB sorts after every TEXT value, so it matches nothing. macOS
+SQLite 3.51 coerces and matches; CI's older build does not, which only surfaced once the
+column was correctly BLOB rather than TEXT. Read through `CAST(path AS TEXT)` on both
+sides so neither behaviour is relied on.
 
 **4b. Unreadable album names use `album_dir`, never a retagged `$album`**
 Some album names sanitize into noise (`/\/\ /\ Y /\` becomes `____ __ Y __`, since `/`

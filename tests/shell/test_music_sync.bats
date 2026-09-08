@@ -148,6 +148,7 @@ MOCK
 
 _seed_beets_db() {
   # One item row whose path is a BLOB under Pending, as beets would store it.
+  # Column declared BLOB with no index on path, matching the real beets schema.
   sqlite3 "$BATS_TMPDIR/library.db" \
     "CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB);
      INSERT INTO items (path) VALUES (CAST('$BATS_TMPDIR/Pending/artist/album/01. t.flac' AS BLOB));"
@@ -276,4 +277,33 @@ MOCK
   [ "$status" -eq 0 ]                        # promotion is a convenience, not a gate
   grep -qF "spindlebot sync" "$MOCK_LOG"
   grep -qF "spindlebot prune" "$MOCK_LOG"
+}
+
+@test "beets path rewrite matches rows stored as TEXT and as BLOB alike" {
+  command -v sqlite3 >/dev/null || skip "sqlite3 not installed"
+  echo x > "$BATS_TMPDIR/Pending/track.flac"
+  _seed_beets_db
+  # A library part-way through the TEXT -> BLOB repair holds both storage
+  # classes at once. Matching must not depend on either: a bare
+  # `path LIKE ...` against a BLOB is version-dependent (SQLite's LIKE
+  # optimization can become a range compare, and a BLOB sorts after every TEXT
+  # value, so it matches nothing), which is why the WHERE reads through
+  # CAST(path AS TEXT). This passed on macOS SQLite 3.51 and failed on CI's
+  # older build until the cast was made explicit.
+  sqlite3 "$BATS_TMPDIR/library.db" \
+    "INSERT INTO items (path) VALUES ('$BATS_TMPDIR/Pending/artist/album/02. u.flac');"
+  types="$(sqlite3 "$BATS_TMPDIR/library.db" "SELECT group_concat(DISTINCT typeof(path)) FROM items;")"
+  [ "$types" = "blob,text" ] || [ "$types" = "text,blob" ]   # both classes seeded
+
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+
+  # both rewritten, both left as BLOB
+  n="$(sqlite3 "$BATS_TMPDIR/library.db" \
+        "SELECT count(*) FROM items WHERE typeof(path)='blob'
+           AND CAST(path AS TEXT) LIKE '$BATS_TMPDIR/RetentionDrive/%';")"
+  [ "$n" -eq 2 ]
+  left="$(sqlite3 "$BATS_TMPDIR/library.db" \
+        "SELECT count(*) FROM items WHERE CAST(path AS TEXT) LIKE '$BATS_TMPDIR/Pending/%';")"
+  [ "$left" -eq 0 ]
 }
