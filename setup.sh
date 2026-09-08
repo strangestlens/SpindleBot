@@ -8,6 +8,7 @@
 #   4. Installs tomli if Python < 3.11 (needed before config loads)
 #   5. Migrates legacy ~/Music/Staging + ~/Music/Library into the new
 #      Import/Pending working areas (safe + idempotent; never deletes old dirs)
+#   5a. Installs beets-config.yaml to the beets config path if absent
 #   6. Installs music-watcher.sh to ~/.local/bin/
 #   7. Installs launchd plists to ~/Library/LaunchAgents/
 #   8. Runs `python -m spindlebot check` so you can see what needs filling in
@@ -107,6 +108,22 @@ PROCESSING_DIR="$(resolve_cfg core.processing_dir)"
 [ -n "$PROCESSING_DIR" ] && mkdir -p "$PROCESSING_DIR"
 ARCHIVE_DIR="$(resolve_cfg core.archive_dir)"
 [ -n "$ARCHIVE_DIR" ] && mkdir -p "$ARCHIVE_DIR"
+
+# ── 5a. Install the beets config if absent ───────────────────────────────────
+# beets-config.yaml is a working reference, not a generated file: its directory:
+# must match core.pending_dir or beet files albums where SpindleBot isn't looking.
+# Copy it only when nothing is there — an existing beets config is the user's and
+# is never overwritten, because it holds a Genius key and any local tuning.
+BEETS_CONFIG="$(resolve_cfg tools.beets_config)"
+if [ -n "$BEETS_CONFIG" ]; then
+  if [ ! -f "$BEETS_CONFIG" ]; then
+    mkdir -p "$(dirname "$BEETS_CONFIG")"
+    cp "$PIPELINE_DIR/beets-config.yaml" "$BEETS_CONFIG"
+    echo "Created $BEETS_CONFIG — set lyrics.genius_api_key if you want beets' own lyrics fetch."
+  else
+    echo "beets config already exists at $BEETS_CONFIG — skipping."
+  fi
+fi
 
 # ── 6. Install music-watcher.sh ───────────────────────────────────────────────
 mkdir -p "$HOME/.local/bin"
