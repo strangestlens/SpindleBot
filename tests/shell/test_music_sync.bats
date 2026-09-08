@@ -13,7 +13,8 @@ setup() {
   export BATS_TMPDIR
   BATS_TMPDIR="$(mktemp -d)"
   mkdir -p "$BATS_TMPDIR/bin" "$BATS_TMPDIR/pipeline" "$BATS_TMPDIR/logs" \
-           "$BATS_TMPDIR/Pending" "$BATS_TMPDIR/RetentionDrive"
+           "$BATS_TMPDIR/Pending" "$BATS_TMPDIR/Processing" \
+           "$BATS_TMPDIR/RetentionDrive"
   cp "$FIXTURES/bin/python" "$BATS_TMPDIR/bin/python"
   cp "$FIXTURES/pipeline/music-notify.sh" "$BATS_TMPDIR/pipeline/music-notify.sh"
   chmod +x "$BATS_TMPDIR/pipeline/music-notify.sh"
@@ -192,4 +193,87 @@ _seed_beets_db() {
   n="$(sqlite3 "$BATS_TMPDIR/library.db" \
         "SELECT count(*) FROM items WHERE CAST(path AS TEXT) LIKE '%/RetentionDrive/%' AND typeof(path)='blob';")"
   [ "$n" -eq 2 ]
+}
+
+# ── finalize catch-up ─────────────────────────────────────────────────────────
+#
+# An album promotes to Pending at import time (ImportRunner stage 10), but only
+# if it is lyric-complete by the end of its own run. A track left non-terminal by
+# a transient lrclib failure drops out of that path and nothing revisits it —
+# runner.py says "finalize will retry it", but nothing called finalize. The mount
+# is the natural catch-up point, so the sync runs it first.
+
+@test "runs finalize before inventory when Processing has albums" {
+  echo x > "$BATS_TMPDIR/Pending/track.flac"
+  mkdir -p "$BATS_TMPDIR/Processing/Artist/Album"
+  echo x > "$BATS_TMPDIR/Processing/Artist/Album/01. t.flac"
+
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qF "spindlebot finalize" "$MOCK_LOG"
+
+  fin_line=$(grep -n "spindlebot finalize" "$MOCK_LOG" | head -1 | cut -d: -f1)
+  inv_line=$(grep -n "spindlebot inventory" "$MOCK_LOG" | head -1 | cut -d: -f1)
+  [ "$fin_line" -lt "$inv_line" ]
+}
+
+@test "does not run finalize when Processing is empty" {
+  echo x > "$BATS_TMPDIR/Pending/track.flac"     # there IS work to sync
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qF "spindlebot inventory" "$MOCK_LOG"    # the sync ran
+  ! grep -qF "spindlebot finalize" "$MOCK_LOG"   # but finalize was skipped
+}
+
+@test "Processing dotfiles alone do not trigger finalize" {
+  echo x > "$BATS_TMPDIR/Pending/track.flac"
+  touch "$BATS_TMPDIR/Processing/.DS_Store"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  ! grep -qF "spindlebot finalize" "$MOCK_LOG"
+}
+
+@test "an album finalize promotes is synced in the same pass" {
+  # Pending starts EMPTY and only Processing has work — the pre-finalize script
+  # bailed at the "nothing pending" guard here and the album waited for the next
+  # mount. The guard must be evaluated after finalize, not before.
+  mkdir -p "$BATS_TMPDIR/Processing/Artist/Album"
+  echo x > "$BATS_TMPDIR/Processing/Artist/Album/01. t.flac"
+
+  # mock that actually promotes: finalize moves the file into Pending
+  cat > "$BATS_TMPDIR/bin/python" <<MOCK
+#!/bin/bash
+echo "python \$*" >> "\${MOCK_LOG:-/dev/null}"
+for a in "\$@"; do
+  if [ "\$a" = "finalize" ]; then
+    mv "$BATS_TMPDIR/Processing/Artist/Album/01. t.flac" "$BATS_TMPDIR/Pending/01. t.flac"
+  fi
+done
+exit 0
+MOCK
+  chmod +x "$BATS_TMPDIR/bin/python"
+
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -qF "spindlebot finalize" "$MOCK_LOG"
+  grep -qF "spindlebot sync" "$MOCK_LOG"     # did not bail at "nothing pending"
+  grep -qF "spindlebot prune" "$MOCK_LOG"
+}
+
+@test "a finalize failure does not abort the sync" {
+  echo x > "$BATS_TMPDIR/Pending/track.flac"
+  mkdir -p "$BATS_TMPDIR/Processing/Artist/Album"
+  echo x > "$BATS_TMPDIR/Processing/Artist/Album/01. t.flac"
+  cat > "$BATS_TMPDIR/bin/python" <<'MOCK'
+#!/bin/bash
+echo "python $*" >> "${MOCK_LOG:-/dev/null}"
+for a in "$@"; do [ "$a" = "finalize" ] && exit 1; done
+exit 0
+MOCK
+  chmod +x "$BATS_TMPDIR/bin/python"
+
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]                        # promotion is a convenience, not a gate
+  grep -qF "spindlebot sync" "$MOCK_LOG"
+  grep -qF "spindlebot prune" "$MOCK_LOG"
 }

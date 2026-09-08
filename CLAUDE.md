@@ -4,14 +4,16 @@
 
 SpindleBot is an event-driven pipeline for ripping, tagging, and managing a lossless music library on macOS. It handles two primary flows:
 
-**Import:** XLD rips a CD → writes a `.log` to the Import area → fswatch triggers `music-watcher.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → **beet move → Processing** → posttag → fetch-art → fetch-lyrics → **per-album promote to Pending (only if lyric-complete)** → archive log → notify. An album lands in Pending only once every track has a terminal `.lrc`/`.nolrc` marker, so Pending is complete-by-construction and sync/prune can trust it. Albums left in Processing (transient lyric errors) are caught up by `spindlebot finalize`.
+**Import:** XLD rips a CD → writes a `.log` to the Import area → fswatch triggers `music-watcher.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → **beet move → Processing** → posttag → fetch-art → fetch-lyrics → **per-album promote to Pending (only if lyric-complete)** → archive log → notify. An album lands in Pending only once every track has a terminal `.lrc`/`.nolrc` marker, so Pending is complete-by-construction and sync/prune can trust it. Promotion happens inline at import time (runner stage 10) — but only if the album is lyric-complete by the end of its *own* run. Albums left in Processing by a transient lyric error are caught up by `spindlebot finalize`, which `music-sync.sh` now runs on every mount; before that wiring, nothing ever called it and stranded albums stayed stranded indefinitely.
 
 Also triggered automatically when a directory is dropped into the Import area (e.g. Amazon download).
 
 > **Working areas (renamed Apr 2026, Phase A):** "Staging" → **Import** (active import) and "Library" → **Pending** (processed albums awaiting distribution), both relocated under `~/Library/Application Support/SpindleBot/`. Config keys are `core.import_dir` / `core.pending_dir` (legacy `staging_dir`/`library_dir` still honored); env vars are `SPINDLEBOT_IMPORT_DIR` / `SPINDLEBOT_PENDING_DIR`.
 > **Processing area (added Jul 2026, Option C):** a third area **Processing** between Import and Pending holds in-flight albums while art/lyrics are fetched; an album is promoted to Pending only once `album_lyrics_complete()` holds. This eliminates the fetch-lyrics window in which a mount-sync could prune audio out of Pending mid-fetch and strand late lyric sidecars. Config key `core.processing_dir` (default `~/Library/Application Support/SpindleBot/Processing`); env var `SPINDLEBOT_PROCESSING_DIR`. The promote/finalize orchestration lives in `services/promote.py`; `spindlebot finalize` re-fetches lyrics and promotes anything still stuck.
 
-**Sync:** launchd detects the retention-drive mount (WatchPaths, generated from the first enabled local_drive `[[destinations]]`) → `music-sync.sh` → inventory → review + acknowledge → sync (copy→verify→record presence) → prune (release Pending copies verified on retention) → beets DB path reconciliation → notify
+**Sync:** launchd detects the retention-drive mount (WatchPaths, generated from the first enabled local_drive `[[destinations]]`) → `music-sync.sh` → **finalize (promote anything stranded in Processing)** → inventory → review + acknowledge → sync (copy→verify→record presence) → prune (release Pending copies verified on retention) → beets DB path reconciliation → notify
+
+> The finalize step runs first, and before the "nothing pending" guard, so an album it promotes is synced in the same pass rather than waiting for the next mount. It is skipped entirely when Processing is empty (a spurious mount still does no work) and is non-fatal — promotion is a convenience, never a reason to skip syncing what is already in Pending.
 
 ## Documentation map
 

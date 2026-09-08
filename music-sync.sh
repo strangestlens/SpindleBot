@@ -2,7 +2,8 @@
 # music-sync.sh — fires when the retention drive mounts (or run manually).
 #
 # Content-addressed sync (replaces the old rsync --remove-source-files MOVE):
-#   inventory Pending → review + acknowledge → sync (copy → verify hash → record
+#   finalize (promote anything stranded in Processing) → inventory Pending →
+#   review + acknowledge → sync (copy → verify hash → record
 #   presence on retention) → prune (release the Pending copy, but ONLY files that
 #   are hash-verified on retention) → point beets at the retention path → notify.
 #
@@ -21,6 +22,7 @@ source "$HOME/.config/spindlebot/bootstrap.sh" 2>/dev/null || {
 export PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR"
 
 PENDING="$SPINDLEBOT_PENDING_DIR"
+PROCESSING="$SPINDLEBOT_PROCESSING_DIR"
 REMOTE="$SPINDLEBOT_DESTINATION_PATH"
 DEST_NAME="$SPINDLEBOT_DESTINATION_NAME"   # the enabled local_drive [[destinations]] name
 LOGFILE="$SPINDLEBOT_LOG_DIR/music-sync.log"
@@ -53,9 +55,26 @@ if [ ! -d "$REMOTE" ]; then
   exit 0
 fi
 
+# 0. Catch up anything stranded in Processing. An album promotes to Pending at
+#    import time (ImportRunner stage 10), but only if it is lyric-complete by the
+#    end of its own run — a track left non-terminal by a transient lrclib failure
+#    drops out of that path, and nothing revisits it. finalize is the documented
+#    catch-up and this is the natural moment for it: a mount is when the system
+#    gets reconciled anyway, and anything promoted here is picked up by the
+#    Pending check below and synced in the same pass.
+#
+#    Guarded on Processing actually having content so a spurious mount still does
+#    no work at all, and non-fatal: promotion is a convenience, never a reason to
+#    skip syncing what is already in Pending.
+if [ -n "$PROCESSING" ] && [ -n "$(find "$PROCESSING" -type f ! -name '.*' 2>/dev/null)" ]; then
+  log "Processing has albums awaiting promotion — running finalize"
+  sb finalize || log "finalize reported issues — continuing"
+fi
+
 # Anything to sync? Count only non-dotfiles — skips the location marker, a stray
 # .DS_Store, ._ AppleDouble files, and the .nolrc marker, so macOS junk alone
-# doesn't trigger a spurious no-op run.
+# doesn't trigger a spurious no-op run. Runs after finalize so an album promoted
+# just above is seen here rather than waiting for the next mount.
 if [ -z "$(find "$PENDING" -type f ! -name '.*' 2>/dev/null)" ]; then
   log "Nothing pending to sync."
   exit 0
