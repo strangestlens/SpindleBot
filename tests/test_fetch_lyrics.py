@@ -13,8 +13,11 @@ import mutagen.flac
 import pytest
 
 from spindlebot.pipeline.stages.fetch_lyrics import (
+    LRCLIB_RETRY_ATTEMPTS,
+    LRCLIB_RETRY_BACKOFF,
     _get_tags,
     _plain_to_lrc,
+    _process_file,
     _query_lrclib,
     _strip_cjk,
     _title_from_filename,
@@ -285,13 +288,16 @@ class TestQueryLrclibMissVsError:
             assert _query_lrclib("a", "t", "al", 100, 0.0) == (None, None)
 
     def test_500_is_transient_error(self):
-        with patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+        # patched sleep: 500 is retryable, so this now walks the backoff loop
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
                    side_effect=self._http_error(500)):
             with pytest.raises(urllib.error.HTTPError):
                 _query_lrclib("a", "t", "al", 100, 0.0)
 
     def test_connection_error_is_transient(self):
-        with patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
                    side_effect=urllib.error.URLError("refused")):
             with pytest.raises(urllib.error.URLError):
                 _query_lrclib("a", "t", "al", 100, 0.0)
@@ -600,3 +606,104 @@ class TestFetchFromLrclibEnglishFallback:
         called_titles = {t for _, t in call_log}
         # No title_english value means no English title queries
         assert "Hyperlife" not in called_titles
+
+
+# ── unit: lrclib 5xx retry ───────────────────────────────────────────────────
+
+
+class TestQueryLrclibRetry:
+    """lrclib serves sporadic 5xx under load — the same query alternates between
+    200 and 503 seconds apart. Without a retry one blip converts a definitive
+    miss into a transient error, no terminal marker is written, and the album
+    never becomes lyric-complete enough to promote out of Processing."""
+
+    def _http_error(self, code):
+        return urllib.error.HTTPError(
+            url="u", code=code, msg="x", hdrs=None, fp=None)
+
+    def test_503_then_success_returns_lyrics(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=[self._http_error(503),
+                                _lrclib_response(synced="[00:01.00] hi")]) as op:
+            assert _query_lrclib("a", "t", "al", 100, 0.0) == ("[00:01.00] hi", None)
+        assert op.call_count == 2
+
+    def test_503_then_clean_miss_is_a_definitive_miss(self):
+        # THE stranding case: the retry answers cleanly with no lyrics, so this
+        # is a real miss and the caller may write the terminal .nolrc marker.
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=[self._http_error(503),
+                                _lrclib_response(synced=None, plain=None)]):
+            assert _query_lrclib("a", "t", "al", 100, 0.0) == (None, None)
+
+    def test_persistent_503_still_raises_after_bounded_attempts(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=self._http_error(503)) as op:
+            with pytest.raises(urllib.error.HTTPError):
+                _query_lrclib("a", "t", "al", 100, 0.0)
+        assert op.call_count == LRCLIB_RETRY_ATTEMPTS
+
+    def test_connection_error_is_retried(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=[urllib.error.URLError("refused"),
+                                _lrclib_response(plain="verse")]) as op:
+            assert _query_lrclib("a", "t", "al", 100, 0.0) == (None, "verse")
+        assert op.call_count == 2
+
+    def test_429_is_retried(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=[self._http_error(429),
+                                _lrclib_response(synced="[00:01.00] hi")]) as op:
+            assert _query_lrclib("a", "t", "al", 100, 0.0) == ("[00:01.00] hi", None)
+        assert op.call_count == 2
+
+    def test_400_is_not_retried(self):
+        # A 4xx other than 429 is the server answering definitively; retrying
+        # it only burns requests against a rate-limited service.
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=self._http_error(400)) as op:
+            with pytest.raises(urllib.error.HTTPError):
+                _query_lrclib("a", "t", "al", 100, 0.0)
+        assert op.call_count == 1
+
+    def test_404_is_not_retried(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=self._http_error(404)) as op:
+            assert _query_lrclib("a", "t", "al", 100, 0.0) == (None, None)
+        assert op.call_count == 1
+
+    def test_backoff_grows_between_attempts(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep") as slp, \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=self._http_error(503)):
+            with pytest.raises(urllib.error.HTTPError):
+                _query_lrclib("a", "t", "al", 100, 0.0)
+        waits = [c.args[0] for c in slp.call_args_list if c.args and c.args[0] > 0]
+        assert waits == [LRCLIB_RETRY_BACKOFF, LRCLIB_RETRY_BACKOFF * 2]
+
+
+class TestStrandingRegression:
+    """End to end: the shape that left four albums sitting in Processing."""
+
+    def test_transient_503_no_longer_strands_a_lyricless_track(self, tmp_path):
+        # An instrumental: lrclib genuinely has nothing, and the first call 503s.
+        # Pre-fix this wrote no marker at all and the album never promoted.
+        audio = tmp_path / "01. Overture.flac"
+        _write_minimal_flac(audio, {"artist": "A", "title": "Overture", "album": "Al"})
+        err = urllib.error.HTTPError(url="u", code=503, msg="x", hdrs=None, fp=None)
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=[err] + [_lrclib_response(synced=None, plain=None)
+                                        for _ in range(20)]):
+            outcome = _process_file(str(audio), 0.0)
+
+        assert outcome == "missing"
+        assert (tmp_path / "01. Overture.nolrc").exists()
+        assert album_lyrics_complete(tmp_path)

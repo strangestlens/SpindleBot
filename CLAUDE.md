@@ -340,6 +340,19 @@ When calling spindlebot modules from shell scripts, always `export PYTHONPATH="$
 **7. `SPINDLEBOT_IMPORT_DIR` not `SPINDLEBOT_IMPORT`**
 The bootstrap env var for the import area is `SPINDLEBOT_IMPORT_DIR` (and the Pending area is `SPINDLEBOT_PENDING_DIR`). Using a name without the `_DIR` suffix silently resolves to empty — fswatch will then watch the wrong directory (the cwd at daemon launch) with no error. `music-watcher.sh` guards against this at startup with an explicit empty-check.
 
+**7a. lrclib 5xx is retried; only a clean answer is a definitive miss**
+lrclib serves sporadic 5xx under load — the same query alternates between 200 and 503
+seconds apart. `_query_lrclib` retries retryable failures (5xx, 429, connection/timeout)
+up to `LRCLIB_RETRY_ATTEMPTS` with exponential backoff; a 404 or any other 4xx is the
+server answering and is never retried. This matters because a track that genuinely has
+no lyrics exhausts every attempt variant instead of short-circuiting on a hit, so it draws
+the most requests and is the most likely to catch a blip — and pre-retry, one blip made
+`_fetch_from_lrclib` raise, which writes NO terminal marker, leaves the album short of
+`album_lyrics_complete()`, and strands it in Processing indefinitely. Keep the miss/error
+distinction intact: never widen "definitive miss" to cover an errored attempt just to get
+a marker written. Tests patch `spindlebot.pipeline.stages.fetch_lyrics.time.sleep` — the
+module calls `time.sleep` through its own namespace precisely so that patch point works.
+
 **8. fetch_art test fixtures**
 Tests that need controlled art-fetching behaviour must include `musicbrainz_albumid` in the
 FLAC fixture tags. Without it, `_fetch_from_caa` is skipped entirely (no MBID → `if mbid:`
