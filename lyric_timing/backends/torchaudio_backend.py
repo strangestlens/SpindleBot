@@ -54,6 +54,14 @@ ACTIVITY_SAMPLE_RATE = 16000
 # placement never moves. Breaking that tie needs an explicit preference for the
 # earliest acoustically supported placement, which is not expressible as an
 # emission value.
+#
+# The column deliberately leaves each frame's distribution summing to 2.0 rather
+# than 1.0 — the same thing torchaudio's own `get_model(with_star=True)` does.
+# Renormalizing afterwards is not a fix: the star is a constant at every frame,
+# so logsumexp is a per-frame constant that cancels in the argmax. Measured over
+# 336 words: zero frame positions change and every reported confidence is
+# exactly halved, which would push correctly-aligned lines below both the
+# editor's orange threshold and DEFAULT_MIN_CONFIDENCE for no benefit.
 STAR_LOG_PROB = 0.0
 
 # Fraction of words with no mappable characters that means "wrong script"
