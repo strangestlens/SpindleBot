@@ -4,14 +4,16 @@
 
 SpindleBot is an event-driven pipeline for ripping, tagging, and managing a lossless music library on macOS. It handles two primary flows:
 
-**Import:** XLD rips a CD → writes a `.log` to the Import area → fswatch triggers `music-watcher.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → **beet move → Processing** → posttag → fetch-art → fetch-lyrics → **per-album promote to Pending (only if lyric-complete)** → archive log → notify. An album lands in Pending only once every track has a terminal `.lrc`/`.nolrc` marker, so Pending is complete-by-construction and sync/prune can trust it. Albums left in Processing (transient lyric errors) are caught up by `spindlebot finalize`.
+**Import:** XLD rips a CD → writes a `.log` to the Import area → fswatch triggers `music-watcher.sh` → `spindlebot import` → pretag → `beet import` → multidisc fix → **beet move → Processing** → posttag → fetch-art → fetch-lyrics → **per-album promote to Pending (only if lyric-complete)** → archive log → notify. An album lands in Pending only once every track has a terminal `.lrc`/`.nolrc` marker, so Pending is complete-by-construction and sync/prune can trust it. Promotion happens inline at import time (runner stage 10) — but only if the album is lyric-complete by the end of its *own* run. Albums left in Processing by a transient lyric error are caught up by `spindlebot finalize`, which `music-sync.sh` now runs on every mount; before that wiring, nothing ever called it and stranded albums stayed stranded indefinitely.
 
 Also triggered automatically when a directory is dropped into the Import area (e.g. Amazon download).
 
 > **Working areas (renamed Apr 2026, Phase A):** "Staging" → **Import** (active import) and "Library" → **Pending** (processed albums awaiting distribution), both relocated under `~/Library/Application Support/SpindleBot/`. Config keys are `core.import_dir` / `core.pending_dir` (legacy `staging_dir`/`library_dir` still honored); env vars are `SPINDLEBOT_IMPORT_DIR` / `SPINDLEBOT_PENDING_DIR`.
 > **Processing area (added Jul 2026, Option C):** a third area **Processing** between Import and Pending holds in-flight albums while art/lyrics are fetched; an album is promoted to Pending only once `album_lyrics_complete()` holds. This eliminates the fetch-lyrics window in which a mount-sync could prune audio out of Pending mid-fetch and strand late lyric sidecars. Config key `core.processing_dir` (default `~/Library/Application Support/SpindleBot/Processing`); env var `SPINDLEBOT_PROCESSING_DIR`. The promote/finalize orchestration lives in `services/promote.py`; `spindlebot finalize` re-fetches lyrics and promotes anything still stuck.
 
-**Sync:** launchd detects the retention-drive mount (WatchPaths, generated from the first enabled local_drive `[[destinations]]`) → `music-sync.sh` → inventory → review + acknowledge → sync (copy→verify→record presence) → prune (release Pending copies verified on retention) → beets DB path reconciliation → notify
+**Sync:** launchd detects the retention-drive mount (WatchPaths, generated from the first enabled local_drive `[[destinations]]`) → `music-sync.sh` → **finalize (promote anything stranded in Processing)** → inventory → review + acknowledge → sync (copy→verify→record presence) → prune (release Pending copies verified on retention) → beets DB path reconciliation → notify
+
+> The finalize step runs first, and before the "nothing pending" guard, so an album it promotes is synced in the same pass rather than waiting for the next mount. It is skipped entirely when Processing is empty (a spurious mount still does no work) and is non-fatal — promotion is a convenience, never a reason to skip syncing what is already in Pending.
 
 ## Documentation map
 
@@ -166,6 +168,15 @@ music-fetch-lyrics.py            — legacy root-level script (superseded by sta
 music-fetch-art.py               — legacy root-level script (superseded by stages/fetch_art.py)
 setup.sh                         — first-time environment setup: config files, bootstrap.sh,
                                      music-watcher.sh → ~/.local/bin/, plists → ~/Library/LaunchAgents/
+install-beets-config.sh          — sourceable helper: installs beets-config.yaml to
+                                     tools.beets_config when absent, NEVER overwriting an
+                                     existing one (it holds the user's Genius key). Functions
+                                     only, no top-level side effects — same pattern as
+                                     migrate-work-dirs.sh, so bats can exercise it.
+beets-config.yaml                — the ONE shipped beets config template (there used to be a
+                                     drifted duplicate at config.yaml). Ships an empty
+                                     genius_api_key; a real key belongs only in the installed
+                                     copy.
 (launchd agents com.strangestlens.music-watcher + com.strangestlens.music-sync
                                      are GENERATED per-machine by setup.sh — home dir, log dir, and
                                      the retention volume to watch all come from config, not baked in)
@@ -250,7 +261,13 @@ tests/
                                      LYRIC_TIMING_IT_AUDIO/LYRIC_TIMING_IT_LRC set (never in CI)
   test_lrc_editor_ai.py          — lrc-editor /ai-arrange job orchestration (mock backend)
   test_lrc_editor_audit.py       — lrc-editor /audit page: run job, saved-state recall, /load
+  test_beets_config_template.py  — guards on the SHIPPED beets-config.yaml: no committed
+                                     secret, the album_dir path override survives, one
+                                     template only. Text-parsed, NOT PyYAML — requirements.txt
+                                     stays light and a template guard isn't worth a dep.
   shell/                         — bats shell tests (shellcheck + integration)
+    test_install_beets_config.bats — install-beets-config.sh: installs when absent, and
+                                     NEVER overwrites an existing beets config
 ```
 
 ## ImportRunner stage sequence
@@ -307,6 +324,34 @@ Always use a trailing slash: `path:/full/path/` — without it, matches may be m
 After rsync, the beets DB still has local paths. The sync script updates them via `sqlite3
 UPDATE`. This must happen before any lyrics fetch on DwRugged.
 
+**4a. `items.path` is a BLOB — any raw SQL rewrite must `CAST(... AS BLOB)`**
+beets stores `items.path` as a BLOB and `PathQuery.col_clause()` binds its pattern as one
+too, but SQLite's `replace()` returns TEXT — and SQLite never compares TEXT equal to BLOB.
+So a bare `UPDATE items SET path = replace(path, …)` silently retypes every row it touches,
+after which **`beet ls path:…` matches nothing** library-wide. Nothing errors; the failure
+surfaces far away, as `beet move path:<dir>/` reporting "No matching items found" and albums
+stranding in Processing. `music-sync.sh` step 5 is the one place that does this, and it is
+covered by the `typeof(path)='blob'` assertions in `tests/shell/test_music_sync.bats` —
+a value-only assertion passes against the bug, so any new test must check the storage class.
+To repair a library already retyped: `UPDATE items SET path = CAST(path AS BLOB) WHERE
+typeof(path)='text';`
+The **match** side needs a cast too: a bare `path LIKE '…%'` against a BLOB column is
+version-dependent — SQLite's LIKE optimization can become a range comparison, and in
+storage-class ordering a BLOB sorts after every TEXT value, so it matches nothing. macOS
+SQLite 3.51 coerces and matches; CI's older build does not, which only surfaced once the
+column was correctly BLOB rather than TEXT. Read through `CAST(path AS TEXT)` on both
+sides so neither behaviour is relied on.
+
+**4b. Unreadable album names use `album_dir`, never a retagged `$album`**
+Some album names sanitize into noise (`/\/\ /\ Y /\` becomes `____ __ Y __`, since `/`
+and `\` cannot appear in a filename). The path template resolves this with
+`%ifdef{album_dir,,$album}`: set an `album_dir` flex field and it becomes the directory name,
+leave it unset — the case for nearly every album — and `$album` is used exactly as before.
+Set it on the **items**, not the album, because `tmpl_ifdef` checks `field in self.item`:
+`beet modify album_dir='MAYA' mb_albumid:<id> && beet move`. Do **not** instead retag
+`$album` to a readable value: `mbsync` is an enabled plugin and reverts MusicBrainz-derived
+fields on the next metadata sync, which sends the directory straight back to the noise name.
+
 **5. bootstrap.sh sourcing**
 Every shell script sources `~/.config/spindlebot/bootstrap.sh`, which evals
 `python -m spindlebot config shell`. If Python or the config fails, all `$SPINDLEBOT_*` vars
@@ -317,6 +362,19 @@ When calling spindlebot modules from shell scripts, always `export PYTHONPATH="$
 
 **7. `SPINDLEBOT_IMPORT_DIR` not `SPINDLEBOT_IMPORT`**
 The bootstrap env var for the import area is `SPINDLEBOT_IMPORT_DIR` (and the Pending area is `SPINDLEBOT_PENDING_DIR`). Using a name without the `_DIR` suffix silently resolves to empty — fswatch will then watch the wrong directory (the cwd at daemon launch) with no error. `music-watcher.sh` guards against this at startup with an explicit empty-check.
+
+**7a. lrclib 5xx is retried; only a clean answer is a definitive miss**
+lrclib serves sporadic 5xx under load — the same query alternates between 200 and 503
+seconds apart. `_query_lrclib` retries retryable failures (5xx, 429, connection/timeout)
+up to `LRCLIB_RETRY_ATTEMPTS` with exponential backoff; a 404 or any other 4xx is the
+server answering and is never retried. This matters because a track that genuinely has
+no lyrics exhausts every attempt variant instead of short-circuiting on a hit, so it draws
+the most requests and is the most likely to catch a blip — and pre-retry, one blip made
+`_fetch_from_lrclib` raise, which writes NO terminal marker, leaves the album short of
+`album_lyrics_complete()`, and strands it in Processing indefinitely. Keep the miss/error
+distinction intact: never widen "definitive miss" to cover an errored attempt just to get
+a marker written. Tests patch `spindlebot.pipeline.stages.fetch_lyrics.time.sleep` — the
+module calls `time.sleep` through its own namespace precisely so that patch point works.
 
 **8. fetch_art test fixtures**
 Tests that need controlled art-fetching behaviour must include `musicbrainz_albumid` in the

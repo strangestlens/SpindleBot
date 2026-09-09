@@ -8,10 +8,11 @@ import:
   quiet: yes
   quiet_fallback: asis
   group_albums: yes
-  ignore: ['.*', '*.beets', '*.initflag', '*.movpkg', 'iTunes']
+  ignore: ['.*', '*.beets', '*.initfrag', '*.movpkg', 'iTunes']
 
 plugins:
   - musicbrainz
+  - mbsync
   - fetchart
   - embedart
   - lyrics
@@ -21,14 +22,21 @@ plugins:
 paths:
   # Single disc:  Artist/Album/NN. Title.flac
   # Multi disc:   Artist/Album [Disk N]/NN. Title.flac
-  default: $albumartist/%if{$multidisc,$album [Disk $disc],$album}/$track. $title
+  # album_dir: optional per-album directory-name override, for albums whose real
+  # name sanitizes into something unreadable (e.g. '/\/\ /\ Y /\' -> '____ __ Y __').
+  # Set it on the ITEMS, not the album (%ifdef checks the item's own fields):
+  #   beet modify album_dir='MAYA' mb_albumid:<id> && beet move
+  # Unset for almost every album, in which case $album is used as before. Preferred
+  # over retagging $album, which mbsync would revert on the next metadata sync.
+  default: $albumartist/%if{$multidisc,%ifdef{album_dir,,$album} [Disk $disc],%ifdef{album_dir,,$album}}/$track. $title
 
 inline:
   # Numeric comparison beets can't do in path templates.
   # IMPORTANT: must return "" (not 0) for false — beets templates treat "0" as truthy.
-  # Also: beets caches inline values in DB at import time. If an album gets the wrong
-  # value, fix with: beet modify --yes <query> multidisc=
-  multidisc: 1 if int(disctotal or 0) > 1 else ""
+  # Computed dynamically from disctotal (not cached). Single-disc rips get disctotal
+  # patched to 1 in the DB by the import runner after beet import, so this correctly
+  # returns "" for them even when MusicBrainz said disctotal > 1.
+  multidisc: '"1" if int(disctotal or 0) > 1 else ""'
 
 # Allow periods in filenames (for artists like M.I.A.)
 replace:
@@ -49,10 +57,12 @@ embedart:
 lyrics:
   auto: yes
   sources: genius musixmatch tekstowo
-  # NOTE: Move genius_api_key to ~/.config/spindlebot/secrets.toml [genius] section.
-  # Pipeline's music-fetch-lyrics.py reads it from there via SPINDLEBOT env vars.
-  # This key is only used by the beets lyrics plugin (auto-fetch during import).
-  genius_api_key: Jqv2DDIfn3b97zcp7V7Pvh6bb6bK39aBSfhAo09DWlpFQyWEIQ8KmbFU6MB5tOCc
+  # Fill in your own key locally — never commit one. This file is a template that
+  # setup.sh copies to the beets config path; the copy is yours to edit and is not
+  # tracked. SpindleBot's own lyric fetching does not use this: stages/fetch_lyrics.py
+  # goes to lrclib and reads any credentials from ~/.config/spindlebot/secrets.toml.
+  # This key is only for the beets lyrics plugin's auto-fetch during import.
+  genius_api_key: ""
   fallback: ""
 
 scrub:

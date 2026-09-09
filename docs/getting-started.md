@@ -78,8 +78,14 @@ means nothing is obviously misconfigured, not that an import will succeed.
 
 beets does the MusicBrainz matching and owns its own item DB. Its `directory:`
 must match `core.pending_dir`, or the import will tag correctly and then file
-the album somewhere SpindleBot isn't looking. `beets-config.yaml` in the repo is
-a working reference.
+the album somewhere SpindleBot isn't looking. `setup.sh` copies the repo's
+`beets-config.yaml` to `tools.beets_config` when nothing is there yet; if you
+already had a beets config it is left alone, so check `directory:` yourself.
+
+The shipped file ships `lyrics.genius_api_key` empty. Fill it in locally if you
+want the beets lyrics plugin's auto-fetch during import, and keep it out of
+version control. SpindleBot's own lyric fetching does not use it — that goes to
+lrclib and needs no key.
 
 ## 5. Run the tests
 

@@ -45,6 +45,16 @@ from spindlebot.disc import find_audio_files
 
 LRCLIB_API = "https://lrclib.net/api/get"
 
+# lrclib serves sporadic 5xx under load — the same query can alternate between
+# 200 and 503 seconds apart. Without a retry, one such blip anywhere in a track's
+# attempt sequence turns a definitive miss into a transient error, which writes
+# no terminal marker and strands the whole album short of promotion. Tracks that
+# genuinely have no lyrics (instrumentals, skits) are the most exposed, because
+# they exhaust every attempt variant instead of short-circuiting on a hit.
+# Bounded so a service that is actually down still fails fast.
+LRCLIB_RETRY_ATTEMPTS = 3
+LRCLIB_RETRY_BACKOFF = 0.5
+
 
 @dataclass
 class LyricsResult:
@@ -153,6 +163,18 @@ def _title_from_filename(path: str) -> str | None:
 # ── lrclib API ────────────────────────────────────────────────────────────────
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    """True for failures worth another go: server-side 5xx, rate limiting, and
+    connection/timeout errors. A 4xx other than 429 is the server answering
+    definitively, so retrying it just burns requests.
+
+    HTTPError subclasses URLError subclasses OSError, so it must be tested first.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500 or exc.code == 429
+    return isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
+
+
 def _query_lrclib(
     artist: str,
     title: str,
@@ -160,26 +182,41 @@ def _query_lrclib(
     duration: int | None,
     request_delay: float,
 ) -> tuple[str | None, str | None]:
-    """Return (synced_lrc, plain_lyrics) from lrclib, or (None, None) on miss."""
+    """Return (synced_lrc, plain_lyrics) from lrclib, or (None, None) on miss.
+
+    A 200 with no lyrics and a 404 are both definitive misses. Everything else
+    raises, and the caller treats that as transient. Retryable failures get up to
+    LRCLIB_RETRY_ATTEMPTS tries with exponential backoff before the last one is
+    re-raised.
+    """
     params: dict = {"artist_name": artist, "track_name": title, "album_name": album}
     if duration:
         params["duration"] = duration
 
     url = LRCLIB_API + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": "SpindleBot/2.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.load(resp)
-            time.sleep(request_delay)
-            return data.get("syncedLyrics"), data.get("plainLyrics")
-    except urllib.error.HTTPError as exc:
-        time.sleep(request_delay)
-        if exc.code == 404:
-            return None, None
-        raise
-    except Exception:
-        time.sleep(request_delay)
-        raise
+
+    last_exc: BaseException | None = None
+    for attempt in range(LRCLIB_RETRY_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.load(resp)
+                time.sleep(request_delay)
+                return data.get("syncedLyrics"), data.get("plainLyrics")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                time.sleep(request_delay)
+                return None, None
+            last_exc = exc
+        except Exception as exc:
+            last_exc = exc
+
+        if not _is_retryable(last_exc) or attempt + 1 >= LRCLIB_RETRY_ATTEMPTS:
+            break
+        time.sleep(LRCLIB_RETRY_BACKOFF * (2 ** attempt))
+
+    time.sleep(request_delay)
+    raise last_exc
 
 
 def _fetch_from_lrclib(

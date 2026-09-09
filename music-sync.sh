@@ -2,7 +2,8 @@
 # music-sync.sh — fires when the retention drive mounts (or run manually).
 #
 # Content-addressed sync (replaces the old rsync --remove-source-files MOVE):
-#   inventory Pending → review + acknowledge → sync (copy → verify hash → record
+#   finalize (promote anything stranded in Processing) → inventory Pending →
+#   review + acknowledge → sync (copy → verify hash → record
 #   presence on retention) → prune (release the Pending copy, but ONLY files that
 #   are hash-verified on retention) → point beets at the retention path → notify.
 #
@@ -21,6 +22,7 @@ source "$HOME/.config/spindlebot/bootstrap.sh" 2>/dev/null || {
 export PYTHONPATH="$SPINDLEBOT_PIPELINE_DIR"
 
 PENDING="$SPINDLEBOT_PENDING_DIR"
+PROCESSING="$SPINDLEBOT_PROCESSING_DIR"
 REMOTE="$SPINDLEBOT_DESTINATION_PATH"
 DEST_NAME="$SPINDLEBOT_DESTINATION_NAME"   # the enabled local_drive [[destinations]] name
 LOGFILE="$SPINDLEBOT_LOG_DIR/music-sync.log"
@@ -53,10 +55,29 @@ if [ ! -d "$REMOTE" ]; then
   exit 0
 fi
 
+# 0. Catch up anything stranded in Processing. An album promotes to Pending at
+#    import time (ImportRunner stage 10), but only if it is lyric-complete by the
+#    end of its own run — a track left non-terminal by a transient lrclib failure
+#    drops out of that path, and nothing revisits it. finalize is the documented
+#    catch-up and this is the natural moment for it: a mount is when the system
+#    gets reconciled anyway, and anything promoted here is picked up by the
+#    Pending check below and synced in the same pass.
+#
+#    Guarded on Processing actually having content so a spurious mount still does
+#    no work at all, and non-fatal: promotion is a convenience, never a reason to
+#    skip syncing what is already in Pending.
+if [ -n "$PROCESSING" ] && [ -n "$(find "$PROCESSING" -type f ! -name '.*' -print -quit 2>/dev/null)" ]; then
+  log "Processing has albums awaiting promotion — running finalize"
+  sb finalize || log "finalize reported issues — continuing"
+fi
+
 # Anything to sync? Count only non-dotfiles — skips the location marker, a stray
 # .DS_Store, ._ AppleDouble files, and the .nolrc marker, so macOS junk alone
-# doesn't trigger a spurious no-op run.
-if [ -z "$(find "$PENDING" -type f ! -name '.*' 2>/dev/null)" ]; then
+# doesn't trigger a spurious no-op run. Runs after finalize so an album promoted
+# just above is seen here rather than waiting for the next mount.
+# `-print -quit` stops at the first match: this only ever asks "is there
+# anything?", so listing a whole area into a shell string is wasted work.
+if [ -z "$(find "$PENDING" -type f ! -name '.*' -print -quit 2>/dev/null)" ]; then
   log "Nothing pending to sync."
   exit 0
 fi
@@ -95,8 +116,23 @@ if ! sb prune --execute --quiet; then
 fi
 
 # 5. Point beets at the retention path for anything that left the Pending area.
+#    Both CASTs are load-bearing, not decoration.
+#
+#    Writing: beets stores items.path as a BLOB and PathQuery.col_clause() binds
+#    its pattern as a BLOB too, but SQLite's replace() always returns TEXT, and
+#    SQLite never compares a TEXT value equal to a BLOB one. Without the outer
+#    CAST every rewritten row silently becomes TEXT and `beet ls path:...` stops
+#    matching it — which breaks the promote step (`beet move path:<dir>/`) with a
+#    misleading "No matching items found".
+#
+#    Matching: a bare `path LIKE ...` against a BLOB column is version-dependent.
+#    SQLite's LIKE optimization can rewrite a prefix match into a range compare,
+#    and in storage-class ordering a BLOB sorts after every TEXT value, so the
+#    range matches nothing. Newer SQLite coerces and matches; CI's older build
+#    does not, which surfaced the moment the column was correctly BLOB rather
+#    than TEXT. Read through CAST(... AS TEXT) so neither behaviour is relied on.
 if sqlite3 "$DB" \
-    "UPDATE items SET path = replace(path, '${PENDING}', '${REMOTE}') WHERE path LIKE '${PENDING}/%';" 2>/dev/null; then
+    "UPDATE items SET path = CAST(replace(CAST(path AS TEXT), '${PENDING}', '${REMOTE}') AS BLOB) WHERE CAST(path AS TEXT) LIKE '${PENDING}/%';" 2>/dev/null; then
   log "Beets DB paths updated to $DEST_NAME"
 else
   log "WARNING: beets DB path update failed"
