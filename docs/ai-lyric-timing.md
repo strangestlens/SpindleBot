@@ -26,6 +26,7 @@ Idempotent, and it restores your previous venv if every install attempt fails.
 It tries Python 3.13 down to 3.10 and uses the first that can resolve
 `requirements-ai.txt`. Models (~700 MB: Demucs `htdemucs` ~300 MB + wav2vec2
 ~360 MB) download to `~/.cache` on the first alignment run, not during setup.
+Selecting `--model mms_fa` pulls a further ~1.2 GB the first time it is used.
 Verify with the command `setup-ai.sh` prints on success.
 
 `audit` needs none of this — it's pure text heuristics and runs on a bare
@@ -57,7 +58,8 @@ skipped.
 
 ```bash
 ~/.local/share/spindlebot/ai-venv/bin/python -m lyric_timing retime \
-    <audio> <lrc> [--overwrite] [--json] [--no-vocal-sep]
+    <audio> <lrc> [--overwrite] [--json] [--no-vocal-sep] \
+    [--model wav2vec2_en|mms_fa]
 ```
 
 Run it **from the repo root** so `lyric_timing` is importable by the venv's
@@ -70,10 +72,25 @@ It keeps the lyric *text* exactly as-is and only recomputes timestamps:
    (faster, notably worse on dense mixes).
 2. wav2vec2 CTC forced alignment over 30-second windows produces word
    timestamps. Windowing is what keeps peak memory flat in track length.
+   A **star** wildcard token sits before the first line, between every pair of
+   lines, and after the last, so audio the written lyrics don't account for —
+   an unwritten intro, a chorus sung more times than it's printed — is absorbed
+   by the wildcard instead of being threaded through the neighbouring lines'
+   tokens, dragging them tens of seconds out of place.
 3. Words are matched to lyric lines positionally, so a repeated chorus line
    resolves to its own occurrence instead of all snapping to the first.
 4. Unmatched or low-confidence lines are filled by interpolation between
-   confident anchors; times are then forced monotonic and clamped to the track.
+   confident anchors — over *sung* time, not wall-clock time: the backend
+   reports where the vocal is actually active (RMS envelope of the stem), so an
+   interpolated line lands on singing rather than in the middle of an eight-bar
+   instrumental. Confident lines never move. Times are then forced monotonic
+   and clamped to the track.
+
+`--model` picks the acoustic model. `wav2vec2_en` (the default) is the English
+ASR model and is clearly the more accurate of the two on English singing.
+`mms_fa` is the multilingual forced-alignment model — worse on English, but the
+right choice for lyrics the English model has no orthography for. Passing
+`--language` with a non-English code while on the English model logs a hint.
 
 Parenthetical ad-libs (`walk away (walk away)`) are stripped for the alignment
 pass only — they're backing-vocal echoes that overlap the lead and distort
@@ -105,7 +122,11 @@ of the AI venv and can take a few minutes. When it lands:
 - Deliberate empty-text markers (e.g. one bounding an instrumental outro) keep
   their manual times.
 - Markers below 0.5 confidence turn **orange**. That's the model flagging its
-  own weak spots — nudge those by hand.
+  own weak spots — nudge those by hand. Note that orange doesn't mean the line
+  was interpolated: a weakly matched line keeps its measured time (only below
+  0.15 is a match discarded in favour of interpolation), because a weak match
+  beats an invented one far more often than not. Orange is "check me", not
+  "I gave up".
 - **Nothing auto-saves.** **Commit** still writes the file.
 
 `lrc-editor` finds the venv via `$SPINDLEBOT_AI_VENV` and the package via
@@ -115,16 +136,35 @@ the rest of the editor is unaffected.
 
 ## Accuracy
 
-Benchmarked against a hand-timed album: mean error 0.35s and 0.59s on two
-tracks, 94% and 100% of lines within 1s. Known weak spots — repeated outro
-chants, long instrumental interludes, vocals buried in dense mixes — generally
-self-report as low confidence rather than failing silently.
+Benchmarked against two albums of reference timings — 17 tracks, 643 lines:
+
+| | mean error | within 1s |
+|---|---|---|
+| before the star token | 8.90s | 60% |
+| current | **0.95s** | **85%** |
+
+No track regressed. The largest gains are on tracks with long instrumental
+passages, where the old behaviour was to spread unmatched lines evenly across
+wall-clock time and land them in silence (one track went from 65.9s mean error
+to 4.8s).
+
+The known remaining weakness is **repetition assignment**. Lyrics transcribed
+from liner notes print a chorus once even though it's sung three times, and
+nothing in the audio says which repetition the written lines belong to. The
+alignment can be internally perfect — every word matched to real singing — and
+still sit one repetition away from where you'd time it by hand. A per-frame cost
+on the wildcard cannot break that tie (see the note on `STAR_LOG_PROB`); it
+needs a repetition census, which is not built. Vocals buried in dense mixes
+remain hard and generally self-report as low confidence rather than failing
+silently.
 
 ## Tests
 
 `tests/test_lyric_timing_*.py` and `tests/test_lrc_editor_{ai,audit}.py` cover
-parse/format, the audit heuristics, the aligner, both CLIs, and the editor's job
-orchestration — all against the mock backend, so the standard `pytest` run needs
-none of the AI dependencies. `tests/test_lyric_timing_torchaudio.py` exercises
+parse/format, the audit heuristics, the aligner (including interpolation over
+sung time), vocal-activity detection, CTC target construction (star placement,
+word separators, unmappable words), both CLIs, and the editor's job
+orchestration — all against the mock backend or pure functions, so the standard
+`pytest` run needs none of the AI dependencies. `tests/test_lyric_timing_torchaudio.py` exercises
 the real backend and is skipped unless `LYRIC_TIMING_IT_AUDIO` and
 `LYRIC_TIMING_IT_LRC` point at a real track. It never runs in CI.

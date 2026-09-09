@@ -44,6 +44,16 @@ ACTIVITY_SAMPLE_RATE = 16000
 # measurably hurt: at 0.1 and above the CTC blank path is cheaper than a star
 # everywhere, so the star stops absorbing unwritten audio and the improvement
 # disappears.
+#
+# A per-frame cost also cannot fix the one thing it looks like it should. When a
+# block is sung more times than it is written, which repetition the written
+# lines land on is a genuine tie, and the tie is invariant to this constant:
+# the unwritten repetition is absorbed by the leading star if the lines go late
+# or by a following star if they go early, so the total star-covered audio — and
+# hence the cost — is identical either way. Measured across 0.0 to 0.1: the
+# placement never moves. Breaking that tie needs an explicit preference for the
+# earliest acoustically supported placement, which is not expressible as an
+# emission value.
 STAR_LOG_PROB = 0.0
 
 # Fraction of words with no mappable characters that means "wrong script"
