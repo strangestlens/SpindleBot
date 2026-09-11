@@ -22,12 +22,13 @@ def _tables(conn) -> set[str]:
 
 def test_open_db_creates_schema_at_latest_version(tmp_path):
     conn = open_db(tmp_path / "spindlebot.db")
-    assert current_version(conn) == LATEST_VERSION == 7
+    assert current_version(conn) == LATEST_VERSION == 8
     assert {
         "location", "audio_content", "audio_presence", "location_scan",
         "album", "album_track", "sidecar_content", "sidecar_presence",
         "run", "pending_action", "lyric_doc", "lyric_version", "conflict",
         "lyric_version_presence",
+        "note_subject", "note_session", "note", "note_revision", "note_tag",
     } <= _tables(conn)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(location)").fetchall()}
     assert "root_path" in cols
@@ -36,7 +37,7 @@ def test_open_db_creates_schema_at_latest_version(tmp_path):
 def test_open_db_creates_parent_dirs(tmp_path):
     conn = open_db(tmp_path / "nested" / "deeper" / "spindlebot.db")
     assert (tmp_path / "nested" / "deeper" / "spindlebot.db").exists()
-    assert current_version(conn) == 7
+    assert current_version(conn) == LATEST_VERSION
 
 
 def test_pragmas_applied(tmp_path):
@@ -49,15 +50,15 @@ def test_migrate_is_idempotent(tmp_path):
     db = tmp_path / "spindlebot.db"
     open_db(db).close()
     conn = open_db(db)  # second open must not re-run or error
-    assert current_version(conn) == 7
+    assert current_version(conn) == LATEST_VERSION
     # re-invoking migrate directly is also a no-op
-    assert migrate(conn) == 7
+    assert migrate(conn) == LATEST_VERSION
 
 
 def test_migrate_from_fresh_connect(tmp_path):
     conn = connect(tmp_path / "spindlebot.db")
     assert current_version(conn) == 0       # not migrated yet
-    assert migrate(conn) == 7
+    assert migrate(conn) == LATEST_VERSION
     assert {
         "location", "audio_content", "audio_presence", "location_scan",
         "album", "album_track", "sidecar_content", "sidecar_presence",
@@ -104,7 +105,7 @@ def test_v3_upgrades_existing_v2_db(tmp_path):
     conn.commit()
     assert current_version(conn) == 2
 
-    assert migrate(conn) == 7
+    assert migrate(conn) == LATEST_VERSION
     assert "album" in _tables(conn) and "sidecar_content" in _tables(conn)
     # pre-existing data survives the upgrade
     assert conn.execute(
@@ -118,7 +119,7 @@ def _cols(conn, table: str) -> set[str]:
 
 def test_v6_adds_mtime_to_presence_tables(tmp_path):
     conn = open_db(tmp_path / "spindlebot.db")
-    assert current_version(conn) == 7
+    assert current_version(conn) == LATEST_VERSION
     assert "mtime" in _cols(conn, "audio_presence")
     assert "mtime" in _cols(conn, "sidecar_presence")
 
@@ -152,7 +153,7 @@ def test_v6_upgrades_existing_v5_db(tmp_path):
     conn.commit()
     assert current_version(conn) == 5
 
-    assert migrate(conn) == 7
+    assert migrate(conn) == LATEST_VERSION
     assert "mtime" in _cols(conn, "audio_presence")
     # pre-existing presence survives; its mtime is NULL (unknown until re-scanned)
     row = conn.execute(
@@ -166,7 +167,7 @@ def test_v6_migration_is_idempotent(tmp_path):
     db = tmp_path / "spindlebot.db"
     open_db(db).close()
     conn = open_db(db)
-    assert migrate(conn) == 7
+    assert migrate(conn) == LATEST_VERSION
     # exactly one mtime column on each table (no duplicate ALTER)
     assert sum(1 for c in _cols(conn, "audio_presence") if c == "mtime") == 1
     assert sum(1 for c in _cols(conn, "sidecar_presence") if c == "mtime") == 1
@@ -174,7 +175,7 @@ def test_v6_migration_is_idempotent(tmp_path):
 
 def test_v7_adds_lyric_version_presence(tmp_path):
     conn = open_db(tmp_path / "spindlebot.db")
-    assert current_version(conn) == 7
+    assert current_version(conn) == LATEST_VERSION
     assert "lyric_version_presence" in _tables(conn)
     assert _cols(conn, "lyric_version_presence") == {
         "doc_id", "location_id", "version_id", "observed_utc",
@@ -199,7 +200,7 @@ def test_v7_upgrades_existing_v6_db(tmp_path):
     conn.commit()
     assert current_version(conn) == 6
 
-    assert migrate(conn) == 7
+    assert migrate(conn) == LATEST_VERSION
     assert "lyric_version_presence" in _tables(conn)
     # pre-existing data survives the upgrade
     assert conn.execute("SELECT identity FROM audio_content").fetchone()[0] == "keep"
@@ -209,7 +210,7 @@ def test_v7_migration_is_idempotent(tmp_path):
     db = tmp_path / "spindlebot.db"
     open_db(db).close()
     conn = open_db(db)  # second open must not re-run or error
-    assert migrate(conn) == 7
+    assert migrate(conn) == LATEST_VERSION
     assert "lyric_version_presence" in _tables(conn)
 
 
@@ -292,3 +293,139 @@ def test_pending_action_cascades_with_its_run(tmp_path):
     )
     conn.execute("DELETE FROM run WHERE id = ?", (run_id,))
     assert conn.execute("SELECT COUNT(*) FROM pending_action").fetchone()[0] == 0
+
+
+# ── v8: listening notes ──────────────────────────────────────────────────────
+
+def test_v8_adds_note_tables(tmp_path):
+    conn = open_db(tmp_path / "spindlebot.db")
+    assert {"note_subject", "note_session", "note", "note_revision", "note_tag"} <= _tables(conn)
+    assert _cols(conn, "note") == {
+        "id", "uuid", "subject_id", "session_id", "status", "created_utc", "updated_utc",
+    }
+    assert _cols(conn, "note_revision") == {
+        "id", "note_id", "seq", "body", "body_format", "sha256", "author", "created_utc",
+    }
+
+
+def test_v8_upgrades_existing_v7_db(tmp_path):
+    """An existing v7 DB with data migrates forward to v8 without loss."""
+    db = tmp_path / "spindlebot.db"
+    conn = connect(db)
+    for target, sql_file in migrations.MIGRATIONS[:7]:  # stop at v7
+        sql = (migrations._SCHEMA_DIR / sql_file).read_text(encoding="utf-8")
+        with conn:
+            conn.executescript(sql)
+            conn.execute(f"PRAGMA user_version = {target}")
+    conn.execute(
+        "INSERT INTO audio_content (identity, identity_kind, first_seen_utc, last_seen_utc) "
+        "VALUES ('keep', 'audio_md5', 0, 0)"
+    )
+    conn.commit()
+    assert current_version(conn) == 7
+
+    assert migrate(conn) == LATEST_VERSION
+    assert "note_revision" in _tables(conn)
+    # pre-existing data survives the upgrade
+    assert conn.execute("SELECT identity FROM audio_content").fetchone()[0] == "keep"
+
+
+def test_v8_migration_is_idempotent(tmp_path):
+    db = tmp_path / "spindlebot.db"
+    open_db(db).close()
+    conn = open_db(db)  # second open must not re-run or error
+    assert migrate(conn) == LATEST_VERSION
+    assert "note" in _tables(conn)
+
+
+def test_note_subject_is_unique_per_kind_and_key(tmp_path):
+    """One subject per (kind, key) — the constraint that makes a second note on
+    the same album attach to the SAME subject instead of forking one."""
+    conn = open_db(tmp_path / "spindlebot.db")
+    conn.execute(
+        "INSERT INTO note_subject (kind, subject_key, created_utc) VALUES ('album', 'k', 0)"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO note_subject (kind, subject_key, created_utc) VALUES ('album', 'k', 0)"
+        )
+    # the same key under a different kind is a different subject
+    conn.execute(
+        "INSERT INTO note_subject (kind, subject_key, created_utc) VALUES ('track', 'k', 0)"
+    )
+
+
+def test_note_revision_seq_is_unique_per_note(tmp_path):
+    """The guard on seq allocation is the CONSTRAINT, not the MAX(seq)+1 read:
+    a concurrent append must fail loudly, never overwrite a draft."""
+    conn = open_db(tmp_path / "spindlebot.db")
+    conn.execute(
+        "INSERT INTO note_subject (id, kind, subject_key, created_utc) VALUES (1,'album','k',0)"
+    )
+    conn.execute(
+        "INSERT INTO note (id, uuid, subject_id, status, created_utc, updated_utc) "
+        "VALUES (1, 'u', 1, 'active', 0, 0)"
+    )
+    ins = ("INSERT INTO note_revision (note_id, seq, body, body_format, sha256, created_utc) "
+           "VALUES (1, 1, 'b', 'markdown', 'h', 0)")
+    conn.execute(ins)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(ins)
+
+
+def test_deleting_a_note_cascades_to_revisions_and_tags(tmp_path):
+    """Hard-deleting a note is not the normal path (status is soft), but when a
+    row does go, its revisions and tags must not outlive it as orphans."""
+    conn = open_db(tmp_path / "spindlebot.db")
+    conn.execute(
+        "INSERT INTO note_subject (id, kind, subject_key, created_utc) VALUES (1,'album','k',0)"
+    )
+    conn.execute(
+        "INSERT INTO note (id, uuid, subject_id, status, created_utc, updated_utc) "
+        "VALUES (1, 'u', 1, 'active', 0, 0)"
+    )
+    conn.execute(
+        "INSERT INTO note_revision (note_id, seq, body, body_format, sha256, created_utc) "
+        "VALUES (1, 1, 'b', 'markdown', 'h', 0)"
+    )
+    conn.execute("INSERT INTO note_tag (note_id, tag) VALUES (1, 'todo')")
+    conn.execute("DELETE FROM note WHERE id = 1")
+    assert conn.execute("SELECT COUNT(*) FROM note_revision").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM note_tag").fetchone()[0] == 0
+
+
+def test_deleting_a_session_orphans_its_notes_rather_than_deleting_them(tmp_path):
+    """ON DELETE SET NULL, deliberately: dropping a listening session must never
+    take the writing down with it."""
+    conn = open_db(tmp_path / "spindlebot.db")
+    conn.execute(
+        "INSERT INTO note_subject (id, kind, subject_key, created_utc) VALUES (1,'album','k',0)"
+    )
+    conn.execute(
+        "INSERT INTO note_session (id, uuid, occurred_utc, created_utc) VALUES (1,'s',0,0)"
+    )
+    conn.execute(
+        "INSERT INTO note (id, uuid, subject_id, session_id, status, created_utc, updated_utc) "
+        "VALUES (1, 'u', 1, 1, 'active', 0, 0)"
+    )
+    conn.execute("DELETE FROM note_session WHERE id = 1")
+    row = conn.execute("SELECT session_id FROM note WHERE id = 1").fetchone()
+    assert row is not None and row["session_id"] is None
+
+
+def test_deleting_a_subject_with_notes_fails_rather_than_destroying_them(tmp_path):
+    """note.subject_id carries NO ON DELETE clause on purpose. These tables hold
+    the only authored, un-regenerable data in the database, so a routine subject
+    cleanup must fail loudly rather than silently take a note and its whole
+    append-only revision chain with it. Raised in review on PR #72."""
+    conn = open_db(tmp_path / "spindlebot.db")
+    conn.execute(
+        "INSERT INTO note_subject (id, kind, subject_key, created_utc) VALUES (1,'album','k',0)"
+    )
+    conn.execute(
+        "INSERT INTO note (id, uuid, subject_id, status, created_utc, updated_utc) "
+        "VALUES (1, 'u', 1, 'active', 0, 0)"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM note_subject WHERE id = 1")
+    assert conn.execute("SELECT COUNT(*) FROM note").fetchone()[0] == 1
