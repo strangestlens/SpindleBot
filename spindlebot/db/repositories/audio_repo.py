@@ -67,3 +67,29 @@ def get_by_id(conn: sqlite3.Connection, audio_id: int) -> AudioContent | None:
 
 def count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM audio_content").fetchone()[0]
+
+
+def touch_last_seen(
+    conn: sqlite3.Connection,
+    *,
+    audio_id: int,
+    now: int,
+    beets_item_id: int | None = None,
+) -> None:
+    """Refresh last_seen_utc without rewriting the advisory tags.
+
+    For the incremental-rescan path: a file unchanged on (size, mtime) cannot
+    have different tags, so re-reading them off disk is pure I/O for no new
+    information — but the row is still being observed and must not go stale.
+    beets_item_id keeps `upsert`'s COALESCE semantics: only ever set, never
+    cleared by a scan that didn't find one.
+    """
+    conn.execute(
+        """
+        UPDATE audio_content
+           SET last_seen_utc = ?,
+               beets_item_id = COALESCE(?, beets_item_id)
+         WHERE id = ?
+        """,
+        (now, beets_item_id, audio_id),
+    )

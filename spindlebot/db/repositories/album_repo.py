@@ -95,3 +95,25 @@ def list_all(conn: sqlite3.Connection) -> list[Album]:
 
 def count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM album").fetchone()[0]
+
+
+def album_id_for_track(conn: sqlite3.Connection, audio_id: int) -> int | None:
+    """The album a track is already linked to, if any.
+
+    Lets an incremental rescan recover a file's album membership from the DB
+    instead of re-reading albumartist/mb_albumid off the disk. A track can be
+    linked to at most one album in practice; the ORDER BY only makes an
+    unexpected duplicate deterministic rather than arbitrary.
+    """
+    row = conn.execute(
+        "SELECT album_id FROM album_track WHERE audio_id = ? ORDER BY album_id LIMIT 1",
+        (audio_id,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def touch_last_seen(conn: sqlite3.Connection, *, album_id: int, now: int) -> None:
+    """Refresh last_seen_utc without rewriting the advisory tags. See audio_repo."""
+    conn.execute(
+        "UPDATE album SET last_seen_utc = ? WHERE id = ?", (now, album_id)
+    )
