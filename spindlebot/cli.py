@@ -21,6 +21,15 @@ Usage:
     python -m spindlebot collection-ignore --list [--json]                      Show what's ignored
     python -m spindlebot collection-ignore --remove <id...> [--json]            Un-ignore (also --unignore)
     python -m spindlebot collection-ignore --clear --yes [--json]               Un-ignore everything
+    python -m spindlebot note add [--artist <a>] [--album <b>] [--track <t>] [--new] [-m <text>|-F <file>|-] [--tag <t>] [--session <id>] [--json]
+                                                      Write a listening note at artist / album / track level
+    python -m spindlebot note list [--artist <a>] [--album <b>] [--track <t>] [--kind artist|album|track] [--tag <t>] [--session <id>] [--since <date>] [--all] [--json]
+    python -m spindlebot note show <id> [--history] [--json]      Show a note, optionally every revision
+    python -m spindlebot note edit <id> [-m <text>|-F <file>|-]   Append a revision (unchanged text writes nothing)
+    python -m spindlebot note rm <id> | restore <id>              Retire a note (SOFT) or bring it back
+    python -m spindlebot note tag <id> <tag>... | untag <id> <tag>
+    python -m spindlebot note session start [--title <text>]      Open a listening sitting
+    python -m spindlebot note sessions [--since <date>] [--json]  The listening log, newest first
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -1063,6 +1072,384 @@ def cmd_collection_ignore(cfg, args: list[str]) -> int:
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
+# ── note ──────────────────────────────────────────────────────────────────────
+
+_NOTE_VALUE_FLAGS = {
+    "--artist", "--album", "--track", "--tag", "--session", "--since",
+    "--kind", "--index", "--title", "-m", "--message", "-F", "--file",
+}
+_NOTE_BOOL_FLAGS = {"--json", "--new", "--all", "--history", "-"}
+
+
+def _note_opts(args: list[str], flag: str) -> list[str]:
+    """Every value given for a repeatable flag, in order."""
+    return [args[i + 1] for i, a in enumerate(args) if a == flag and i + 1 < len(args)]
+
+
+def _note_opt(args: list[str], *flags: str) -> str | None:
+    for flag in flags:
+        values = _note_opts(args, flag)
+        if values:
+            return values[0]
+    return None
+
+
+def _note_positionals(args: list[str]) -> list[str]:
+    """Bare tokens, excluding flags and the values they consume."""
+    out, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in _NOTE_VALUE_FLAGS:
+            skip = True
+            continue
+        if arg in _NOTE_BOOL_FLAGS or arg.startswith("--"):
+            continue
+        out.append(arg)
+    return out
+
+
+def _parse_since(raw: str) -> int:
+    """`--since 2026-01-01` or a full ISO timestamp, as epoch seconds."""
+    from datetime import date, datetime
+    try:
+        if len(raw) == 10:
+            return int(datetime.combine(date.fromisoformat(raw), datetime.min.time()).timestamp())
+        return int(datetime.fromisoformat(raw).timestamp())
+    except ValueError as e:
+        raise ValueError(f"--since wants YYYY-MM-DD or an ISO timestamp, got {raw!r}") from e
+
+
+def _launch_editor(path: Path) -> None:
+    import subprocess
+    editor = os.environ.get("SPINDLEBOT_EDITOR") or os.environ.get("VISUAL") \
+        or os.environ.get("EDITOR") or "vi"
+    subprocess.run([*editor.split(), str(path)], check=False)
+
+
+def read_note_body(
+    args: list[str],
+    *,
+    initial: str = "",
+    stdin=None,
+    launch_editor=None,
+) -> str:
+    """Resolve a note body from the four input modes, in precedence order.
+
+    1. `-m/--message`, repeatable, joined by a blank line — multi-paragraph
+       input without fighting the shell over newlines
+    2. `-F/--file <path>`
+    3. `-`, or a piped stdin — reading a note out of anything upstream
+    4. nothing, on a terminal — open $EDITOR
+
+    The editor buffer gets NO commented header. Git can use `#` for that because
+    `#` is not meaningful in a commit message; here it is a markdown heading, and
+    a header would make "strip the comments" and "keep the author's headings"
+    the same operation. The subject is already on the command line the user just
+    typed.
+    """
+    stdin = stdin if stdin is not None else sys.stdin
+    launch_editor = launch_editor or _launch_editor
+
+    messages = _note_opts(args, "-m") + _note_opts(args, "--message")
+    if messages:
+        return "\n\n".join(messages)
+
+    path = _note_opt(args, "-F", "--file")
+    if path == "-" or (path is None and "-" in args):
+        return stdin.read()
+    if path is not None:
+        return Path(path).expanduser().read_text(encoding="utf-8")
+
+    if not stdin.isatty():
+        return stdin.read()
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch = Path(tmp) / "NOTE_EDITMSG.md"
+        scratch.write_text(initial, encoding="utf-8")
+        launch_editor(scratch)
+        return scratch.read_text(encoding="utf-8")
+
+
+def _note_resolve(*args, **kwargs):
+    """Indirection so the CLI's own accept/refuse gate is testable on its own,
+    independently of what the resolver currently happens to return."""
+    from spindlebot.services.note_resolve import resolve
+    return resolve(*args, **kwargs)
+
+
+def cmd_note(cfg, args: list[str]) -> int:
+    """
+    Listening notes at artist / album / track level.
+
+    Notes are the only authored, un-regenerable data in this system, so every
+    write here appends: editing a note adds a revision, deleting one is a status
+    change, and `note export` exists so the writing is never trapped in SQLite.
+    """
+    import json as _json
+
+    from spindlebot.core.enums import NoteSubjectKind
+    from spindlebot.core.notes import canonicalize_body
+    from spindlebot.db.connection import open_db
+    from spindlebot.services import notes as svc
+    from spindlebot.services.note_resolve import ResolutionStatus
+
+    want_json = "--json" in args
+    sub = args[0] if args and not args[0].startswith("-") else None
+
+    def fail(msg: str, *, hints: list[str] | None = None) -> int:
+        if want_json:
+            print(_json.dumps({"error": msg, "candidates": hints or []}))
+        else:
+            print(msg, file=sys.stderr)
+            for hint in hints or []:
+                print(f"    {hint}", file=sys.stderr)
+        return 1
+
+    def view_payload(view) -> dict:
+        return {
+            "id": view.id,
+            "uuid": view.note.uuid,
+            "kind": str(view.subject.kind),
+            "subject": view.label,
+            "subject_key": view.subject.subject_key,
+            "revision": view.revision,
+            "tags": list(view.tags),
+            "session_id": view.note.session_id,
+            "created_utc": view.note.created_utc,
+            "updated_utc": view.note.updated_utc,
+            "body": view.body,
+        }
+
+    if sub not in {"add", "list", "show", "edit", "rm", "restore", "tag",
+                   "untag", "sessions", "session"}:
+        return fail(
+            "Usage: spindlebot note add|list|show|edit|rm|restore|tag|untag|"
+            "sessions|session start"
+        )
+
+    rest = args[1:]
+    positionals = _note_positionals(rest)
+    conn = open_db(cfg.core.db_path)
+    try:
+        # ── add ──────────────────────────────────────────────────────────────
+        if sub == "add":
+            artist = _note_opt(rest, "--artist")
+            album = _note_opt(rest, "--album")
+            track = _note_opt(rest, "--track")
+            allow_new = "--new" in rest
+
+            library = []
+            try:
+                from spindlebot.services import library_index
+                library = library_index.load(cfg, _note_opt(rest, "--index") or "auto").albums
+            except (RuntimeError, ValueError) as e:
+                # Without --new there is nothing to resolve against and a note
+                # would be filed under an unverified subject; with it, the user
+                # has already said the library is not the authority here.
+                if not allow_new:
+                    return fail(f"cannot read the library: {e}")
+
+            try:
+                resolution = _note_resolve(
+                    library, artist=artist, album=album, track=track, allow_new=allow_new
+                )
+            except ValueError as e:
+                return fail(str(e))
+
+            if resolution.status is not ResolutionStatus.RESOLVED:
+                return fail(
+                    f"{resolution.status}: {resolution.reason}",
+                    hints=[c.label for c in resolution.candidates]
+                    + ["(use --new to write about something the library doesn't have)"],
+                )
+
+            body = canonicalize_body(read_note_body(rest))
+            if not body:
+                return fail("empty note, nothing written")
+
+            session_raw = _note_opt(rest, "--session")
+            view = svc.add_note(
+                conn,
+                subject=resolution.subject,
+                body=body,
+                session_id=int(session_raw) if session_raw else None,
+                tags=_note_opts(rest, "--tag"),
+            )
+            conn.commit()
+            if want_json:
+                print(_json.dumps(view_payload(view)))
+            else:
+                print(f"note {view.id}  {view.label}")
+            return 0
+
+        # ── list ─────────────────────────────────────────────────────────────
+        if sub == "list":
+            kind_raw = _note_opt(rest, "--kind")
+            since_raw = _note_opt(rest, "--since")
+            session_raw = _note_opt(rest, "--session")
+            try:
+                kind = NoteSubjectKind(kind_raw) if kind_raw else None
+                since = _parse_since(since_raw) if since_raw else None
+            except ValueError as e:
+                return fail(str(e))
+
+            views = svc.list_notes(
+                conn,
+                artist=_note_opt(rest, "--artist"),
+                album=_note_opt(rest, "--album"),
+                track=_note_opt(rest, "--track"),
+                kind=kind,
+                tag=_note_opt(rest, "--tag"),
+                session_id=int(session_raw) if session_raw else None,
+                since_utc=since,
+                include_deleted="--all" in rest,
+            )
+            if want_json:
+                print(_json.dumps({"count": len(views),
+                                   "notes": [view_payload(v) for v in views]}))
+                return 0
+            if not views:
+                print("no notes")
+                return 0
+            for view in views:
+                tags = f"  [{' '.join(view.tags)}]" if view.tags else ""
+                first = view.body.split("\n", 1)[0]
+                head = first if len(first) <= 72 else first[:71] + "…"
+                print(f"{view.id:>5}  {view.label}{tags}")
+                print(f"       {head}")
+            return 0
+
+        # ── show ─────────────────────────────────────────────────────────────
+        if sub == "show":
+            if not positionals:
+                return fail("Usage: spindlebot note show <id> [--history]")
+            view = svc.get_note(conn, int(positionals[0]))
+            if view is None:
+                return fail(f"no note {positionals[0]}")
+            revisions = svc.history(conn, view.id) if "--history" in rest else []
+            if want_json:
+                payload = view_payload(view)
+                payload["history"] = [
+                    {"seq": r.seq, "sha256": r.sha256, "created_utc": r.created_utc,
+                     "body": r.body}
+                    for r in revisions
+                ]
+                print(_json.dumps(payload))
+                return 0
+            print(f"note {view.id}  {view.label}")
+            print(f"  revision {view.revision}"
+                  + (f"  tags: {' '.join(view.tags)}" if view.tags else ""))
+            print()
+            print(view.body)
+            for revision in revisions[:-1]:
+                print(f"\n--- revision {revision.seq} ---")
+                print(revision.body)
+            return 0
+
+        # ── edit ─────────────────────────────────────────────────────────────
+        if sub == "edit":
+            if not positionals:
+                return fail("Usage: spindlebot note edit <id> [-m <text> | -F <file>]")
+            current = svc.get_note(conn, int(positionals[0]))
+            if current is None:
+                return fail(f"no note {positionals[0]}")
+            body = canonicalize_body(read_note_body(rest, initial=current.body))
+            if not body:
+                return fail("empty note, nothing written")
+            view, changed = svc.edit_note(conn, note_id=current.id, body=body)
+            conn.commit()
+            if want_json:
+                payload = view_payload(view)
+                payload["changed"] = changed
+                print(_json.dumps(payload))
+            else:
+                print(f"note {view.id}  revision {view.revision}"
+                      + ("" if changed else "  (unchanged)"))
+            return 0
+
+        # ── rm / restore ─────────────────────────────────────────────────────
+        if sub in {"rm", "restore"}:
+            if not positionals:
+                return fail(f"Usage: spindlebot note {sub} <id>")
+            try:
+                view = (svc.delete_note if sub == "rm" else svc.restore_note)(
+                    conn, int(positionals[0])
+                )
+            except LookupError as e:
+                return fail(str(e))
+            conn.commit()
+            if want_json:
+                print(_json.dumps(view_payload(view)))
+            else:
+                action = "removed" if sub == "rm" else "restored"
+                suffix = " (recoverable: note restore)" if sub == "rm" else ""
+                print(f"{action} note {view.id}{suffix}")
+            return 0
+
+        # ── tag / untag ──────────────────────────────────────────────────────
+        if sub in {"tag", "untag"}:
+            if len(positionals) < 2:
+                return fail(f"Usage: spindlebot note {sub} <id> <tag>...")
+            note_id, tags = int(positionals[0]), positionals[1:]
+            try:
+                view = (
+                    svc.tag_note(conn, note_id, tags) if sub == "tag"
+                    else svc.untag_note(conn, note_id, tags[0])
+                )
+            except LookupError as e:
+                return fail(str(e))
+            conn.commit()
+            if want_json:
+                print(_json.dumps(view_payload(view)))
+            else:
+                print(f"note {view.id}  tags: {' '.join(view.tags) or '(none)'}")
+            return 0
+
+        # ── sessions ─────────────────────────────────────────────────────────
+        if sub == "session":
+            if not positionals or positionals[0] != "start":
+                return fail("Usage: spindlebot note session start [--title <text>]")
+            session = svc.start_session(conn, title=_note_opt(rest, "--title"))
+            conn.commit()
+            if want_json:
+                print(_json.dumps({"id": session.id, "uuid": session.uuid,
+                                   "title": session.title,
+                                   "occurred_utc": session.occurred_utc}))
+            else:
+                print(f"session {session.id}"
+                      + (f"  {session.title}" if session.title else ""))
+            return 0
+
+        since_raw = _note_opt(rest, "--since")
+        try:
+            since = _parse_since(since_raw) if since_raw else None
+        except ValueError as e:
+            return fail(str(e))
+        sessions = svc.list_sessions(conn, since_utc=since)
+        if want_json:
+            print(_json.dumps({"count": len(sessions), "sessions": [
+                {"id": s.session.id, "title": s.session.title,
+                 "occurred_utc": s.session.occurred_utc, "notes": s.note_count}
+                for s in sessions
+            ]}))
+            return 0
+        if not sessions:
+            print("no sessions")
+            return 0
+        from datetime import datetime, timezone
+        for item in sessions:
+            when = datetime.fromtimestamp(
+                item.session.occurred_utc, tz=timezone.utc).strftime("%Y-%m-%d")
+            title = item.session.title or "(untitled)"
+            print(f"{item.session.id:>5}  {when}  {title}  — {item.note_count} note(s)")
+        return 0
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = (argv if argv is not None else sys.argv)[1:]
 
@@ -1155,6 +1542,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "collection-ignore":
         return cmd_collection_ignore(cfg, args[1:])
+
+    if command == "note":
+        return cmd_note(cfg, args[1:])
 
     if command == "notify":
         if len(args) < 3:
