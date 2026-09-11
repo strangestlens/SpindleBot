@@ -111,6 +111,29 @@ python3 -m spindlebot collection-ignore --list | --remove <id...> | --clear --ye
 
 Full reference in [collection audit](collection-audit.md).
 
+## Listening notes
+
+```bash
+python3 -m spindlebot note add [--artist <a>] [--album <b>] [--track <t>] [--new]
+                          [-m <text> | -F <file> | -] [--tag <t>] [--session <id>] [--json]
+python3 -m spindlebot note list [--artist <a>] [--album <b>] [--track <t>]
+                          [--kind artist|album|track] [--tag <t>] [--session <id>]
+                          [--since <date>] [--all] [--json]
+python3 -m spindlebot note show <id> [--history] [--json]
+python3 -m spindlebot note edit <id> [-m <text> | -F <file> | -]
+python3 -m spindlebot note rm <id> | restore <id>
+python3 -m spindlebot note tag <id> <tag>... | untag <id> <tag>
+python3 -m spindlebot note session start [--title <text>]
+python3 -m spindlebot note sessions [--since <date>] [--json]
+python3 -m spindlebot note import <file> [--dry-run] [--root-level N] [--new] [--skip-unresolved]
+python3 -m spindlebot note export [--artist <a>] [--kind <k>] [--since <d>] [-o <file>]
+```
+
+`add` refuses an ambiguous subject rather than guessing; `--new` writes about
+something the library does not have. `import` is atomic and idempotent, and
+`--dry-run` prints the resolution table without writing. Full reference in
+[listening notes](notes.md).
+
 ## lyric_timing (optional peer package)
 
 ```bash
