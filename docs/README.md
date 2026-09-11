@@ -26,6 +26,7 @@ diagram. These are the topic guides.
 | [Lyrics](lyrics.md) | `.lrc` sidecars, playback, the lrc-editor timing editor |
 | [AI lyric timing](ai-lyric-timing.md) | Optional forced-alignment re-timer: `audit`, `retime`, editor integration |
 | [Collection audit](collection-audit.md) | Optional: what you own on disc but haven't ripped, plus collection-browser |
+| [Listening notes](notes.md) | Notes at artist/album/track level: writing, filtering, sessions, import/export |
 
 ## Elsewhere in the repo
 

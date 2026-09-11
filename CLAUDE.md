@@ -37,6 +37,7 @@ adds a walkthrough, a CLI reference, or an operational procedure, it belongs in
 | `docs/lyrics.md` | `.lrc` sidecars, playback, lrc-editor |
 | `docs/ai-lyric-timing.md` | The optional `lyric_timing/` subsystem end to end |
 | `docs/collection-audit.md` | The optional collection audit, ignore list, and collection-browser |
+| `docs/notes.md` | Listening notes: writing, filtering, sessions, markdown import/export |
 | `docs/archive/original-roadmap.md` | The superseded 6-phase plan (historical) |
 
 ## Phase status (April 2026)
@@ -81,7 +82,9 @@ spindlebot/
   cli.py                         — CLI entry point: check / config / import / import-staging /
                                      inventory / review / sync / push / prune / delete /
                                      finalize / collection-audit / collection-ignore /
-                                     fetch-lyrics / fetch-art / notify / restart
+                                     fetch-lyrics / fetch-art / notify / restart /
+                                     note (add|list|show|edit|rm|restore|tag|untag|
+                                           session|sessions|import|export)
   config.py                      — typed config dataclasses, loads config.toml + secrets.toml,
                                      env var overrides
   disc.py                        — AUDIO_EXTENSIONS, find_audio_files(), check_wait(),
@@ -120,7 +123,7 @@ spindlebot/
     repositories/                — ONLY SQL layer: audio_repo, location_repo, presence_repo,
                                      scan_repo, album_repo, sidecar_repo, sidecar_presence_repo,
                                      run_repo, action_repo, lyric_repo, lyric_version_presence_repo,
-                                     conflict_repo
+                                     conflict_repo, note_repo, note_subject_repo
   collections/                   — OPTIONAL external collection sources (assistive; nothing in
                                      the import/sync path depends on this). Each provider splits
                                      into an impure client + a PURE transformer, so every
@@ -267,6 +270,20 @@ tests/
                                      report stays inert (no dead buttons)
   test_collection_report.py      — HTML report: structure, escaping, http(s)-only URL
                                      sanitization, self-containment, --html CLI wiring
+  test_notes_identity.py         — THE note identity contract: which spellings fold onto
+                                     one subject, and which must stay apart
+  test_note_models.py            — note row models + fail-loud enum validation
+  test_note_markdown.py          — parse/render incl. the round-trip property, gapped
+                                     chains, and the one shape markdown cannot express
+  test_note_repositories.py      — note + subject repos: no-op edits, canonical bodies,
+                                     display-field preservation, empty-filter semantics
+  test_note_resolve.py           — resolution: never guesses; --new is the only way to
+                                     create a subject the library lacks
+  test_notes_service.py          — service filters (downward reach), sessions, soft delete
+  test_note_cli.py               — the note CLI: four body-input modes, refusal on an
+                                     ambiguous subject, argv value-vs-positional parsing
+  test_note_import_export.py     — atomic + idempotent import, and the end-to-end
+                                     export → fresh DB → export byte-equality round trip
   test_lyric_timing_lrc.py       — lyric_timing/lrc parse/format
   test_lyric_timing_detector.py  — audit heuristics
   test_lyric_timing_aligner.py   — word→line assignment, interpolation (incl. over sung time),
@@ -323,6 +340,40 @@ CI runs on every push/PR:
 - `shell` job: shellcheck + bats `tests/shell/`
 
 Both must pass. shellcheck must be clean — no suppressions without a comment explaining why.
+
+## Listening notes (schema v8)
+
+Notes are the **only authored, un-regenerable data** in `spindlebot.db`.
+Everything else comes back from `spindlebot inventory`; a lost note does not.
+Four rules follow, and none of them are negotiable:
+
+1. **Notes key to musical works, never to bytes.** `audio_content.id` is a
+   decoded-audio MD5 — one rip of one pressing — so a note keyed to it dies on a
+   re-rip and forks on a remaster. Album subjects reuse `album_key()` unchanged
+   (so `note_subject.subject_key` **is** `album.album_key`, and note → library
+   album is a plain join); artists and tracks use `core/notes.py`.
+   `track_key` deliberately excludes disc/track number — see gotcha #2, the
+   numbering is patched *after* import.
+2. **No foreign key from a note into the library.** A note about an unripped
+   album, an artist with no rows, or a pruned track is legal. Resolution is a
+   lookup, never a constraint. `note.subject_id` also carries no `ON DELETE`
+   clause: deleting a subject that still has notes must fail loudly.
+3. **Revisions append; deletes are soft.** Editing writes seq+1 and an unchanged
+   body writes nothing at all. `rm` is a status change. Never add a code path
+   that overwrites or hard-deletes authored text.
+4. **`note export` must keep working.** `parse(render(x)) == x` is tested
+   end-to-end (export → fresh DB → export → byte-equal). It is the guarantee
+   that the writing is never trapped in SQLite.
+
+**Equality goes through the identity keys, never through `normalize_artist`.**
+That normalizer replaces punctuation with a SPACE, so "Old 97's" folds to
+`old 97 s` and "Old 97s" to `old 97s`. The collection matcher never notices
+because it compares fuzzily afterwards; anything doing exact equality does. This
+bug appeared twice on one branch — use `artist_key` / `title_key`.
+
+Resolution **never guesses**: ambiguous returns candidates and exits non-zero,
+and `--new` is the only way to create a subject the library lacks. A note filed
+under the wrong album is invisible, because nothing errors later.
 
 ## Known gotchas
 
