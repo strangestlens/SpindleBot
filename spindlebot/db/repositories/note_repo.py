@@ -263,3 +263,26 @@ def all_tags(conn: sqlite3.Connection) -> list[tuple[str, int]]:
         (str(NoteStatus.ACTIVE),),
     ).fetchall()
     return [(r[0], r[1]) for r in rows]
+
+
+def find_by_subject_and_sha(
+    conn: sqlite3.Connection, subject_id: int, sha256: str
+) -> Note | None:
+    """An existing note on this subject whose CURRENT body is these bytes.
+
+    What makes `note import` idempotent: re-running it on the same file finds
+    the notes it already wrote instead of duplicating them. Matching on the head
+    revision only is deliberate — a body the author has since edited away is no
+    longer what that note says, and re-importing the original is a real change.
+    """
+    row = conn.execute(
+        """
+        SELECT n.* FROM note n
+        JOIN note_revision r ON r.note_id = n.id
+        WHERE n.subject_id = ? AND r.sha256 = ?
+          AND r.seq = (SELECT MAX(seq) FROM note_revision WHERE note_id = n.id)
+        ORDER BY n.id LIMIT 1
+        """,
+        (subject_id, sha256),
+    ).fetchone()
+    return Note.from_row(row) if row else None
