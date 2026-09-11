@@ -124,13 +124,13 @@ def test_retime_stdout_stays_parseable_despite_noisy_backend(
     # (the lrc-editor job) must still get pure JSON on stdout
     from lyric_timing.backends.mock import MockBackend
 
-    original = MockBackend.word_timestamps
+    original = MockBackend.align_audio
 
     def noisy(self, audio_path, transcript, *, language=None):
         print("Separating track... 100%|██████|")
         return original(self, audio_path, transcript, language=language)
 
-    monkeypatch.setattr(MockBackend, "word_timestamps", noisy)
+    monkeypatch.setattr(MockBackend, "align_audio", noisy)
     audio, lrc = track
 
     assert main(["retime", str(audio), str(lrc), "--backend", "mock", "--json"]) == 0
