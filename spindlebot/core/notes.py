@@ -64,6 +64,17 @@ def artist_key(name: str | None, mb_artistid: str | None = None) -> str:
     return str(uuid5(NAMESPACE_URL, f"spindlebot:note-artist:{basis}"))
 
 
+def title_key(value: str | None) -> str:
+    """Exact-equality key for an album or track title.
+
+    The title half of `track_key`, exposed because filtering needs the same
+    folding that identity uses: `note list --album "fight songs"` has to reach
+    notes filed under "Fight Songs". Keeping one function means a filter can
+    never disagree with the key it is filtering on.
+    """
+    return _key_basis(normalize_track_title(value))
+
+
 def track_key(parent_album_key: str, title: str | None) -> str:
     """Deterministic subject key for a track, scoped to its album.
 
@@ -78,7 +89,7 @@ def track_key(parent_album_key: str, title: str | None) -> str:
     hidden track) collapse onto one subject. That is rare, and far cheaper than
     silently orphaning notes.
     """
-    basis = f"{parent_album_key}\x00{_key_basis(normalize_track_title(title))}"
+    basis = f"{parent_album_key}\x00{title_key(title)}"
     return str(uuid5(NAMESPACE_URL, f"spindlebot:note-track:{basis}"))
 
 
