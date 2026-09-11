@@ -30,6 +30,10 @@ Usage:
     python -m spindlebot note tag <id> <tag>... | untag <id> <tag>
     python -m spindlebot note session start [--title <text>]      Open a listening sitting
     python -m spindlebot note sessions [--since <date>] [--json]  The listening log, newest first
+    python -m spindlebot note import <file> [--dry-run] [--root-level N] [--new] [--skip-unresolved] [--json]
+                                                      Import a markdown document of notes (atomic; --dry-run shows the resolution table)
+    python -m spindlebot note export [--artist <a>] [--album <b>] [--kind <k>] [--since <d>] [--root-level N] [-o <file>]
+                                                      Write notes back out as markdown that `note import` reads identically
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -1077,8 +1081,10 @@ def cmd_collection_ignore(cfg, args: list[str]) -> int:
 _NOTE_VALUE_FLAGS = {
     "--artist", "--album", "--track", "--tag", "--session", "--since",
     "--kind", "--index", "--title", "-m", "--message", "-F", "--file",
+    "--root-level", "-o", "--out",
 }
-_NOTE_BOOL_FLAGS = {"--json", "--new", "--all", "--history", "-"}
+_NOTE_BOOL_FLAGS = {"--json", "--new", "--all", "--history", "-",
+                    "--dry-run", "--skip-unresolved"}
 
 
 def _note_opts(args: list[str], flag: str) -> list[str]:
@@ -1224,10 +1230,10 @@ def cmd_note(cfg, args: list[str]) -> int:
         }
 
     if sub not in {"add", "list", "show", "edit", "rm", "restore", "tag",
-                   "untag", "sessions", "session"}:
+                   "untag", "sessions", "session", "import", "export"}:
         return fail(
             "Usage: spindlebot note add|list|show|edit|rm|restore|tag|untag|"
-            "sessions|session start"
+            "sessions|session start|import|export"
         )
 
     rest = args[1:]
@@ -1406,6 +1412,148 @@ def cmd_note(cfg, args: list[str]) -> int:
                 print(_json.dumps(view_payload(view)))
             else:
                 print(f"note {view.id}  tags: {' '.join(view.tags) or '(none)'}")
+            return 0
+
+        # ── import ───────────────────────────────────────────────────────────
+        if sub == "import":
+            from spindlebot.core.note_markdown import parse
+            from spindlebot.services.note_import import apply_import, plan_import
+
+            if not positionals:
+                return fail("Usage: spindlebot note import <file> [--dry-run] "
+                            "[--root-level N] [--new] [--skip-unresolved]")
+            source = Path(positionals[0]).expanduser()
+            if not source.is_file():
+                return fail(f"no such file: {source}")
+
+            try:
+                root_level = int(_note_opt(rest, "--root-level") or 1)
+            except ValueError:
+                return fail("--root-level wants an integer")
+
+            document = parse(source.read_text(encoding="utf-8"), root_level=root_level)
+            if not document.notes:
+                return fail(
+                    f"no notes found in {source} at heading level {root_level} — "
+                    "try --root-level 2 if the file opens with a grouping heading"
+                )
+
+            allow_new = "--new" in rest
+            library = []
+            try:
+                from spindlebot.services import library_index
+                library = library_index.load(cfg, _note_opt(rest, "--index") or "auto").albums
+            except (RuntimeError, ValueError) as e:
+                if not allow_new:
+                    return fail(f"cannot read the library: {e}")
+
+            plan = plan_import(conn, library, list(document.notes), allow_new=allow_new)
+            dry_run = "--dry-run" in rest
+            skipping = "--skip-unresolved" in rest
+
+            # Atomic unless told otherwise: an import that files most of a
+            # document and silently drops the rest is the failure this whole
+            # command exists to avoid.
+            blocked = bool(plan.unresolved) and not skipping
+            # Every single note failing to resolve almost never means every
+            # heading is wrong; it means the heading window is. Say so, rather
+            # than printing the same "did you mean" against each line.
+            all_unresolved = bool(plan.rows) and len(plan.unresolved) == len(plan.rows)
+            hint = (
+                f"nothing resolved at heading level {root_level} — if the file opens "
+                f"with a grouping heading, try --root-level {root_level + 1}"
+                if all_unresolved else ""
+            )
+            if not dry_run and not blocked and plan.writable:
+                session_id_raw = _note_opt(rest, "--session")
+                session_id = int(session_id_raw) if session_id_raw else svc.start_session(
+                    conn, title=_note_opt(rest, "--title") or source.name
+                ).id
+                plan = apply_import(conn, plan, session_id=session_id)
+                conn.commit()
+
+            if want_json:
+                print(_json.dumps({
+                    "source": str(source),
+                    "dry_run": dry_run,
+                    "blocked": blocked,
+                    "hint": hint,
+                    "skipped_headings": [
+                        {"text": h.text, "line": h.line_no, "reason": h.reason}
+                        for h in document.skipped
+                    ],
+                    "rows": [
+                        {"line": r.parsed.line_no, "status": str(r.status),
+                         "subject": r.label, "detail": r.detail, "note_id": r.note_id}
+                        for r in plan.rows
+                    ],
+                }))
+                return 1 if blocked else 0
+
+            for heading in document.skipped:
+                print(f"  skipped heading  line {heading.line_no}: "
+                      f"{heading.text}  ({heading.reason})")
+            for row in plan.rows:
+                marker = {"imported": "+", "ready": "·", "duplicate": "=",
+                          "unresolved": "!"}[str(row.status)]
+                print(f"  {marker} {str(row.status):<11} line {row.parsed.line_no:>4}  "
+                      f"{row.label}")
+                if row.detail:
+                    print(f"      {row.detail}")
+            if hint:
+                print(f"\n{hint}", file=sys.stderr)
+            if blocked:
+                print(f"nothing written: {len(plan.unresolved)} note(s) did not "
+                      "resolve. Fix the headings, add --new, or --skip-unresolved.",
+                      file=sys.stderr)
+                return 1
+            if dry_run:
+                print(f"\n[dry-run] {len(plan.writable)} note(s) would be imported")
+            return 0
+
+        # ── export ───────────────────────────────────────────────────────────
+        if sub == "export":
+            from spindlebot.core.note_markdown import ParsedNote, render
+
+            try:
+                root_level = int(_note_opt(rest, "--root-level") or 1)
+                kind_raw = _note_opt(rest, "--kind")
+                since_raw = _note_opt(rest, "--since")
+                kind = NoteSubjectKind(kind_raw) if kind_raw else None
+                since = _parse_since(since_raw) if since_raw else None
+            except ValueError as e:
+                return fail(str(e))
+
+            views = svc.list_notes(
+                conn,
+                artist=_note_opt(rest, "--artist"),
+                album=_note_opt(rest, "--album"),
+                track=_note_opt(rest, "--track"),
+                kind=kind, since_utc=since,
+            )
+            # Grouped for reading, not newest-first: an exported document is
+            # meant to be read (and re-imported) as a document.
+            views.sort(key=lambda v: (
+                (v.subject.artist_name or "").casefold(),
+                (v.subject.album_title or "").casefold(),
+                (v.subject.track_title or "").casefold(),
+                v.note.created_utc,
+            ))
+            text = render([
+                ParsedNote(
+                    kind=v.subject.kind, body=v.body,
+                    artist=v.subject.artist_name, album=v.subject.album_title,
+                    track=v.subject.track_title,
+                )
+                for v in views
+            ], root_level=root_level)
+
+            destination = _note_opt(rest, "-o", "--out")
+            if destination:
+                Path(destination).expanduser().write_text(text, encoding="utf-8")
+                print(f"{len(views)} note(s) -> {destination}")
+            else:
+                sys.stdout.write(text)
             return 0
 
         # ── sessions ─────────────────────────────────────────────────────────
