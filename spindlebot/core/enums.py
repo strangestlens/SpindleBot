@@ -101,3 +101,11 @@ class NoteFormat(StrEnum):
     new value rather than a change in what an existing column means.
     """
     MARKDOWN = "markdown"
+
+
+class ImportRowStatus(StrEnum):
+    """Per-note outcome of a `note import`."""
+    READY = "ready"            # resolved, not yet written
+    IMPORTED = "imported"      # written in this run
+    DUPLICATE = "duplicate"    # this subject already carries this exact body
+    UNRESOLVED = "unresolved"  # no library match and no --new
