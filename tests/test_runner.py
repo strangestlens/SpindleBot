@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import mutagen.flac
 
+from spindlebot.disc import AUDIO_EXTENSIONS
 from spindlebot.pipeline.runner import ImportConfig, ImportRunner
 
 
@@ -359,6 +360,24 @@ def _fresh_import_stub_beet(argv, *args, **kwargs):
 _stub_beet = _fresh_import_stub_beet
 
 
+def _consuming_import_stub_beet(argv, *args, **kwargs):
+    """_fresh_import_stub_beet, but `beet import` CONSUMES its source files.
+
+    beets runs with `import: move: yes`, so a real import relocates the rip out
+    of Import and into the library. A stub that leaves the files where they are
+    lets the runner read disc tags off source files that, in production, are
+    already gone — hiding any stage that reads them too late.
+    """
+    argv = list(argv)
+    if len(argv) >= 2 and argv[1] == "import":
+        for target in argv[2:]:
+            t = Path(target)
+            for f in (sorted(t.iterdir()) if t.is_dir() else [t]):
+                if f.is_file() and f.suffix.lstrip(".").lower() in AUDIO_EXTENSIONS:
+                    f.unlink()
+    return _fresh_import_stub_beet(argv, *args, **kwargs)
+
+
 def _recording_stub_beet(recorder: list):
     """_fresh_import_stub_beet that snapshots each `beet import` target.
 
@@ -475,13 +494,51 @@ def test_mixed_import_per_album_disctotal_is_correct(tmp_path):
     with patch(_PRETAG, return_value=True), \
          patch(_POSTTAG, return_value=0), \
          patch.object(ImportRunner, "_fix_multidisc", _capture_fix), \
-         patch(_SUBPROCESS, side_effect=_stub_beet):
+         patch(_SUBPROCESS, side_effect=_consuming_import_stub_beet):
         result = ImportRunner(cfg).run()
 
     assert result.success
     # One fix call per album, with the correct per-album disc counts.
     assert sorted(seen_disc_counts) == [1, 2], \
         f"per-album disc counts wrong: {seen_disc_counts}"
+
+
+def test_disc_count_read_before_beet_import_consumes_the_files(tmp_path):
+    """The multidisc fix must see the REAL disc count of a 2-disc rip.
+
+    `beet import` moves the rip out of Import, so any disc-tag read that
+    happens after it sees an empty directory and reports a single disc. That
+    silently rewrites disc=1/disctotal=1 over every track of a genuine
+    multi-disc album and flattens it into one folder.
+    """
+    cfg = _make_config(tmp_path)
+    cfg.trigger.touch()
+    _init_db(cfg)
+
+    imp = cfg.import_dir
+    _write_flac(imp / "d1.flac", tags={"albumartist": "Set", "album": "Two Disc",
+                                       "discnumber": 1, "disctotal": 2})
+    _write_flac(imp / "d2.flac", tags={"albumartist": "Set", "album": "Two Disc",
+                                       "discnumber": 2, "disctotal": 2})
+
+    seen_disc_counts = []
+    real_fix = ImportRunner._fix_multidisc
+
+    def _capture_fix(self, actual_discs, import_start):
+        seen_disc_counts.append(actual_discs)
+        return real_fix(self, actual_discs, import_start)
+
+    with patch(_PRETAG, return_value=True), \
+         patch(_POSTTAG, return_value=0), \
+         patch.object(ImportRunner, "_fix_multidisc", _capture_fix), \
+         patch(_SUBPROCESS, side_effect=_consuming_import_stub_beet):
+        result = ImportRunner(cfg).run()
+
+    assert result.success
+    assert seen_disc_counts == [2], (
+        "a 2-disc rip must be seen as 2 discs; got "
+        f"{seen_disc_counts} — disc tags were read after beet import moved the files"
+    )
 
 
 # ── Processing → promote flow ─────────────────────────────────────────────────

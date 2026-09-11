@@ -780,6 +780,15 @@ class ImportRunner:
         """
         cfg = self.cfg
         import_start = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+
+        # Disc count is read HERE, before the import: beets runs with
+        # `import: move: yes`, so `beet import` relocates the rip out of Import
+        # and these source files stop existing. Reading disc tags afterwards
+        # finds nothing, reports a single disc, and the multidisc fix then
+        # stamps disc=1/disctotal=1 over every track of a genuine multi-disc
+        # album — flattening it into one directory.
+        actual_discs = count_discs(batch.disc_source)
+
         self._log("💿 importing with beet...")
         self._log(f"Starting beet import [{batch.label}]", echo=False)
 
@@ -828,8 +837,8 @@ class ImportRunner:
             # A duplicate (or an unmatched no-op) produced no rows to fix.
             return True
 
-        # Stage 6: multidisc fix — disc count read from THIS album's files.
-        actual_discs = count_discs(batch.disc_source)
+        # Stage 6: multidisc fix — disc count read from THIS album's files,
+        # captured before the import moved them (see the top of this method).
         self._fix_multidisc(actual_discs, import_start)
         result.stages.append(StageResult("multidisc", success=True))
         return True

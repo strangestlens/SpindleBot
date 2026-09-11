@@ -317,6 +317,17 @@ handled in `runner.py` `_fix_multidisc()` — don't change the approach.
 Can report `disctotal=2` for single-disc albums (DualDiscs, conceptual A/B sides). The runner
 patches this post-import based on actual disc count, not MusicBrainz metadata.
 
+**2a. Read the rip's own tags BEFORE `beet import` — it moves the files**
+beets runs with `import: move: yes`, so `beet import` relocates the rip out of Import. Any
+stage that reads tags off `batch.disc_source` afterwards opens paths that no longer exist;
+`_read_disc_tags` swallows the error per file, so `count_discs` quietly returns 1 instead of
+failing. That fed `_fix_multidisc` a permanent `actual_discs=1`, whose else-branch stamps
+`disctotal=1, disc=1` over every track — flattening genuine multi-disc albums into one
+directory and making the `actual_discs > 1` branch dead code. `_import_one_album` now captures
+the count at the top, before the import. The test suite missed this for the same reason: the
+`beet import` double left the source files in place. Any new runner test that depends on
+post-import state must use `_consuming_import_stub_beet`, which models the move.
+
 **3. beets `path:` query syntax**
 Always use a trailing slash: `path:/full/path/` — without it, matches may be missed.
 
