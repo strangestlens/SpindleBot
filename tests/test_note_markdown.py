@@ -208,3 +208,65 @@ def test_the_sample_corpus_parses_into_the_expected_subjects():
 def test_the_sample_corpus_round_trips():
     doc = parse(FIXTURE.read_text(encoding="utf-8"), root_level=2)
     assert parse(render(doc.notes, root_level=2), root_level=2).notes == doc.notes
+
+
+# ── incomplete subject chains ────────────────────────────────────────────────
+# `parse` can legitimately produce a note with a GAP: `## Album` with no artist
+# heading above it, or `# Artist` followed by `### Track`. Treating the filled
+# levels as a dense prefix rendered those as `# None`, which re-imports as a
+# completely different subject. Caught in review on PR #72.
+
+def test_an_album_without_an_artist_round_trips():
+    notes = [_note(NoteSubjectKind.ALBUM, "body", album="B")]
+    assert "# None" not in render(notes)
+    assert parse(render(notes)).notes == tuple(notes)
+
+
+def test_a_track_with_no_album_heading_round_trips():
+    notes = [_note(NoteSubjectKind.TRACK, "body", artist="A", track="C")]
+    assert parse(render(notes)).notes == tuple(notes)
+
+
+def test_a_gapped_chain_mixes_with_complete_ones():
+    notes = [
+        _note(NoteSubjectKind.ALBUM, "one", album="B"),
+        _note(NoteSubjectKind.ALBUM, "two", artist="A", album="B"),
+        _note(NoteSubjectKind.TRACK, "three", artist="A", track="C"),
+        _note(NoteSubjectKind.ARTIST, "four", artist="A"),
+        _note(NoteSubjectKind.ALBUM, "five", artist="A", album="E"),
+    ]
+    assert parse(render(notes)).notes == tuple(notes)
+
+
+def test_an_emptied_level_is_cleared_not_inherited():
+    """`# A` / `## B` then a note on artist A + track C with NO album. Markdown
+    only resets levels BELOW a heading, so the chain has to restart from the
+    artist or the track silently inherits album B."""
+    notes = [
+        _note(NoteSubjectKind.ALBUM, "one", artist="A", album="B"),
+        _note(NoteSubjectKind.TRACK, "two", artist="A", track="C"),
+    ]
+    assert parse(render(notes)).notes == tuple(notes)
+
+
+def test_known_limitation_an_unparented_album_after_a_parented_one_gains_the_artist():
+    """The one shape heading nesting cannot express: there is no syntax that
+    unsets the artist level without also setting it. Pinned as a recorded
+    decision — the result is a sensible neighbouring subject, not corruption,
+    and it only arises from input that names an album without ever naming its
+    artist."""
+    notes = [
+        _note(NoteSubjectKind.ALBUM, "one", artist="A", album="B"),
+        _note(NoteSubjectKind.ALBUM, "two", album="B"),
+    ]
+    got = parse(render(notes)).notes
+    assert got[1].artist == "A", "folds into the parented subject"
+    assert got[1].body == "two", "the writing itself is never lost"
+
+
+def test_a_gapped_subject_repeated_stays_two_notes():
+    notes = [
+        _note(NoteSubjectKind.ALBUM, "one", album="B"),
+        _note(NoteSubjectKind.ALBUM, "two", album="B"),
+    ]
+    assert parse(render(notes)).notes == tuple(notes)

@@ -48,12 +48,17 @@ CREATE TABLE note_session (
 CREATE INDEX idx_note_session_occurred ON note_session(occurred_utc);
 
 -- A note's identity and lifecycle. The BODY is in note_revision.
+-- subject_id has NO ON DELETE clause on purpose. SQLite's default (NO ACTION)
+-- makes deleting a subject that still has notes fail loudly, which is the right
+-- answer: these tables hold the only authored, un-regenerable data in the
+-- database, and a CASCADE here would let a routine subject cleanup silently
+-- destroy a note and its whole append-only revision chain.
 -- `uuid` is device-stable: it is the join key when notes eventually sync across
 -- machines, where an autoincrement id would collide.
 CREATE TABLE note (
     id          INTEGER PRIMARY KEY,
     uuid        TEXT NOT NULL UNIQUE,
-    subject_id  INTEGER NOT NULL REFERENCES note_subject(id) ON DELETE CASCADE,
+    subject_id  INTEGER NOT NULL REFERENCES note_subject(id),
     session_id  INTEGER REFERENCES note_session(id) ON DELETE SET NULL,
     status      TEXT NOT NULL,             -- 'active' | 'deleted' (soft)
     created_utc INTEGER NOT NULL,

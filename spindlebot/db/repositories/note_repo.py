@@ -134,7 +134,8 @@ def _insert_revision(
         "INSERT INTO note_revision "
         "(note_id, seq, body, body_format, sha256, author, created_utc) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (note_id, seq, canonical, str(body_format), body_sha256(canonical), author, now),
+        (note_id, seq, canonical, str(NoteFormat(body_format)),
+         body_sha256(canonical), author, now),
     )
     row = conn.execute(
         "SELECT * FROM note_revision WHERE id = ?", (int(cur.lastrowid),)
@@ -175,7 +176,7 @@ def set_status(
     """Soft delete and its undo. Revisions are untouched either way."""
     conn.execute(
         "UPDATE note SET status = ?, updated_utc = ? WHERE id = ?",
-        (str(status), now, note_id),
+        (str(NoteStatus(status)), now, note_id),
     )
 
 
@@ -188,7 +189,12 @@ def list_notes(
     since_utc: int | None = None,
     status: NoteStatus | None = NoteStatus.ACTIVE,
 ) -> list[Note]:
-    """Filtered notes, most recently written first.
+    """Filtered notes, newest first BY CREATION.
+
+    Deliberately `created_utc`, not `updated_utc`: this is a listening log, and
+    fixing a typo in a 2019 note should not vault it above everything written
+    since. Edit order is still recoverable — every revision carries its own
+    created_utc.
 
     `status=None` includes soft-deleted notes; the default hides them. An EMPTY
     `subject_ids` list means "no subjects matched" and returns nothing — it is

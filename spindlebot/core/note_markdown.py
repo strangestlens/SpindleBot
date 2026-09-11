@@ -26,6 +26,16 @@ empty note about the artist.
 
 `parse(render(notes)) == notes` is the contract, and it is what makes
 `note export` a real escape hatch rather than a lossy pretty-printer.
+
+It holds for every chain shape including gapped ones (an album with no artist,
+an artist with a track and no album) with one inherent exception: heading nesting
+cannot express "this album has NO artist" once an artist heading is already in
+scope, because there is no syntax that unsets a level without also setting it.
+So a corpus where the SAME album appears both with and without an artist folds
+those two subjects into the parented one on re-import. It is pinned by a test
+rather than papered over; the outcome is a sensible neighbouring subject, not
+corruption, and the situation only arises from hand-written input that names an
+album without ever naming its artist.
 """
 from __future__ import annotations
 
@@ -166,15 +176,33 @@ def render(notes, *, root_level: int = 1) -> str:
 
     for note in notes:
         chain = (note.artist, note.album, note.track)
-        depth = sum(1 for part in chain if part is not None)
-        if depth == 0:
+        # The levels this note actually occupies. NOT a count: `parse` can
+        # legitimately produce a note with a gap — `## Album` with no artist
+        # heading above it, or `# Artist` followed by `### Track` — and treating
+        # the filled levels as a dense prefix renders those as `# None`, which
+        # re-imports as a different subject entirely.
+        levels = [i for i, part in enumerate(chain) if part is not None]
+        if not levels:
             continue
-        # First level that differs; if none does, re-emit the deepest so a
-        # repeated subject stays a separate note. Searching only within `depth`
-        # is what makes an artist note following an album note pop back out to
-        # its own heading instead of emitting nothing at all.
-        start = next((i for i in range(depth) if chain[i] != prev[i]), depth - 1)
-        for i in range(start, depth):
+        # First occupied level that differs; if none does, re-emit the deepest so
+        # a repeated subject stays a separate note. Searching only the occupied
+        # levels is what makes an artist note following an album note pop back
+        # out to its own heading instead of emitting nothing at all.
+        # A level this note leaves EMPTY but the previous note filled has to be
+        # cleared, and markdown has no "unset" — only a shallower heading resets
+        # the levels below it. So restart the chain from its shallowest occupied
+        # level, which is what makes `# A` / `### C` come back as artist A with
+        # NO album rather than inheriting the album above it.
+        needs_reset = any(
+            chain[i] is None and prev[i] is not None for i in range(levels[-1])
+        )
+        start = (
+            levels[0] if needs_reset
+            else next((i for i in levels if chain[i] != prev[i]), levels[-1])
+        )
+        for i in levels:
+            if i < start:
+                continue
             out.append(f"{'#' * (root_level + i)} {chain[i]}")
             out.append("")
         out.extend(_escape(line) for line in note.body.split("\n"))

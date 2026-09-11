@@ -261,3 +261,48 @@ def test_all_tags_counts_only_live_notes(conn):
     assert note_repo.all_tags(conn) == [("todo", 2)]
     note_repo.set_status(conn, b, NoteStatus.DELETED, now=300)
     assert note_repo.all_tags(conn) == [("todo", 1)]
+
+
+# ── review follow-ups (PR #72) ───────────────────────────────────────────────
+
+def test_an_empty_display_field_does_not_wipe_a_good_one(conn):
+    """COALESCE alone treats only NULL as missing, and an EMPTY string is
+    reachable: `beet ls` emits a blank $albumartist for an untagged album and
+    parse_beets_output keeps it, so one such album would blank a name an
+    earlier note had supplied."""
+    ref = NoteSubjectRef.for_album("Old 97's", "Fight Songs")
+    note_subject_repo.upsert(conn, ref, now=100)
+    blanked = NoteSubjectRef(
+        kind=NoteSubjectKind.ALBUM, subject_key=ref.subject_key,
+        artist_name="", album_title="Fight Songs",
+    )
+    assert note_subject_repo.upsert(conn, blanked, now=200).artist_name == "Old 97's"
+
+
+def test_editing_an_old_note_does_not_reorder_the_list(conn):
+    """Ordering is by CREATION, deliberately: this is a listening log, and
+    fixing a typo in an old note must not vault it above everything written
+    since. Edit order stays recoverable through the revisions."""
+    subject_id = _subject(conn)
+    old = _note(conn, "old", subject_id=subject_id, now=100)
+    new = _note(conn, "new", subject_id=subject_id, now=200)
+    note_repo.append_revision(conn, note_id=old, body="edited much later", now=9999)
+    assert [n.id for n in note_repo.list_notes(conn)] == [new, old]
+
+
+def test_an_unknown_body_format_is_rejected_before_the_insert(conn):
+    """Closed sets are validated on write everywhere else in this layer
+    (location_repo, action_repo, sidecar_repo all do `str(Kind(x))`); a bad
+    value must not reach the row and be committable by a caller that swallows
+    the error."""
+    subject_id = _subject(conn)
+    with pytest.raises(ValueError):
+        note_repo.create(conn, subject_id=subject_id, body="b", now=100,
+                         body_format="html")
+    assert conn.execute("SELECT COUNT(*) FROM note_revision").fetchone()[0] == 0
+
+
+def test_an_unknown_status_is_rejected_before_the_update(conn):
+    note_id = _note(conn)
+    with pytest.raises(ValueError):
+        note_repo.set_status(conn, note_id, "archived", now=200)

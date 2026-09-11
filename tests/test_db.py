@@ -411,3 +411,21 @@ def test_deleting_a_session_orphans_its_notes_rather_than_deleting_them(tmp_path
     conn.execute("DELETE FROM note_session WHERE id = 1")
     row = conn.execute("SELECT session_id FROM note WHERE id = 1").fetchone()
     assert row is not None and row["session_id"] is None
+
+
+def test_deleting_a_subject_with_notes_fails_rather_than_destroying_them(tmp_path):
+    """note.subject_id carries NO ON DELETE clause on purpose. These tables hold
+    the only authored, un-regenerable data in the database, so a routine subject
+    cleanup must fail loudly rather than silently take a note and its whole
+    append-only revision chain with it. Raised in review on PR #72."""
+    conn = open_db(tmp_path / "spindlebot.db")
+    conn.execute(
+        "INSERT INTO note_subject (id, kind, subject_key, created_utc) VALUES (1,'album','k',0)"
+    )
+    conn.execute(
+        "INSERT INTO note (id, uuid, subject_id, status, created_utc, updated_utc) "
+        "VALUES (1, 'u', 1, 'active', 0, 0)"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM note_subject WHERE id = 1")
+    assert conn.execute("SELECT COUNT(*) FROM note").fetchone()[0] == 1

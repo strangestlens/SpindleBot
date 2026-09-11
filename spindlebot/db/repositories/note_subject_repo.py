@@ -14,6 +14,12 @@ def upsert(conn: sqlite3.Connection, ref: NoteSubjectRef, now: int) -> NoteSubje
     created_utc is preserved across calls, and the display columns are only
     ever SET, never cleared: a later note added with less context (an album
     title but no artist) must not blank the name an earlier note supplied.
+
+    NULLIF is load-bearing, not belt-and-braces. COALESCE alone treats only NULL
+    as missing, and an EMPTY string is reachable in practice: `beet ls` emits a
+    blank `$albumartist` for an untagged album, `parse_beets_output` keeps it,
+    and resolution passes it straight through — so a single such album would
+    blank a good artist name that an earlier note had supplied.
     """
     conn.execute(
         """
@@ -21,10 +27,10 @@ def upsert(conn: sqlite3.Connection, ref: NoteSubjectRef, now: int) -> NoteSubje
             (kind, subject_key, artist_name, album_title, track_title, mbid, created_utc)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(kind, subject_key) DO UPDATE SET
-            artist_name = COALESCE(excluded.artist_name, note_subject.artist_name),
-            album_title = COALESCE(excluded.album_title, note_subject.album_title),
-            track_title = COALESCE(excluded.track_title, note_subject.track_title),
-            mbid        = COALESCE(excluded.mbid, note_subject.mbid)
+            artist_name = COALESCE(NULLIF(excluded.artist_name, ''), note_subject.artist_name),
+            album_title = COALESCE(NULLIF(excluded.album_title, ''), note_subject.album_title),
+            track_title = COALESCE(NULLIF(excluded.track_title, ''), note_subject.track_title),
+            mbid        = COALESCE(NULLIF(excluded.mbid, ''), note_subject.mbid)
         """,
         (
             str(ref.kind), ref.subject_key, ref.artist_name,
