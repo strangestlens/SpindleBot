@@ -15,9 +15,12 @@ Two normalization decisions, both deliberate:
 `strip().lower()`, which is enough because it is only ever computed from values
 the library already holds — it has to be self-consistent, nothing more. A note
 key may instead be computed from what a human typed at a prompt ("Old 97s"
-where the library says "Old 97's"), so artist and track keys fold punctuation,
-diacritics and a leading article through the same normalizers the collection
-matcher uses.
+where the library says "Old 97's"), so artist and track keys fold punctuation
+and diacritics through `text_key`.
+
+**But not as rich as the collection matcher.** `normalize_artist` also strips a
+leading article, and that heuristic cannot come near an identity key: see
+`text_key`.
 
 **Album subjects reuse `album_key()` unchanged.** The payoff is a direct join:
 `note_subject.subject_key` for an album IS `album.album_key`, which is UNIQUE,
@@ -33,34 +36,49 @@ from dataclasses import dataclass
 from uuid import NAMESPACE_URL, uuid5
 
 from spindlebot.core.albums import album_key
-from spindlebot.core.collection_match import normalize_artist, normalize_track_title
+from spindlebot.core.collection_match import normalize_track_title
 from spindlebot.core.enums import NoteSubjectKind
 
 
-def _key_basis(normalized: str) -> str:
-    """Collapse a normalized name to an exact-equality basis.
+def text_key(value: str | None) -> str:
+    """Exact-equality key for a display string — an artist, album or track name.
 
-    `normalize_artist` / `normalize_track_title` replace punctuation with a
-    SPACE, so "Old 97's" folds to `old 97 s` while "Old 97s" folds to `old 97s`.
-    The collection matcher never notices, because it compares those with jaccard
-    and sequence similarity — token splitting is absorbed downstream. An
-    identity key has no downstream: it is exact equality or nothing. Removing
-    separators entirely is what makes the two spellings one subject.
+    Folds what a human varies without meaning to: case, Latin diacritics,
+    punctuation, `&`/`and`, and whitespace. So "Old 97's" and "Old 97s" are one
+    subject, as are "Björk"/"Bjork" and "Belle & Sebastian"/"Belle and
+    Sebastian".
+
+    Two deliberate non-uses:
+
+    **Not `normalize_artist`.** It strips a leading article, which is a
+    *fuzzy-matching* heuristic and wrong for identity: "The Band" and "Band"
+    both reduce to `band`, as do "The The"/"The" and "The Sound"/"Sound". The
+    collection matcher can absorb that because it scores candidates afterwards;
+    a uuid has no downstream, so the two artists would merge permanently and
+    silently. Article-insensitivity belongs in resolution, which can then key
+    off the library's own spelling.
+
+    **The separators are removed, not collapsed.** `normalize_track_title`
+    replaces punctuation with a SPACE, so "Old 97's" becomes `old 97 s` and
+    "Old 97s" becomes `old 97s` — equal under fuzzy comparison, unequal under
+    `==`.
     """
-    return "".join(normalized.split())
+    return "".join(normalize_track_title(value).split())
 
 
 def artist_key(name: str | None, mb_artistid: str | None = None) -> str:
     """Deterministic subject key for an artist.
 
-    Prefers the MusicBrainz artist id when present; otherwise a normalized
-    name, which folds "Old 97s" and "Old 97's" — and "The Beatles" and
-    "Beatles" — onto one subject.
+    Prefers the MusicBrainz artist id when present; otherwise `text_key`, which
+    folds "Old 97s"/"Old 97's" and "Björk"/"Bjork" onto one subject but keeps a
+    leading article — "The Band" is not "Band". Typing the article-less form
+    still reaches the right subject, because resolution matches it against the
+    library and keys off the library's own spelling.
     """
     if mb_artistid and mb_artistid.strip():
         basis = f"mb:{mb_artistid.strip().lower()}"
     else:
-        basis = f"n:{_key_basis(normalize_artist(name))}"
+        basis = f"n:{text_key(name)}"
     return str(uuid5(NAMESPACE_URL, f"spindlebot:note-artist:{basis}"))
 
 
@@ -78,7 +96,7 @@ def track_key(parent_album_key: str, title: str | None) -> str:
     hidden track) collapse onto one subject. That is rare, and far cheaper than
     silently orphaning notes.
     """
-    basis = f"{parent_album_key}\x00{_key_basis(normalize_track_title(title))}"
+    basis = f"{parent_album_key}\x00{text_key(title)}"
     return str(uuid5(NAMESPACE_URL, f"spindlebot:note-track:{basis}"))
 
 

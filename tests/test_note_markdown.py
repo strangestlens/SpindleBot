@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from spindlebot.core.enums import NoteSubjectKind
-from spindlebot.core.note_markdown import ParsedNote, parse, render
+from spindlebot.core.note_markdown import ParsedNote, parse, render, unrepresentable
 
 FIXTURE = Path(__file__).parent / "fixtures" / "listening_notes_sample.md"
 
@@ -270,3 +270,55 @@ def test_a_gapped_subject_repeated_stays_two_notes():
         _note(NoteSubjectKind.ALBUM, "two", album="B"),
     ]
     assert parse(render(notes)).notes == tuple(notes)
+
+
+# ── what markdown cannot express, reported rather than lost ──────────────────
+
+def test_a_parentless_track_after_a_parented_note_is_reported():
+    """`### C` with no artist or album, following `# A` / `## B`, comes back as a
+    child of B — heading nesting has no way to say "these levels are empty".
+    Raised in review on PR #72; the earlier reset fix did not reach this shape
+    because the note's own shallowest level is BELOW the stale ones."""
+    notes = [
+        _note(NoteSubjectKind.ALBUM, "one", artist="A", album="B"),
+        _note(NoteSubjectKind.TRACK, "two", track="C"),
+    ]
+    assert parse(render(notes)).notes != tuple(notes), "still not representable"
+    assert unrepresentable(notes) == (notes[1],), "but no longer silent"
+    assert parse(render(notes)).notes[1].body == "two", "the writing is never lost"
+
+
+def test_a_parentless_track_alone_round_trips_fine():
+    """Nothing is in scope above it, so there is nothing to inherit."""
+    notes = [_note(NoteSubjectKind.TRACK, "body", track="C")]
+    assert unrepresentable(notes) == ()
+    assert parse(render(notes)).notes == tuple(notes)
+
+
+def test_unrepresentable_is_empty_for_every_round_tripping_shape():
+    notes = [
+        _note(NoteSubjectKind.ARTIST, "one", artist="A"),
+        _note(NoteSubjectKind.ALBUM, "two", artist="A", album="B"),
+        _note(NoteSubjectKind.TRACK, "three", artist="A", album="B", track="C"),
+        _note(NoteSubjectKind.TRACK, "four", artist="A", track="D"),
+        _note(NoteSubjectKind.ALBUM, "five", artist="A", album="E"),
+    ]
+    assert unrepresentable(notes) == ()
+
+
+def test_unrepresentable_flags_the_unparented_album_case_too():
+    notes = [
+        _note(NoteSubjectKind.ALBUM, "one", artist="A", album="B"),
+        _note(NoteSubjectKind.ALBUM, "two", album="B"),
+    ]
+    assert unrepresentable(notes) == (notes[1],)
+
+
+def test_unrepresentable_respects_root_level():
+    notes = [_note(NoteSubjectKind.TRACK, "b", artist="A", album="B", track="C")]
+    assert unrepresentable(notes, root_level=2) == ()
+
+
+def test_the_sample_corpus_is_fully_representable():
+    doc = parse(FIXTURE.read_text(encoding="utf-8"), root_level=2)
+    assert unrepresentable(doc.notes, root_level=2) == ()

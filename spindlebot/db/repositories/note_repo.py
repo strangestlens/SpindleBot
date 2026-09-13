@@ -68,7 +68,13 @@ def create(
     A note with no revision has no body, which is not a state any reader should
     have to handle — so the pair is created in one call, inside the caller's
     transaction.
+
+    `body_format` is validated FIRST, before the note row exists. Validating it
+    inside `_insert_revision` raised only after the INSERT had succeeded, and a
+    caller that caught the error and committed would persist a note with no
+    revision — exactly the state this function exists to prevent.
     """
+    body_format = NoteFormat(body_format)
     cur = conn.execute(
         "INSERT INTO note (uuid, subject_id, session_id, status, created_utc, updated_utc) "
         "VALUES (?, ?, ?, ?, ?, ?)",
@@ -100,6 +106,7 @@ def append_revision(
     in $EDITOR and closing it unchanged must not grow the chain, and neither
     must an editor that rewrote line endings on the way out.
     """
+    body_format = NoteFormat(body_format)
     head_revision = head(conn, note_id)
     assert head_revision is not None, f"note {note_id} has no revisions"
     if head_revision.sha256 == body_sha256(body):

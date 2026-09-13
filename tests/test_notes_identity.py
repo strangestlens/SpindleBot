@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from spindlebot.core.albums import album_key
-from spindlebot.core.collection_match import normalize_track_title
+from spindlebot.core.collection_match import normalize_artist, normalize_track_title
 from spindlebot.core.enums import NoteFormat, NoteStatus, NoteSubjectKind
 from spindlebot.core.notes import (
     NoteSubjectRef,
@@ -43,7 +43,6 @@ def test_artist_key_is_deterministic():
 
 @pytest.mark.parametrize("a,b,why", [
     ("Old 97's", "Old 97s", "intra-word apostrophe: the corpus spells it both ways"),
-    ("The Beatles", "Beatles", "leading article is not part of an artist's identity"),
     ("Björk", "Bjork", "Latin diacritics fold"),
     ("AFRO CELT SOUND SYSTEM", "Afro Celt Sound System", "case folds"),
     ("Belle & Sebastian", "Belle and Sebastian", "ampersand folds to 'and'"),
@@ -55,6 +54,29 @@ def test_artist_key_folds_spelling_variants(a, b, why):
 
 def test_artist_key_separates_different_artists():
     assert artist_key("Old 97's") != artist_key("Afro Celt Sound System")
+
+
+@pytest.mark.parametrize("a,b", [
+    ("The Band", "Band"),
+    ("The The", "The"),
+    ("The Sound", "Sound"),
+])
+def test_artist_key_keeps_the_leading_article(a, b):
+    """A leading article IS part of an artist's identity for keying purposes.
+
+    `normalize_artist` strips it, which is right for the collection matcher —
+    that heuristic recovers "Beatles" typed for "The Beatles", and the matcher
+    scores candidates afterwards so a bad fold is caught. A uuid has no
+    downstream. Stripping it here reduced "The Band" and "Band" to the same key
+    and merged two real artists' notes permanently and silently.
+
+    Typing the article-less form still reaches the right subject: resolution
+    matches it against the library and keys off the LIBRARY's spelling.
+    """
+    assert normalize_artist(a) == normalize_artist(b), (
+        "precondition: the matcher's normalizer does fold these"
+    )
+    assert artist_key(a) != artist_key(b)
 
 
 def test_artist_key_prefers_musicbrainz_id_over_name():

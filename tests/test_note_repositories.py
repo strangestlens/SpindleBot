@@ -300,6 +300,10 @@ def test_an_unknown_body_format_is_rejected_before_the_insert(conn):
         note_repo.create(conn, subject_id=subject_id, body="b", now=100,
                          body_format="html")
     assert conn.execute("SELECT COUNT(*) FROM note_revision").fetchone()[0] == 0
+    # And no ORPHAN note either: validating inside the revision insert left the
+    # note row behind, so a caller that caught the error and committed would
+    # persist a note with no body. Raised in review on PR #72.
+    assert conn.execute("SELECT COUNT(*) FROM note").fetchone()[0] == 0
 
 
 def test_an_unknown_status_is_rejected_before_the_update(conn):

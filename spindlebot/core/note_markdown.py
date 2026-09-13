@@ -27,15 +27,19 @@ empty note about the artist.
 `parse(render(notes)) == notes` is the contract, and it is what makes
 `note export` a real escape hatch rather than a lossy pretty-printer.
 
-It holds for every chain shape including gapped ones (an album with no artist,
-an artist with a track and no album) with one inherent exception: heading nesting
-cannot express "this album has NO artist" once an artist heading is already in
-scope, because there is no syntax that unsets a level without also setting it.
-So a corpus where the SAME album appears both with and without an artist folds
-those two subjects into the parented one on re-import. It is pinned by a test
-rather than papered over; the outcome is a sensible neighbouring subject, not
-corruption, and the situation only arises from hand-written input that names an
-album without ever naming its artist.
+It holds for every chain shape including gapped ones — an album with no artist,
+an artist with a track and no album — with one inherent exception: heading
+nesting cannot express "this level is EMPTY" once a heading has put something in
+scope above it, because no syntax unsets a level without also setting it. So a
+note that leaves a parent level empty, following a note that filled it, re-imports
+as a child of the one above.
+
+That is not silently accepted. `unrepresentable()` reports exactly which notes
+are affected by round-tripping them, so `note export` can warn instead of
+handing back a document that reads differently than it was written. The writing
+itself is never lost — the note lands on a neighbouring subject — and the
+situation only arises from hand-written input that names an album or track
+without ever naming its parents.
 """
 from __future__ import annotations
 
@@ -210,3 +214,23 @@ def render(notes, *, root_level: int = 1) -> str:
         prev = chain
 
     return "\n".join(out).rstrip("\n") + "\n" if out else ""
+
+
+def unrepresentable(notes, *, root_level: int = 1) -> tuple[ParsedNote, ...]:
+    """Notes whose SUBJECT will not survive `render` -> `parse` at this level.
+
+    Heading nesting cannot express an empty parent level once something is in
+    scope above it (see the module docstring), so a gapped chain following a
+    parented note comes back as a child. This reports which notes that happens
+    to, so a caller can warn rather than hand back a document that reads
+    differently than it was written.
+
+    Implemented BY round-tripping rather than by reasoning about the rule, so it
+    cannot drift from what render and parse actually do — it is the contract,
+    evaluated.
+    """
+    notes = tuple(notes)
+    got = parse(render(notes, root_level=root_level), root_level=root_level).notes
+    if len(got) != len(notes):
+        return notes
+    return tuple(before for before, after in zip(notes, got) if before != after)
