@@ -74,3 +74,30 @@ class MediaKind(StrEnum):
     CASSETTE = "cassette"
     DIGITAL = "digital"
     OTHER = "other"
+
+
+class NoteSubjectKind(StrEnum):
+    """What a listening note is attached to.
+
+    A note attaches to a musical WORK, never to bytes — see core/notes.py.
+    `person` (a band member, a producer) is a deliberate future member: the
+    sample corpus already contains a note about a songwriter who is not the
+    album artist.
+    """
+    ARTIST = "artist"  # subject_key = core.notes.artist_key()
+    ALBUM = "album"    # subject_key = core.albums.album_key()  — joins album.album_key
+    TRACK = "track"    # subject_key = core.notes.track_key()
+
+
+class NoteStatus(StrEnum):
+    ACTIVE = "active"
+    DELETED = "deleted"  # soft: notes are authored data and are never truly dropped
+
+
+class NoteFormat(StrEnum):
+    """Body format of a note revision.
+
+    One member today. It exists anyway so that adding rich content later is a
+    new value rather than a change in what an existing column means.
+    """
+    MARKDOWN = "markdown"

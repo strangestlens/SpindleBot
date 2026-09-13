@@ -243,3 +243,17 @@ def match_items(
     """Classify every collection item against the library. Input order preserved."""
     indexed = _index_library(library)
     return [match_item(item, indexed) for item in items]
+
+
+def normalize_track_title(title: str | None) -> str:
+    """Fold a TRACK title to a comparable key.
+
+    Unlike `normalize_title`, edition markers are deliberately NOT stripped.
+    Within one album, "Song" and "Song (2018 Remix)" are two different tracks,
+    and folding them together would merge two listening notes onto one subject.
+    Edition-stripping exists to match a single RELEASE across catalogues — a
+    different problem, at a different level.
+    """
+    if not title:
+        return ""
+    return _NON_ALNUM.sub(" ", _fold(title)).strip()

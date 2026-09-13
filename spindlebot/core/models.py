@@ -10,6 +10,9 @@ from spindlebot.core.enums import (
     ContentKind,
     IdentityKind,
     LocationKind,
+    NoteFormat,
+    NoteStatus,
+    NoteSubjectKind,
     RunKind,
     ScanStatus,
     SidecarParentKind,
@@ -315,4 +318,115 @@ class Conflict:
             status=ConflictStatus(row["status"]),
             detected_utc=row["detected_utc"],
             resolved_utc=row["resolved_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class NoteSubject:
+    """What a note is about. Display fields are a snapshot, not a lookup —
+    a note about an album that was never ripped still has to render."""
+    id: int
+    kind: NoteSubjectKind
+    subject_key: str
+    artist_name: str | None
+    album_title: str | None
+    track_title: str | None
+    mbid: str | None
+    created_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "NoteSubject":
+        return NoteSubject(
+            id=row["id"],
+            kind=NoteSubjectKind(row["kind"]),
+            subject_key=row["subject_key"],
+            artist_name=row["artist_name"],
+            album_title=row["album_title"],
+            track_title=row["track_title"],
+            mbid=row["mbid"],
+            created_utc=row["created_utc"],
+        )
+
+    @property
+    def label(self) -> str:
+        parts = [p for p in (self.artist_name, self.album_title, self.track_title) if p]
+        return " — ".join(parts) if parts else self.subject_key
+
+
+@dataclass(frozen=True)
+class NoteSession:
+    """One listening sitting. Notes from a single evening across several
+    subjects belong to one of these; `note.session_id` is nullable, so a note
+    written outside a sitting is still a first-class note."""
+    id: int
+    uuid: str
+    occurred_utc: int
+    title: str | None
+    created_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "NoteSession":
+        return NoteSession(
+            id=row["id"],
+            uuid=row["uuid"],
+            occurred_utc=row["occurred_utc"],
+            title=row["title"],
+            created_utc=row["created_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class Note:
+    """A note's identity and lifecycle. The BODY lives in NoteRevision — a note
+    is the stable thing an author keeps editing, not the text of any one draft."""
+    id: int
+    uuid: str
+    subject_id: int
+    session_id: int | None
+    status: NoteStatus
+    created_utc: int
+    updated_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "Note":
+        return Note(
+            id=row["id"],
+            uuid=row["uuid"],
+            subject_id=row["subject_id"],
+            session_id=row["session_id"],
+            status=NoteStatus(row["status"]),
+            created_utc=row["created_utc"],
+            updated_utc=row["updated_utc"],
+        )
+
+
+@dataclass(frozen=True)
+class NoteRevision:
+    """One append-only draft of a note's body.
+
+    `seq` is monotonic per note and the head is MAX(seq) — there is no
+    head-pointer column, which keeps the note/revision foreign keys acyclic
+    under `foreign_keys=ON`. `sha256` is the dedupe key today and the lineage
+    key when notes sync across devices, the same primitive lyrics_sync reasons
+    over."""
+    id: int
+    note_id: int
+    seq: int
+    body: str
+    body_format: NoteFormat
+    sha256: str
+    author: str | None
+    created_utc: int
+
+    @staticmethod
+    def from_row(row: sqlite3.Row) -> "NoteRevision":
+        return NoteRevision(
+            id=row["id"],
+            note_id=row["note_id"],
+            seq=row["seq"],
+            body=row["body"],
+            body_format=NoteFormat(row["body_format"]),
+            sha256=row["sha256"],
+            author=row["author"],
+            created_utc=row["created_utc"],
         )
