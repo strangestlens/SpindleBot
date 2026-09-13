@@ -72,23 +72,34 @@ def _candidate(album: LibraryAlbum) -> Candidate:
 
 
 def _albums_by_artist(library: list[LibraryAlbum], artist: str) -> list[LibraryAlbum]:
-    """Group by `artist_key`, NOT by `normalize_artist`.
+    """Albums whose artist is the SAME SUBJECT as `artist` — exact on `artist_key`.
 
-    They are not interchangeable, and using the normalizer here is a real bug
-    that this function had: `normalize_artist` replaces punctuation with a
-    SPACE, so "Old 97's" folds to `old 97 s` and "Old 97s" to `old 97s`. The
-    collection matcher gets away with that because it compares normalized forms
-    fuzzily; equality does not.
+    Not `normalize_artist`: it replaces punctuation with a SPACE, so "Old 97's"
+    folds to `old 97 s` and "Old 97s" to `old 97s`. The matcher gets away with
+    that because it scores candidates fuzzily afterwards; equality does not.
 
-    Beyond the immediate fix, keying off `artist_key` is what guarantees the
-    invariant that matters: if two spellings resolve to the same subject, the
-    resolver must already have treated them as the same artist. Anything else
-    lets resolution and identity disagree about what one artist is.
+    Keying off `artist_key` also enforces the invariant that matters: if two
+    spellings resolve to one subject, the resolver must already treat them as
+    one artist, or resolution and identity disagree about what an artist is.
     """
     if not artist:
         return []
     key = artist_key(artist)
     return [a for a in library if a.albumartist and artist_key(a.albumartist) == key]
+
+
+def _albums_by_loose_artist(
+    library: list[LibraryAlbum], artist: str
+) -> list[LibraryAlbum]:
+    """Albums whose artist matches under the MATCHER's normalization.
+
+    Article-insensitive, so typing "Beatles" reaches "The Beatles". That fold is
+    right here and wrong in `artist_key` — here a human confirms or the caller
+    refuses; a uuid has no such recourse, and folding the article there merged
+    "The Band" with "Band" permanently.
+    """
+    key = normalize_artist(artist)
+    return [a for a in library if key and normalize_artist(a.albumartist) == key]
 
 
 def _near_artists(library: list[LibraryAlbum], artist: str) -> list[str]:
@@ -129,17 +140,36 @@ def resolve(
 def _resolve_artist(
     library: list[LibraryAlbum], artist: str, *, allow_new: bool
 ) -> Resolution:
-    """Exact on the normalized key, which already folds the variance that
-    matters — "Old 97's"/"Old 97s", "The Beatles"/"Beatles", diacritics."""
+    """Exact on `artist_key` first, then article-insensitively.
+
+    The two-step is what lets identity stay strict while typing stays forgiving:
+    "Beatles" finds "The Beatles" and the subject is keyed off the LIBRARY's
+    spelling, so both typings land on one subject without `artist_key` having to
+    fold the article itself.
+    """
     matches = _albums_by_artist(library, artist)
     if matches:
         # Every spelling here shares one artist_key, so the choice is cosmetic:
         # take the most common form in the library as the display name.
-        spelling = Counter(a.albumartist for a in matches).most_common(1)[0][0]
+        return _resolved_artist(matches, f"{len(matches)} album(s) in the library")
+
+    loose = _albums_by_loose_artist(library, artist)
+    if loose:
+        # The fold that got us here can span genuinely different artists — "The
+        # Band" and "Band" both normalize to `band`. Guessing between them is
+        # exactly what this module does not do.
+        by_subject: dict[str, list[LibraryAlbum]] = {}
+        for album in loose:
+            by_subject.setdefault(artist_key(album.albumartist), []).append(album)
+        if len(by_subject) == 1:
+            return _resolved_artist(loose, "matched ignoring the leading article")
         return Resolution(
-            ResolutionStatus.RESOLVED,
-            subject=NoteSubjectRef.for_artist(spelling),
-            reason=f"{len(matches)} album(s) in the library",
+            ResolutionStatus.AMBIGUOUS,
+            candidates=tuple(
+                Candidate(label=group[0].albumartist, artist=group[0].albumartist)
+                for group in by_subject.values()
+            ),
+            reason=f"{len(by_subject)} artists match {artist!r} ignoring the article",
         )
 
     if allow_new:
@@ -153,6 +183,15 @@ def _resolve_artist(
         ResolutionStatus.UNMATCHED,
         candidates=tuple(Candidate(label=n, artist=n) for n in near),
         reason=f"no artist matching {artist!r} in the library",
+    )
+
+
+def _resolved_artist(matches: list[LibraryAlbum], reason: str) -> Resolution:
+    spelling = Counter(a.albumartist for a in matches).most_common(1)[0][0]
+    return Resolution(
+        ResolutionStatus.RESOLVED,
+        subject=NoteSubjectRef.for_artist(spelling),
+        reason=reason,
     )
 
 
@@ -229,7 +268,9 @@ def _shortlist(
     if matched is not None:
         out.append(matched)
     if artist:
-        out.extend(a for a in _albums_by_artist(library, artist) if a not in out)
+        # Loose, not exact: someone who typed "Beatles" and mistyped the album
+        # should still be shown The Beatles' albums.
+        out.extend(a for a in _albums_by_loose_artist(library, artist) if a not in out)
     return out[:MAX_CANDIDATES]
 
 

@@ -40,7 +40,15 @@ and keeping the author's headings would be the same operation.
 
 Free text is matched against the library — beets and the SpindleBot DB, unioned
 — using the same artist-scoped matcher the collection audit uses. Spelling is
-folded: `Old 97s` finds `Old 97's`, `the beatles` finds `The Beatles`.
+folded: `Old 97s` finds `Old 97's`, `the beatles` finds `The Beatles`, and
+`Beatles` finds `The Beatles` too.
+
+That last one is handled by *resolution*, not by the subject key. The key keeps
+a leading article on purpose — folding it made "The Band" and "Band" the same
+artist, permanently — so resolution matches article-insensitively and then keys
+off the library's own spelling. Both typings therefore land on one subject. If
+two of your artists differ only by a leading article, resolution refuses and
+asks which you meant.
 
 The CLI **refuses rather than guesses**. An ambiguous or unmatched subject exits
 non-zero and lists what the library does have:
@@ -164,12 +172,16 @@ system can rebuild these rows.
 Output is grouped by artist → album → track rather than newest-first, because an
 exported document is meant to be read as a document.
 
-**One known limitation.** Heading nesting cannot express "this album has no
-artist" once an artist heading is in scope — there is no syntax that unsets a
-level without also setting it. So an album that appears both with and without an
-artist folds into the parented subject on re-import. The writing itself is never
-lost, and it only arises from hand-written input that names an album without
-ever naming its artist.
+**Why the ordering is load-bearing.** Heading nesting cannot express "this level
+is empty" once something is in scope above it — no syntax unsets a level without
+also setting it. A note that leaves a parent level empty must therefore never
+follow one that fills it. Grouping by artist → album → track guarantees that,
+because an empty level sorts first within its prefix, so the problematic order
+cannot arise. Changing that sort would break the round trip; a test asserts it.
+
+A track with no album cannot exist as a subject at all — resolution refuses
+`--track` without `--album`, at both `note add` and `note import` — so the worst
+shape never reaches export.
 
 ## Where notes live
 
