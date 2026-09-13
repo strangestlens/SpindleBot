@@ -1533,20 +1533,30 @@ def cmd_note(cfg, args: list[str]) -> int:
             )
             # Grouped for reading, not newest-first: an exported document is
             # meant to be read (and re-imported) as a document.
+            #
+            # This ordering also GUARANTEES the round trip, which is why it is
+            # not merely cosmetic. Heading nesting cannot express an empty parent
+            # level once one is in scope above it, so a note that leaves a level
+            # empty must never follow one that fills it. Sorting None as "" puts
+            # every such note FIRST within its prefix — ("a", "", "c") sorts
+            # before ("a", "b", "") — so the unrepresentable ordering cannot
+            # arise. `core.note_markdown.unrepresentable` states the limitation;
+            # tests assert this sort keeps it empty.
             views.sort(key=lambda v: (
                 (v.subject.artist_name or "").casefold(),
                 (v.subject.album_title or "").casefold(),
                 (v.subject.track_title or "").casefold(),
                 v.note.created_utc,
             ))
-            text = render([
+            parsed = [
                 ParsedNote(
                     kind=v.subject.kind, body=v.body,
                     artist=v.subject.artist_name, album=v.subject.album_title,
                     track=v.subject.track_title,
                 )
                 for v in views
-            ], root_level=root_level)
+            ]
+            text = render(parsed, root_level=root_level)
 
             destination = _note_opt(rest, "-o", "--out")
             if destination:

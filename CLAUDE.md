@@ -347,11 +347,22 @@ Four rules follow, and none of them are negotiable:
    end-to-end (export → fresh DB → export → byte-equal). It is the guarantee
    that the writing is never trapped in SQLite.
 
-**Equality goes through the identity keys, never through `normalize_artist`.**
-That normalizer replaces punctuation with a SPACE, so "Old 97's" folds to
-`old 97 s` and "Old 97s" to `old 97s`. The collection matcher never notices
-because it compares fuzzily afterwards; anything doing exact equality does. This
-bug appeared twice on one branch — use `artist_key` / `title_key`.
+**`normalize_artist` is a FUZZY-MATCHING normalizer and must never back an
+equality test.** Use `artist_key` / `text_key`. It went wrong three times on one
+branch, two different ways: it replaces punctuation with a SPACE, so "Old 97's"
+folds to `old 97 s` and "Old 97s" to `old 97s`; and it strips a leading article,
+so "The Band" and "Band" reduce to the same string. The collection matcher
+absorbs both because it scores candidates afterwards — a uuid has no downstream,
+so the second one merged two real artists' notes permanently and in silence.
+Article-insensitivity belongs in **resolution**, which matches loosely and then
+keys off the library's own spelling, so both typings still land on one subject.
+
+**`note export` sorts by artist → album → track for a reason beyond
+readability.** Heading nesting cannot express an empty parent level once one is
+in scope, so a note that empties a level must never follow one that fills it;
+sorting None as `""` puts such notes first within their prefix and makes the bad
+ordering unreachable. `core/note_markdown.unrepresentable()` states the limit and
+a test asserts the sort keeps it empty.
 
 Resolution **never guesses**: ambiguous returns candidates and exits non-zero,
 and `--new` is the only way to create a subject the library lacks. A note filed

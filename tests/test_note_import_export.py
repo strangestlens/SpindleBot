@@ -210,3 +210,85 @@ def test_export_root_level_shifts_the_headings(cfg, capsys):
     capsys.readouterr()
     _run(cfg, "export", "--root-level", "2")
     assert "## Old 97s" in capsys.readouterr().out
+
+
+def test_export_round_trips_with_an_artist_less_album(cfg, capsys, tmp_path):
+    """The one gapped shape a supported path can actually produce: `note add
+    --album X --new` with no artist, or `## X` in an imported file with no
+    artist heading above it.
+
+    Heading nesting cannot express an empty parent level once one is in scope,
+    so a note that empties a level must never FOLLOW one that fills it. The
+    grouped sort guarantees that — None sorts as "", putting such a note first
+    within its prefix — which is why the ordering is load-bearing rather than
+    cosmetic. Raised in review on PR #72.
+    """
+    _run(cfg, "add", "--album", "Nameless Record", "--new", "-m", "album with no artist")
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "album note")
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+         "--track", "Murder", "-m", "track note")
+    capsys.readouterr()
+
+    _run(cfg, "export")
+    exported = capsys.readouterr().out
+    assert "# None" not in exported
+    assert "album with no artist" in exported
+
+    doc = tmp_path / "gapped.md"
+    doc.write_text(exported, encoding="utf-8")
+    fresh = SimpleNamespace(core=SimpleNamespace(db_path=tmp_path / "fresh.db"))
+    assert _run(fresh, "import", str(doc), "--new", "--json") == 0
+    assert set(_statuses(_json_out(capsys))) == {"imported"}
+
+    _run(fresh, "export")
+    assert capsys.readouterr().out == exported, "byte-identical through a gapped corpus"
+
+
+def test_a_track_subject_with_no_album_is_unreachable(cfg, capsys, tmp_path):
+    """Why export never has to cope with the worst gapped shape.
+
+    `render`/`parse` handle a parentless `### C` perfectly well, but resolution
+    refuses it at BOTH entry points, so no such subject can be created. The
+    guarantee lives there rather than in a downstream warning.
+    """
+    assert _run(cfg, "add", "--artist", "Old 97s", "--track", "Murder",
+                "-m", "x", "--json") == 1
+    assert "requires --album" in _json_out(capsys)["error"]
+
+    doc = tmp_path / "parentless.md"
+    doc.write_text("### Wandering Track\n\nbody\n", encoding="utf-8")
+    assert _run(cfg, "import", str(doc), "--new", "--json") == 1
+    payload = _json_out(capsys)
+    assert payload["blocked"] is True
+    assert "requires --album" in payload["rows"][0]["detail"]
+
+    _run(cfg, "list", "--json")
+    assert _json_out(capsys)["count"] == 0
+
+
+def test_the_grouped_sort_leaves_nothing_unrepresentable(cfg, capsys):
+    """Stated directly against the detector, so a future change to the export
+    sort fails here rather than quietly corrupting a document."""
+    from spindlebot.core.note_markdown import ParsedNote, unrepresentable
+    from spindlebot.db.connection import open_db
+    from spindlebot.services import notes as svc
+
+    _run(cfg, "import", str(FIXTURE), "--root-level", "2", "--json")
+    _run(cfg, "add", "--album", "Nameless Record", "--new", "-m", "no artist")
+    _run(cfg, "add", "--artist", "Old 97s", "--new", "-m", "artist level")
+
+    conn = open_db(cfg.core.db_path)
+    views = svc.list_notes(conn)
+    conn.close()
+    views.sort(key=lambda v: (
+        (v.subject.artist_name or "").casefold(),
+        (v.subject.album_title or "").casefold(),
+        (v.subject.track_title or "").casefold(),
+        v.note.created_utc,
+    ))
+    parsed = [
+        ParsedNote(kind=v.subject.kind, body=v.body, artist=v.subject.artist_name,
+                   album=v.subject.album_title, track=v.subject.track_title)
+        for v in views
+    ]
+    assert unrepresentable(parsed) == ()

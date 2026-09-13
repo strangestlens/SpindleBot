@@ -141,3 +141,54 @@ def test_an_empty_library_never_silently_resolves():
     """The failure mode library_index already refuses for the audit: an empty
     index makes everything look new."""
     assert not resolve([], artist="Old 97s").ok
+
+
+# ── the leading article (review follow-up, PR #72) ───────────────────────────
+# `artist_key` stopped folding a leading article, because folding it merged "The
+# Band" with "Band" permanently. Resolution absorbs the forgiveness instead: it
+# matches article-insensitively and then keys off the LIBRARY's spelling, so
+# typing either form still lands on ONE subject.
+
+ARTICLED = [
+    LibraryAlbum("The Beatles", "Revolver", 1966, None),
+    LibraryAlbum("The Band", "Music from Big Pink", 1968, None),
+]
+
+
+@pytest.mark.parametrize("typed", ["The Beatles", "Beatles", "the beatles", "BEATLES"])
+def test_either_spelling_resolves_to_the_librarys_artist(typed):
+    r = resolve(ARTICLED, artist=typed)
+    assert r.ok and r.subject.artist_name == "The Beatles"
+
+
+def test_both_spellings_land_on_one_subject():
+    """The invariant that makes the strict identity key safe."""
+    with_article = resolve(ARTICLED, artist="The Beatles").subject.subject_key
+    without = resolve(ARTICLED, artist="Beatles").subject.subject_key
+    assert with_article == without
+
+
+def test_an_exact_key_match_wins_over_the_loose_one():
+    """An artist literally named "Band" is not "The Band"."""
+    library = [*ARTICLED, LibraryAlbum("Band", "Self Titled", 2000, None)]
+    assert resolve(library, artist="Band").subject.artist_name == "Band"
+    assert resolve(library, artist="The Band").subject.artist_name == "The Band"
+
+
+def test_a_loose_match_spanning_two_artists_refuses():
+    """`normalize_artist` folds strictly more than the identity key — the article
+    AND a Discogs disambiguation suffix — so the loose step can reach two real
+    subjects at once. Guessing between them is what this module never does."""
+    library = [
+        LibraryAlbum("The Band", "Music from Big Pink", 1968, None),
+        LibraryAlbum("Band (2)", "Something Else", 2000, None),
+    ]
+    r = resolve(library, artist="band")
+    assert r.status is ResolutionStatus.AMBIGUOUS
+    assert {c.label for c in r.candidates} == {"The Band", "Band (2)"}
+
+
+def test_a_mistyped_album_under_an_article_less_artist_still_offers_candidates():
+    r = resolve(ARTICLED, artist="Beatles", album="Revolvr")
+    assert not r.ok
+    assert "The Beatles — Revolver" in [c.label for c in r.candidates]
