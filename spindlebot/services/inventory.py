@@ -395,11 +395,19 @@ def inventory_location(
                 )
                 # An unchanged file's album membership is already recorded, so the
                 # tags that would only be used to re-derive it need not be read.
-                # A track with no link yet (never had an album tag, or was linked
-                # before its album existed) falls back to reading them.
+                # Two cases still must read: no link yet (never had an album tag,
+                # or was linked before its album existed), and AMBIGUOUS
+                # membership. album_track is many-to-many, so byte-identical audio
+                # under two releases (an original and a reissue) shares one
+                # audio_content row linked to both albums — and the DB cannot say
+                # which one THIS path sits under. Guessing attributes the file,
+                # its directory, and its album-level sidecars to the wrong album.
+                reused_album_ids = (
+                    album_repo.album_ids_for_track(conn, reused.id)
+                    if reused is not None else []
+                )
                 reused_album_id = (
-                    album_repo.album_id_for_track(conn, reused.id)
-                    if reused is not None else None
+                    reused_album_ids[0] if len(reused_album_ids) == 1 else None
                 )
                 beets_item_id = beets_index.get(os.fsencode(str(path))) if beets_index else None
 

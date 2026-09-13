@@ -901,6 +901,52 @@ def test_unchanged_track_with_no_album_link_falls_back_to_tags(conn, tmp_path):
     assert audio_repo.count(conn) == 1
 
 
+def test_ambiguous_album_membership_falls_back_to_tags(conn, tmp_path):
+    """A track linked to two albums must NOT have one of them guessed for it.
+
+    `album_track` is many-to-many (schema_v3): one audio identity can belong to an
+    original release AND a compilation/reissue. The DB cannot say which album a
+    given PATH sits under, so the no-read path must not pick one — doing so files
+    the directory under the wrong album and re-parents its album-level sidecars.
+
+    The reachable shape is ONE copy at the scanned location with more than one
+    membership (the other copy lives elsewhere, or the compilation has no audio
+    here). Two copies in the same tree do NOT reach it: they share a presence row
+    keyed (audio_id, location_id), so each overwrites the other's rel_path within
+    the scan and neither ever gets a reuse hit.
+
+    The decoy album is created FIRST so it holds the lower id — otherwise picking
+    "the first membership" would land on the right album by accident and the test
+    would pass against the bug.
+    """
+    decoy = album_repo.upsert(conn, album_key=album_key("AA", "Compilation", None),
+                              now=500, albumartist="AA", album="Compilation")
+
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Original" / "01.flac", audio_md5_bytes=bytes(range(1, 17)),
+                tags={"album": "Original", "albumartist": "AA", "title": "One",
+                      "tracknumber": "1"})
+    (root / "AA" / "Original" / "cover.jpg").write_bytes(b"\xff\xd8original")
+    _run(conn, root, now=1000)
+
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    original = album_repo.get_by_key(conn, album_key("AA", "Original", None))
+    assert decoy.id < original.id, "setup: the wrong album must sort first"
+    album_repo.link_track(conn, decoy.id, audio.id)
+    assert album_repo.album_ids_for_track(conn, audio.id) == [decoy.id, original.id]
+
+    with pytest.MonkeyPatch.context() as mp:
+        spy = _install_tag_spy(mp)
+        _run(conn, root, now=2000)
+
+    assert spy.calls == 1, "ambiguous membership must fall back to reading tags"
+    cover = sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                             parent_id=original.id, role=SidecarRole.COVER)
+    assert cover is not None, "the cover was re-parented to the wrong album"
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                            parent_id=decoy.id, role=SidecarRole.COVER) is None
+
+
 def test_changed_size_is_rehashed(conn, tmp_path, monkeypatch):
     root = tmp_path / "Pending"
     path = root / "01.flac"
