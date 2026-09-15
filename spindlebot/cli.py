@@ -1117,7 +1117,11 @@ def _note_positionals(args: list[str]) -> list[str]:
 
 
 def _parse_since(raw: str) -> int:
-    """`--since 2026-01-01` or a full ISO timestamp, as epoch seconds."""
+    """`--since 2026-01-01` or a full ISO timestamp, as epoch seconds.
+
+    Interpreted in LOCAL time — a bare date means local midnight — which is what
+    `note sessions` renders against.
+    """
     from datetime import date, datetime
     try:
         if len(raw) == 10:
@@ -1597,10 +1601,13 @@ def cmd_note(cfg, args: list[str]) -> int:
         if not sessions:
             print("no sessions")
             return 0
-        from datetime import datetime, timezone
+        # LOCAL time, not UTC. A listening sitting is a local-time event — a
+        # session started at 21:23 rendered as the following day under UTC — and
+        # `--since` already reads its date locally, so a UTC display disagreed
+        # with the filter that selects it.
+        from datetime import datetime
         for item in sessions:
-            when = datetime.fromtimestamp(
-                item.session.occurred_utc, tz=timezone.utc).strftime("%Y-%m-%d")
+            when = datetime.fromtimestamp(item.session.occurred_utc).strftime("%Y-%m-%d")
             title = item.session.title or "(untitled)"
             print(f"{item.session.id:>5}  {when}  {title}  — {item.note_count} note(s)")
         return 0
