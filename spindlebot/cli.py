@@ -1110,10 +1110,31 @@ def _note_positionals(args: list[str]) -> list[str]:
         if arg in _NOTE_VALUE_FLAGS:
             skip = True
             continue
-        if arg in _NOTE_BOOL_FLAGS or arg.startswith("--"):
+        if arg in _NOTE_BOOL_FLAGS or arg.startswith("-") and arg != "-":
             continue
         out.append(arg)
     return out
+
+
+def _note_unknown_flags(args: list[str]) -> list[str]:
+    """Options this command does not define.
+
+    Silently ignoring them is dangerous rather than lenient: `note list
+    --artistt X` dropped the filter and listed the WHOLE corpus, and
+    `note export --artsit X` exported everything. Both look like success.
+    """
+    unknown, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in _NOTE_VALUE_FLAGS:
+            skip = True
+            continue
+        if arg in _NOTE_BOOL_FLAGS or not arg.startswith("-") or arg == "-":
+            continue
+        unknown.append(arg)
+    return unknown
 
 
 def _parse_since(raw: str) -> int:
@@ -1241,6 +1262,9 @@ def cmd_note(cfg, args: list[str]) -> int:
         )
 
     rest = args[1:]
+    unknown = _note_unknown_flags(rest)
+    if unknown:
+        return fail(f"unknown option(s): {' '.join(unknown)}")
     positionals = _note_positionals(rest)
     conn = open_db(cfg.core.db_path)
     try:
@@ -1354,7 +1378,9 @@ def cmd_note(cfg, args: list[str]) -> int:
                   + (f"  tags: {' '.join(view.tags)}" if view.tags else ""))
             print()
             print(view.body)
-            for revision in revisions[:-1]:
+            # Newest prior edit first, oldest last — the order `docs/notes.md`
+            # documents, and the useful one: recent context is nearer the top.
+            for revision in reversed(revisions[:-1]):
                 print(f"\n--- revision {revision.seq} ---")
                 print(revision.body)
             return 0
@@ -1420,7 +1446,7 @@ def cmd_note(cfg, args: list[str]) -> int:
 
         # ── import ───────────────────────────────────────────────────────────
         if sub == "import":
-            from spindlebot.core.note_markdown import parse
+            from spindlebot.core.note_markdown import _check_root_level, parse
             from spindlebot.services.note_import import apply_import, plan_import
 
             if not positionals:
@@ -1432,8 +1458,10 @@ def cmd_note(cfg, args: list[str]) -> int:
 
             try:
                 root_level = int(_note_opt(rest, "--root-level") or 1)
-            except ValueError:
-                return fail("--root-level wants an integer")
+                _check_root_level(root_level)
+            except ValueError as e:
+                return fail(f"--root-level: {e}" if "root level" in str(e)
+                            else "--root-level wants an integer")
 
             document = parse(source.read_text(encoding="utf-8"), root_level=root_level)
             if not document.notes:
@@ -1517,10 +1545,13 @@ def cmd_note(cfg, args: list[str]) -> int:
 
         # ── export ───────────────────────────────────────────────────────────
         if sub == "export":
-            from spindlebot.core.note_markdown import ParsedNote, render
+            from spindlebot.core.note_markdown import (
+                ParsedNote, _check_root_level, render,
+            )
 
             try:
                 root_level = int(_note_opt(rest, "--root-level") or 1)
+                _check_root_level(root_level)
                 kind_raw = _note_opt(rest, "--kind")
                 since_raw = _note_opt(rest, "--since")
                 kind = NoteSubjectKind(kind_raw) if kind_raw else None
@@ -1556,7 +1587,7 @@ def cmd_note(cfg, args: list[str]) -> int:
                 ParsedNote(
                     kind=v.subject.kind, body=v.body,
                     artist=v.subject.artist_name, album=v.subject.album_title,
-                    track=v.subject.track_title,
+                    track=v.subject.track_title, tags=v.tags,
                 )
                 for v in views
             ]

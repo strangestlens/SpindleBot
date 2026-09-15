@@ -42,6 +42,25 @@ class NoteView:
         return self.subject.label
 
 
+def _subject_row(conn, subject: NoteSubjectRef, now: int) -> NoteSubject:
+    """Get-or-create the subject, ADOPTING one the same work was filed under
+    before its identity sharpened.
+
+    `album_key` prefers a MusicBrainz id, so a record's key changes the day it is
+    ripped. Without this, a note written while the record was still a wishlist
+    entry would be orphaned on a name-derived subject the moment the real one
+    resolves — the note would still exist but would stop showing up under the
+    album it is about.
+    """
+    if note_subject_repo.get(conn, subject.kind, subject.subject_key) is None:
+        for previous_key in subject.alt_keys:
+            legacy = note_subject_repo.get(conn, subject.kind, previous_key)
+            if legacy is not None:
+                note_subject_repo.rekey(conn, legacy.id, subject.subject_key)
+                break
+    return note_subject_repo.upsert(conn, subject, now)
+
+
 def _view(conn, note: Note) -> NoteView:
     head = note_repo.head(conn, note.id)
     subject = note_subject_repo.get_by_id(conn, note.subject_id)
@@ -74,7 +93,7 @@ def add_note(
     """Write a new note. The subject is get-or-created, so a second note about
     an album joins the first rather than forking a parallel subject."""
     now = now if now is not None else _now()
-    subject_row = note_subject_repo.upsert(conn, subject, now)
+    subject_row = _subject_row(conn, subject, now)
     note, _ = note_repo.create(
         conn, subject_id=subject_row.id, body=body, now=now,
         session_id=session_id, author=author,
@@ -89,9 +108,7 @@ def edit_note(
 ) -> tuple[NoteView, bool]:
     """Append a revision. Returns (view, changed); an unchanged body writes nothing."""
     now = now if now is not None else _now()
-    note = note_repo.get(conn, note_id)
-    if note is None:
-        raise LookupError(f"no note {note_id}")
+    _require(conn, note_id)
     _, changed = note_repo.append_revision(
         conn, note_id=note_id, body=body, now=now, author=author
     )
@@ -108,26 +125,34 @@ def restore_note(conn, note_id: int, now: int | None = None) -> NoteView:
 
 
 def _set_status(conn, note_id: int, status: NoteStatus, now: int | None) -> NoteView:
-    if note_repo.get(conn, note_id) is None:
-        raise LookupError(f"no note {note_id}")
+    _require(conn, note_id)
     note_repo.set_status(conn, note_id, status, now if now is not None else _now())
     return _view(conn, note_repo.get(conn, note_id))
 
 
 def tag_note(conn, note_id: int, tags: list[str]) -> NoteView:
+    """Attach tags. Checks the note exists FIRST.
+
+    `note_tag.note_id` has a foreign key, so inserting against a missing note
+    raised sqlite3.IntegrityError — which the CLI does not catch, so
+    `note tag 999 todo` printed a traceback instead of an error.
+    """
+    note = _require(conn, note_id)
     note_repo.add_tags(conn, note_id, tags)
-    note = note_repo.get(conn, note_id)
-    if note is None:
-        raise LookupError(f"no note {note_id}")
     return _view(conn, note)
 
 
 def untag_note(conn, note_id: int, tag: str) -> NoteView:
+    note = _require(conn, note_id)
     note_repo.remove_tag(conn, note_id, tag)
+    return _view(conn, note)
+
+
+def _require(conn, note_id: int) -> Note:
     note = note_repo.get(conn, note_id)
     if note is None:
         raise LookupError(f"no note {note_id}")
-    return _view(conn, note)
+    return note
 
 
 # ── reading ──────────────────────────────────────────────────────────────────
