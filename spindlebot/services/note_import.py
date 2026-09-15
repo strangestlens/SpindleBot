@@ -56,6 +56,26 @@ class ImportPlan:
         return tuple(r for r in self.rows if r.status is ImportRowStatus.READY)
 
 
+def _existing_subject(conn, subject: NoteSubjectRef):
+    """The subject this note will end up on — including one it will ADOPT.
+
+    `add_note` re-keys a name-derived subject onto its MusicBrainz-backed key the
+    first time the album resolves with an id. Looking up only the new key finds
+    nothing, so a re-import marked the row READY and then inserted a SECOND copy
+    of a body that was already there — idempotence broken exactly when a
+    wishlist note graduates to an owned one. Read-only: the plan must not move
+    anything.
+    """
+    found = note_subject_repo.get(conn, subject.kind, subject.subject_key)
+    if found is not None:
+        return found
+    for previous_key in subject.alt_keys:
+        found = note_subject_repo.get(conn, subject.kind, previous_key)
+        if found is not None:
+            return found
+    return None
+
+
 def plan_import(
     conn,
     library: list[LibraryAlbum],
@@ -83,7 +103,7 @@ def plan_import(
             continue
 
         subject = resolution.subject
-        existing = note_subject_repo.get(conn, subject.kind, subject.subject_key)
+        existing = _existing_subject(conn, subject)
         duplicate = (
             note_repo.find_by_subject_and_sha(conn, existing.id, body_sha256(parsed.body))
             if existing else None

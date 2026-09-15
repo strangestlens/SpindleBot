@@ -21,7 +21,7 @@ Usage:
     python -m spindlebot collection-ignore --list [--json]                      Show what's ignored
     python -m spindlebot collection-ignore --remove <id...> [--json]            Un-ignore (also --unignore)
     python -m spindlebot collection-ignore --clear --yes [--json]               Un-ignore everything
-    python -m spindlebot note add [--artist <a>] [--album <b>] [--track <t>] [--new] [-m <text>|-F <file>|-] [--tag <t>] [--session <id>] [--json]
+    python -m spindlebot note add [--artist <a>] [--album <b>] [--track <t>] [--mbid <id>] [--new] [-m <text>|-F <file>|-] [--tag <t>] [--session <id>] [--json]
                                                       Write a listening note at artist / album / track level
     python -m spindlebot note list [--artist <a>] [--album <b>] [--track <t>] [--kind artist|album|track] [--tag <t>] [--session <id>] [--since <date>] [--all] [--json]
     python -m spindlebot note show <id> [--history] [--json]      Show a note, optionally every revision
@@ -1081,10 +1081,40 @@ def cmd_collection_ignore(cfg, args: list[str]) -> int:
 _NOTE_VALUE_FLAGS = {
     "--artist", "--album", "--track", "--tag", "--session", "--since",
     "--kind", "--index", "--title", "-m", "--message", "-F", "--file",
-    "--root-level", "-o", "--out",
+    "--root-level", "-o", "--out", "--mbid",
 }
 _NOTE_BOOL_FLAGS = {"--json", "--new", "--all", "--history", "-",
                     "--dry-run", "--skip-unresolved"}
+
+# What each subcommand actually accepts. A SHARED flag table was not enough:
+# `note list --new` and `note export --tag todo` were accepted and then silently
+# ignored, `note list typo` dropped its operand, and `note show nope` reached a
+# bare int() and printed a traceback. `operands` is (min, max) with None for
+# unbounded; `numeric` means the first operand is a note id.
+_NOTE_SPECS: dict[str, dict] = {
+    "add": {"flags": {"--artist", "--album", "--track", "--tag", "--session",
+                      "--index", "--new", "-m", "--message", "-F", "--file", "-",
+                      "--json", "--mbid"},
+            "operands": (0, 0)},
+    "list": {"flags": {"--artist", "--album", "--track", "--kind", "--tag",
+                       "--session", "--since", "--all", "--json"},
+             "operands": (0, 0)},
+    "show": {"flags": {"--history", "--json"}, "operands": (1, 1), "numeric": True},
+    "edit": {"flags": {"-m", "--message", "-F", "--file", "-", "--json"},
+             "operands": (1, 1), "numeric": True},
+    "rm": {"flags": {"--json"}, "operands": (1, 1), "numeric": True},
+    "restore": {"flags": {"--json"}, "operands": (1, 1), "numeric": True},
+    "tag": {"flags": {"--json"}, "operands": (2, None), "numeric": True},
+    "untag": {"flags": {"--json"}, "operands": (2, 2), "numeric": True},
+    "session": {"flags": {"--title", "--json"}, "operands": (1, 1)},
+    "sessions": {"flags": {"--since", "--json"}, "operands": (0, 0)},
+    "import": {"flags": {"--dry-run", "--root-level", "--new", "--index",
+                         "--skip-unresolved", "--session", "--title", "--json"},
+               "operands": (1, 1)},
+    "export": {"flags": {"--artist", "--album", "--track", "--kind", "--since",
+                         "--root-level", "-o", "--out", "--json"},
+               "operands": (0, 0)},
+}
 
 
 def _note_opts(args: list[str], flag: str) -> list[str]:
@@ -1116,12 +1146,15 @@ def _note_positionals(args: list[str]) -> list[str]:
     return out
 
 
-def _note_unknown_flags(args: list[str]) -> list[str]:
-    """Options this command does not define.
+def _note_unknown_flags(args: list[str], allowed: set[str] | None = None) -> list[str]:
+    """Options this subcommand does not define.
 
     Silently ignoring them is dangerous rather than lenient: `note list
     --artistt X` dropped the filter and listed the WHOLE corpus, and
     `note export --artsit X` exported everything. Both look like success.
+
+    `allowed` scopes the check to one subcommand; without it only the global
+    tables apply, which is what let `note list --new` through.
     """
     unknown, skip = [], False
     for arg in args:
@@ -1130,11 +1163,36 @@ def _note_unknown_flags(args: list[str]) -> list[str]:
             continue
         if arg in _NOTE_VALUE_FLAGS:
             skip = True
+            if allowed is not None and arg not in allowed:
+                unknown.append(arg)
             continue
-        if arg in _NOTE_BOOL_FLAGS or not arg.startswith("-") or arg == "-":
+        if arg == "-" or not arg.startswith("-"):
+            continue
+        if arg in _NOTE_BOOL_FLAGS and (allowed is None or arg in allowed):
             continue
         unknown.append(arg)
     return unknown
+
+
+def _note_usage_error(sub: str, args: list[str]) -> str | None:
+    """Validate one subcommand's flags and operands, or return the complaint."""
+    spec = _NOTE_SPECS[sub]
+    unknown = _note_unknown_flags(args, spec["flags"])
+    if unknown:
+        return f"note {sub}: unknown option(s): {' '.join(unknown)}"
+
+    operands = _note_positionals(args)
+    low, high = spec["operands"]
+    if len(operands) < low:
+        return f"note {sub}: expected {low} operand(s), got {len(operands)}"
+    if high is not None and len(operands) > high:
+        return (f"note {sub}: unexpected argument(s): "
+                f"{' '.join(operands[high:])}")
+    if spec.get("numeric") and operands and not operands[0].lstrip("-").isdigit():
+        return f"note {sub}: {operands[0]!r} is not a note id"
+    if sub == "session" and operands and operands[0] != "start":
+        return "Usage: spindlebot note session start [--title <text>]"
+    return None
 
 
 def _parse_since(raw: str) -> int:
@@ -1254,17 +1312,16 @@ def cmd_note(cfg, args: list[str]) -> int:
             "body": view.body,
         }
 
-    if sub not in {"add", "list", "show", "edit", "rm", "restore", "tag",
-                   "untag", "sessions", "session", "import", "export"}:
+    if sub not in _NOTE_SPECS:
         return fail(
             "Usage: spindlebot note add|list|show|edit|rm|restore|tag|untag|"
             "sessions|session start|import|export"
         )
 
     rest = args[1:]
-    unknown = _note_unknown_flags(rest)
-    if unknown:
-        return fail(f"unknown option(s): {' '.join(unknown)}")
+    usage_error = _note_usage_error(sub, rest)
+    if usage_error:
+        return fail(usage_error)
     positionals = _note_positionals(rest)
     conn = open_db(cfg.core.db_path)
     try:
@@ -1288,7 +1345,8 @@ def cmd_note(cfg, args: list[str]) -> int:
 
             try:
                 resolution = _note_resolve(
-                    library, artist=artist, album=album, track=track, allow_new=allow_new
+                    library, artist=artist, album=album, track=track,
+                    mb_albumid=_note_opt(rest, "--mbid"), allow_new=allow_new,
                 )
             except ValueError as e:
                 return fail(str(e))
