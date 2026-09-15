@@ -109,7 +109,10 @@ def build_targets(
     Returns (targets, words, slices): `words` are the transcript's words in
     order and `slices` the half-open span of `targets` each one owns, or None
     for a word with no mappable characters (numerals, symbols — the aligner
-    interpolates those lines).
+    interpolates those lines). Logs a warning when most of the transcript is
+    unmappable, which means the lyrics are in a script this model has no
+    orthography for; that has to happen here, because a wholly unmappable
+    transcript yields no targets and callers return early on that.
 
     When `star` is given, a star token is placed before the first line,
     between every pair of lines, and after the last. A star matches arbitrary
@@ -150,6 +153,16 @@ def build_targets(
             start_token_group()
             slices.append((len(targets), len(targets) + len(tokens)))
             targets.extend(tokens)
+
+    unmappable = sum(1 for s in slices if s is None)
+    if words and unmappable > len(words) * UNMAPPABLE_WARN_RATIO:
+        log.warning(
+            "%d of %d words have no characters in the alignment vocabulary "
+            "(non-roman script?); those lines cannot be aligned and will be "
+            "interpolated",
+            unmappable,
+            len(words),
+        )
 
     if not any(s is not None for s in slices):
         return [], words, slices
@@ -344,14 +357,6 @@ class TorchaudioBackend:
         )
         if not targets:
             return []
-        unmappable = sum(1 for s in word_slices if s is None)
-        if unmappable > len(words) * UNMAPPABLE_WARN_RATIO:
-            log.warning(
-                "%d of %d words have no characters in the alignment vocabulary "
-                "(non-roman script?); those lines will be interpolated",
-                unmappable,
-                len(words),
-            )
 
         if star is not None:
             star_column = torch.full(

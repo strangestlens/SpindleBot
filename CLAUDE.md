@@ -208,7 +208,9 @@ lyric_timing/                    — OPTIONAL AI lyric-timing subsystem (peer pa
   backends/torchaudio_backend.py — real backend: Demucs vocal sep + chunked wav2vec2 CTC forced
                                      alignment with a star wildcard token (torchaudio; memory
                                      bounded by 30s windows, not track length; lazy heavy imports;
-                                     run from the AI venv). build_targets() is pure + unit-tested
+                                     run from the AI venv). build_targets() needs no torch and is
+                                     unit-tested; it warns when the lyrics are in a script the
+                                     model has no orthography for
   cli.py                         — python -m lyric_timing audit|retime
 setup-ai.sh                      — creates the AI venv at ~/.local/share/spindlebot/ai-venv
                                      (Python 3.13) from requirements-ai.txt

@@ -1,8 +1,10 @@
-"""CTC target construction for the real backend — pure, no torch needed.
+"""CTC target construction for the real backend — no torch needed.
 
 Mirrors MMS_FA's vocabulary shape: blank at index 0, lowercase romanized
 characters after it, no word-separator token, star appended by us.
 """
+
+import logging
 
 from lyric_timing.backends.torchaudio_backend import build_targets
 
@@ -81,3 +83,22 @@ def test_line_of_only_unmappable_words_still_gets_a_star():
     assert decode(targets) == "*hey**run*"
     assert words == ["hey", "1999", "run"]
     assert slices == [(1, 4), None, (6, 9)]
+
+
+def test_wholly_unmappable_transcript_warns(caplog):
+    # a non-roman-script lyric file maps to nothing at all — exactly the case
+    # worth telling the user about, and the one where there are no targets to
+    # align, so the diagnostic has to be emitted here rather than downstream
+    with caplog.at_level(logging.WARNING,
+                         logger="lyric_timing.backends.torchaudio_backend"):
+        targets, words, slices = build_targets("1999 !!!\n2000", DICT, star=STAR)
+    assert targets == []
+    assert slices == [None, None, None]
+    assert "vocabulary" in caplog.text.lower()
+
+
+def test_a_few_unmappable_words_do_not_warn(caplog):
+    with caplog.at_level(logging.WARNING,
+                         logger="lyric_timing.backends.torchaudio_backend"):
+        build_targets("hey you run 1999 party on", DICT, star=STAR)
+    assert caplog.text == ""
