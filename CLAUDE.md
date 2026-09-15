@@ -366,7 +366,28 @@ a test asserts the sort keeps it empty.
 
 Resolution **never guesses**: ambiguous returns candidates and exits non-zero,
 and `--new` is the only way to create a subject the library lacks. A note filed
-under the wrong album is invisible, because nothing errors later.
+under the wrong album is invisible, because nothing errors later. Three
+consequences that are easy to undo by accident:
+- **Settle the ARTIST before matching a title.** Calling `match_items` directly
+  inherits its *fuzzy* artist candidates, so a typo'd artist plus an exact album
+  title came back OWNED. `_match_artist` is the single rule for "same artist".
+- **An exact title matching two releases is ambiguous**, not first-wins —
+  editions differ by `mb_albumid`, and picking one bakes an arbitrary release
+  into the subject key.
+- **`--new` keys off the library's artist spelling**, not what was typed, or
+  "Old 97s" and "Old 97's" fork into two subjects for one unowned record.
+
+**A subject's key changes when its identity sharpens**, because `album_key`
+prefers a MusicBrainz id — so a note written before an album was ripped must be
+ADOPTED onto the real subject (`NoteSubjectRef.alt_keys` +
+`note_subject_repo.rekey`), or it is silently orphaned on a key nothing resolves
+to. Adoption only runs toward the MBID-backed key; a name-keyed ref cannot guess
+an id it has never seen.
+
+**Anything the CLI does not define is an error.** Silently ignoring unknown
+options is not lenient, it is dangerous: `note list --artistt X` dropped the
+filter and listed the whole corpus, and `note export --artsit X` exported
+everything. Both looked like success.
 
 ## Known gotchas
 

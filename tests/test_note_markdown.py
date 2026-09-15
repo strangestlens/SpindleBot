@@ -322,3 +322,53 @@ def test_unrepresentable_respects_root_level():
 def test_the_sample_corpus_is_fully_representable():
     doc = parse(FIXTURE.read_text(encoding="utf-8"), root_level=2)
     assert unrepresentable(doc.notes, root_level=2) == ()
+
+
+# ── tags and root-level bounds (review round 3, PR #74) ──────────────────────
+
+def test_tags_survive_the_round_trip():
+    """`note export` is the documented escape hatch, so tags attached with
+    `note add --tag todo` cannot vanish on re-import."""
+    notes = [_note(NoteSubjectKind.ALBUM, "body", artist="A", album="B",
+                   tags=("surprise", "todo"))]
+    assert parse(render(notes)).notes == tuple(notes)
+
+
+def test_tags_render_as_an_invisible_comment():
+    """Metadata, not prose: it must not show up when the markdown is rendered."""
+    notes = [_note(NoteSubjectKind.ALBUM, "body", artist="A", album="B", tags=("todo",))]
+    out = render(notes)
+    assert "<!-- tags: todo -->" in out
+    assert parse(out).notes[0].body == "body", "the marker is not part of the body"
+
+
+def test_a_tags_comment_inside_the_body_is_left_alone():
+    """Only a marker BEFORE any prose is metadata. Further down it is the
+    author's own text and must not be silently eaten."""
+    body = "some prose\n\n<!-- tags: not-metadata -->"
+    notes = [_note(NoteSubjectKind.ALBUM, body, artist="A", album="B")]
+    got = parse(render(notes)).notes[0]
+    assert got.tags == ()
+    assert "not-metadata" in got.body
+
+
+def test_a_note_with_no_tags_emits_no_marker():
+    assert "<!--" not in render([_note(NoteSubjectKind.ARTIST, "b", artist="A")])
+
+
+@pytest.mark.parametrize("bad", [0, 5, 6, -1])
+def test_an_out_of_range_root_level_is_refused(bad):
+    """A track sits two levels below the root and markdown stops at six `#`, so
+    root level 5 renders `####### Track` — which nothing can parse back."""
+    notes = [_note(NoteSubjectKind.TRACK, "b", artist="A", album="B", track="C")]
+    with pytest.raises(ValueError, match="root level must be 1-4"):
+        render(notes, root_level=bad)
+    with pytest.raises(ValueError, match="root level must be 1-4"):
+        parse("# A\n\nbody\n", root_level=bad)
+
+
+def test_the_deepest_valid_root_level_still_round_trips():
+    notes = [_note(NoteSubjectKind.TRACK, "b", artist="A", album="B", track="C")]
+    out = render(notes, root_level=4)
+    assert "###### C" in out
+    assert parse(out, root_level=4).notes == tuple(notes)

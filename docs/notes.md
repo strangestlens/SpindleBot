@@ -68,6 +68,15 @@ notice — so this is the one place the tool is deliberately unhelpful.
 case, not an escape hatch: a note that says "look for this record" is about
 something you do not own yet.
 
+When you later rip that record, the note follows it. A subject's key prefers the
+MusicBrainz id, so it changes the day the album enters the library — the earlier
+note's subject is re-keyed to match rather than left behind, so both notes stay
+under the same album.
+
+If two of your releases share an artist and title but differ by MusicBrainz id —
+an original and a reissue — resolution refuses rather than picking one, since
+guessing would bake an arbitrary release into the note's identity.
+
 ## Reading back
 
 ```bash
@@ -86,6 +95,12 @@ Use `--kind` when you want the narrow version.
 Ordering is by creation, deliberately. This is a log — fixing a typo in a 2019
 note should not vault it above everything written since. Edit order stays
 recoverable through the revision chain.
+
+`--history` prints the current body first, then prior revisions newest-first, so
+the oldest draft is last.
+
+A mistyped option is an error, not a no-op: `note list --artistt X` fails rather
+than silently dropping the filter and listing everything.
 
 ## Editing, and why nothing is lost
 
@@ -133,7 +148,8 @@ Markdown headings name subjects, and the prose under a heading is the note:
 `--root-level` shifts that window down the document. A file that opens with a
 grouping heading like `# CDs` needs `--root-level 2`, which reads `##` as the
 artist level and reports `CDs` as a skipped heading rather than inventing an
-artist by that name.
+artist by that name. It accepts 1–4: a track sits two levels below the root and
+markdown stops at six `#`.
 
 ```bash
 spindlebot note import notes.md --root-level 2 --dry-run   # resolution table, writes no notes
@@ -176,6 +192,24 @@ spindlebot note export --artist "Old 97s" --since 2026-01-01
 empty database, export again, and the bytes match. That is what keeps your
 writing out of a SQLite-shaped trap. Export regularly — nothing else in this
 system can rebuild these rows.
+
+Tags travel with a note, as an HTML comment under its heading:
+
+```markdown
+## Fight Songs
+
+<!-- tags: surprise, todo -->
+
+Overall a delightful record.
+```
+
+It is invisible in rendered markdown and read back on import. Only a marker
+above the prose counts as metadata — one further down is your own text.
+
+What export does **not** carry is a subject's MusicBrainz id. Re-importing
+re-resolves by name against whatever the library holds at that point, which is
+what makes an exported file portable; the trade is that a release whose identity
+is ambiguous comes back as a refusal rather than a silent guess.
 
 Output is grouped by artist → album → track rather than newest-first, because an
 exported document is meant to be read as a document.

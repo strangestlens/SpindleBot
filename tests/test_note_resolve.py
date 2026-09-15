@@ -192,3 +192,64 @@ def test_a_mistyped_album_under_an_article_less_artist_still_offers_candidates()
     r = resolve(ARTICLED, artist="Beatles", album="Revolvr")
     assert not r.ok
     assert "The Beatles — Revolver" in [c.label for c in r.candidates]
+
+
+# ── review round 3 (PR #74) ──────────────────────────────────────────────────
+
+def test_a_typod_artist_is_never_accepted_even_with_an_exact_album():
+    """The album path used to call `match_items` directly, inheriting its FUZZY
+    artist candidates — so `Loreena McKennit` + `An Ancient Muse` came back
+    OWNED and filed under `Loreena McKennitt`, while the artist-only path
+    refused that same typo. Two rules for "is this the same artist" is one too
+    many, and the loose one silently misfiles notes."""
+    assert not resolve(LIBRARY, artist="Loreena McKennit").ok, "precondition"
+    r = resolve(LIBRARY, artist="Loreena McKennit", album="An Ancient Muse")
+    assert not r.ok
+    assert r.subject is None
+
+
+def test_two_releases_sharing_artist_and_title_are_ambiguous():
+    """Editions differ by `mb_albumid`, and the matcher returns whichever comes
+    first — which would bake an arbitrary release id into the subject key."""
+    library = [
+        LibraryAlbum("Old 97's", "Fight Songs", 1999, "mb-original"),
+        LibraryAlbum("Old 97's", "Fight Songs", 2019, "mb-deluxe"),
+    ]
+    r = resolve(library, artist="Old 97s", album="Fight Songs")
+    assert r.status is ResolutionStatus.AMBIGUOUS
+    assert "MusicBrainz id" in r.reason
+
+
+def test_one_release_with_a_duplicate_row_still_resolves():
+    """Same album listed by both indexes is not two editions — the union index
+    can legitimately carry it twice with the same mbid."""
+    library = [
+        LibraryAlbum("Old 97's", "Fight Songs", 1999, "mb-fight"),
+        LibraryAlbum("Old 97's", "Fight Songs", 1999, "mb-fight"),
+    ]
+    assert resolve(library, artist="Old 97s", album="Fight Songs").ok
+
+
+def test_new_keys_an_unowned_album_off_the_librarys_artist_spelling():
+    """Otherwise "Old 97s" and "Old 97's" fork into two subjects for one
+    unowned record, even though resolution can already tell they are one
+    artist."""
+    a = resolve(LIBRARY, artist="Old 97s", album="Unreleased Thing", allow_new=True)
+    b = resolve(LIBRARY, artist="Old 97's", album="Unreleased Thing", allow_new=True)
+    assert a.subject.subject_key == b.subject.subject_key
+    assert a.subject.artist_name == "Old 97's", "the library's spelling wins"
+
+
+def test_new_still_works_for_an_artist_the_library_has_never_heard_of():
+    """Nothing to canonicalize against, and --new says the library is not the
+    authority — so the typed spelling is correct here."""
+    r = resolve(LIBRARY, artist="Kathryn Joseph", album="Bones You Have Thrown Me",
+                allow_new=True)
+    assert r.ok and r.subject.artist_name == "Kathryn Joseph"
+
+
+def test_a_track_ref_carries_its_albums_mbid():
+    """Needed so the subject can be recognised as the same work once the album
+    gains a MusicBrainz id."""
+    r = resolve(LIBRARY, artist="Old 97s", album="Fight Songs", track="Murder")
+    assert r.subject.mbid == "mb-fight"
