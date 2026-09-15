@@ -442,3 +442,82 @@ def test_session_json_reports_the_raw_epoch(cfg, capsys):
     """Machine output stays timezone-free; only the human rendering localizes."""
     _run(cfg, "session", "start", "--title", "x", "--json")
     assert isinstance(_json_out(capsys)["occurred_utc"], int)
+
+
+# ── review round 3 (PR #74) ──────────────────────────────────────────────────
+
+@pytest.mark.parametrize("args,typo", [
+    (["list", "--artistt", "Nobody"], "--artistt"),
+    (["export", "--artsit", "Nobody"], "--artsit"),
+    (["add", "--artist", "Old 97s", "--albm", "Fight Songs", "-m", "x"], "--albm"),
+])
+def test_a_mistyped_option_is_an_error_not_a_silent_no_op(cfg, capsys, args, typo):
+    """Ignoring unknown options is dangerous rather than lenient: `note list
+    --artistt X` dropped the filter and listed the WHOLE corpus, and
+    `note export --artsit X` exported everything. Both looked like success."""
+    assert _run(cfg, *args, "--json") == 1
+    assert typo in _json_out(capsys)["error"]
+
+
+def test_a_bare_dash_is_stdin_not_an_unknown_option():
+    """`-` is the read-stdin sentinel, and tightening the unknown-flag check to
+    everything starting with `-` must not swallow it."""
+    from spindlebot.cli import _note_positionals, _note_unknown_flags
+    assert _note_unknown_flags(["--album", "B", "-"]) == []
+    assert _note_positionals(["--album", "B", "-"]) == []
+
+
+def test_a_short_unknown_option_is_caught_too():
+    from spindlebot.cli import _note_unknown_flags
+    assert _note_unknown_flags(["-x", "value"]) == ["-x"]
+
+
+def test_a_value_that_looks_like_a_flag_is_not_flagged():
+    """`--tag -weird` consumes its value; only unconsumed tokens are options."""
+    from spindlebot.cli import _note_unknown_flags
+    assert _note_unknown_flags(["--tag", "-weird"]) == []
+
+
+def test_tags_survive_export_and_re_import(cfg, capsys, tmp_path):
+    """Export is the escape hatch; a tag lost in the round trip is authored
+    metadata gone."""
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "body",
+         "--tag", "todo", "--tag", "surprise", "--json")
+    capsys.readouterr()
+
+    _run(cfg, "export")
+    exported = capsys.readouterr().out
+    doc = tmp_path / "tagged.md"
+    doc.write_text(exported, encoding="utf-8")
+
+    fresh = SimpleNamespace(core=SimpleNamespace(db_path=tmp_path / "fresh.db"))
+    assert _run(fresh, "import", str(doc), "--json") == 0
+    _run(fresh, "list", "--json")
+    assert _json_out(capsys)["notes"][0]["tags"] == ["surprise", "todo"]
+
+    _run(fresh, "export")
+    assert capsys.readouterr().out == exported
+
+
+@pytest.mark.parametrize("sub", ["import", "export"])
+def test_an_out_of_range_root_level_is_refused_at_both_entry_points(cfg, capsys, sub, tmp_path):
+    doc = tmp_path / "n.md"
+    doc.write_text("# A\n\nbody\n", encoding="utf-8")
+    args = [sub, str(doc)] if sub == "import" else [sub]
+    assert _run(cfg, *args, "--root-level", "5", "--json") == 1
+    assert "root level" in _json_out(capsys)["error"]
+
+
+def test_history_prints_newest_prior_edit_first_and_oldest_last(cfg, capsys):
+    """The order docs/notes.md documents, and the useful one — recent context
+    nearer the top. It printed current, then 1, then 2."""
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "first",
+         "--json")
+    note_id = _json_out(capsys)["id"]
+    _run(cfg, "edit", str(note_id), "-m", "second", "--json")
+    _run(cfg, "edit", str(note_id), "-m", "third", "--json")
+    capsys.readouterr()
+
+    _run(cfg, "show", str(note_id), "--history")
+    out = capsys.readouterr().out
+    assert out.index("third") < out.index("second") < out.index("first")

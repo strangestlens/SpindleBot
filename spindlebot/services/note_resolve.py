@@ -137,34 +137,50 @@ def resolve(
     return _resolve_album(library, artist, album, track, allow_new=allow_new)
 
 
-def _resolve_artist(
-    library: list[LibraryAlbum], artist: str, *, allow_new: bool
-) -> Resolution:
-    """Exact on `artist_key` first, then article-insensitively.
+@dataclass(frozen=True)
+class _ArtistMatch:
+    """The library's own name for a typed artist, or why it could not be settled."""
+    canonical: str | None = None
+    albums: tuple[LibraryAlbum, ...] = ()
+    candidates: tuple[Candidate, ...] = ()
+    reason: str = ""
 
-    The two-step is what lets identity stay strict while typing stays forgiving:
-    "Beatles" finds "The Beatles" and the subject is keyed off the LIBRARY's
-    spelling, so both typings land on one subject without `artist_key` having to
-    fold the article itself.
+
+def _match_artist(library: list[LibraryAlbum], artist: str) -> _ArtistMatch:
+    """Settle a typed artist onto ONE library artist, or refuse.
+
+    Exact on `artist_key` first, then article-insensitively. The two-step lets
+    identity stay strict while typing stays forgiving: "Beatles" finds "The
+    Beatles" and callers key off the LIBRARY's spelling, so both typings land on
+    one subject without `artist_key` folding the article itself.
+
+    Shared with the album path deliberately. When the album path called
+    `match_items` directly it inherited the matcher's FUZZY artist candidates, so
+    `Loreena McKennit` + `An Ancient Muse` came back OWNED and filed under
+    `Loreena McKennitt` — while the artist-only path refused that exact typo.
+    Two rules for "is this the same artist" is one rule too many.
     """
-    matches = _albums_by_artist(library, artist)
-    if matches:
+    exact = _albums_by_artist(library, artist)
+    if exact:
         # Every spelling here shares one artist_key, so the choice is cosmetic:
         # take the most common form in the library as the display name.
-        return _resolved_artist(matches, f"{len(matches)} album(s) in the library")
+        canonical = Counter(a.albumartist for a in exact).most_common(1)[0][0]
+        return _ArtistMatch(canonical, tuple(exact),
+                            reason=f"{len(exact)} album(s) in the library")
 
     loose = _albums_by_loose_artist(library, artist)
     if loose:
-        # The fold that got us here can span genuinely different artists — "The
-        # Band" and "Band" both normalize to `band`. Guessing between them is
-        # exactly what this module does not do.
+        # This fold can span genuinely different artists — "The Band" and "Band"
+        # both normalize to `band`. Guessing between them is what this module
+        # does not do.
         by_subject: dict[str, list[LibraryAlbum]] = {}
         for album in loose:
             by_subject.setdefault(artist_key(album.albumartist), []).append(album)
         if len(by_subject) == 1:
-            return _resolved_artist(loose, "matched ignoring the leading article")
-        return Resolution(
-            ResolutionStatus.AMBIGUOUS,
+            canonical = Counter(a.albumartist for a in loose).most_common(1)[0][0]
+            return _ArtistMatch(canonical, tuple(loose),
+                                reason="matched ignoring the leading article")
+        return _ArtistMatch(
             candidates=tuple(
                 Candidate(label=group[0].albumartist, artist=group[0].albumartist)
                 for group in by_subject.values()
@@ -172,26 +188,35 @@ def _resolve_artist(
             reason=f"{len(by_subject)} artists match {artist!r} ignoring the article",
         )
 
+    return _ArtistMatch(
+        candidates=tuple(
+            Candidate(label=n, artist=n) for n in _near_artists(library, artist)
+        ),
+        reason=f"no artist matching {artist!r} in the library",
+    )
+
+
+def _resolve_artist(
+    library: list[LibraryAlbum], artist: str, *, allow_new: bool
+) -> Resolution:
+    found = _match_artist(library, artist)
+    if found.canonical:
+        return Resolution(
+            ResolutionStatus.RESOLVED,
+            subject=NoteSubjectRef.for_artist(found.canonical),
+            reason=found.reason,
+        )
     if allow_new:
         return Resolution(
             ResolutionStatus.RESOLVED,
             subject=NoteSubjectRef.for_artist(artist),
             reason="new subject (--new)",
         )
-    near = _near_artists(library, artist)
     return Resolution(
-        ResolutionStatus.UNMATCHED,
-        candidates=tuple(Candidate(label=n, artist=n) for n in near),
-        reason=f"no artist matching {artist!r} in the library",
-    )
-
-
-def _resolved_artist(matches: list[LibraryAlbum], reason: str) -> Resolution:
-    spelling = Counter(a.albumartist for a in matches).most_common(1)[0][0]
-    return Resolution(
-        ResolutionStatus.RESOLVED,
-        subject=NoteSubjectRef.for_artist(spelling),
-        reason=reason,
+        ResolutionStatus.AMBIGUOUS if found.candidates and len(found.candidates) > 1
+        else ResolutionStatus.UNMATCHED,
+        candidates=found.candidates,
+        reason=found.reason,
     )
 
 
@@ -203,7 +228,31 @@ def _resolve_album(
     *,
     allow_new: bool,
 ) -> Resolution:
-    matched, status, reason = _find_album(library, artist, album)
+    """Settle the ARTIST first, then the title inside that artist's albums.
+
+    The artist has to be settled by `_match_artist` — exactly, or uniquely
+    ignoring the article — before any title matching happens. Going straight to
+    `match_items` inherited its fuzzy artist candidates, which made a typo'd
+    artist plus an exact album title come back OWNED.
+    """
+    canonical_artist = artist
+    scope = library
+    if artist:
+        found = _match_artist(library, artist)
+        if not found.canonical:
+            if allow_new:
+                # Nothing to canonicalize against; the typed spelling is all
+                # there is, and --new says the library is not the authority.
+                return _new_subject(artist, album, track)
+            return Resolution(
+                ResolutionStatus.AMBIGUOUS if len(found.candidates) > 1
+                else ResolutionStatus.UNMATCHED,
+                candidates=found.candidates,
+                reason=found.reason,
+            )
+        canonical_artist, scope = found.canonical, list(found.albums)
+
+    matched, status, reason = _find_album(scope, canonical_artist, album)
 
     if status is MatchStatus.OWNED and matched is not None:
         return Resolution(
@@ -212,49 +261,60 @@ def _resolve_album(
             reason=reason,
         )
 
-    if status is MatchStatus.UNCERTAIN or (matched is not None and not allow_new):
-        # A near miss is never auto-accepted: confirming it is a human decision.
-        return Resolution(
-            ResolutionStatus.AMBIGUOUS,
-            candidates=tuple(_candidate(a) for a in _shortlist(library, artist, matched)),
-            reason=reason,
-        )
-
     if allow_new:
-        return Resolution(
-            ResolutionStatus.RESOLVED,
-            subject=_subject_for(artist, album, None, track),
-            reason="new subject (--new)",
-        )
+        # The artist resolved, so key the new subject off the LIBRARY's spelling
+        # rather than what was typed — otherwise "Old 97s" and "Old 97's" fork
+        # into two subjects for the same unowned record.
+        return _new_subject(canonical_artist, album, track)
+
     return Resolution(
-        ResolutionStatus.UNMATCHED,
-        candidates=tuple(_candidate(a) for a in _shortlist(library, artist, None)),
+        ResolutionStatus.AMBIGUOUS if matched is not None or status is MatchStatus.UNCERTAIN
+        else ResolutionStatus.UNMATCHED,
+        candidates=tuple(_candidate(a) for a in _shortlist(library, artist, matched)),
         reason=reason,
     )
 
 
-def _find_album(
-    library: list[LibraryAlbum], artist: str | None, album: str
-) -> tuple[LibraryAlbum | None, MatchStatus, str]:
-    """Delegate to the contract-tested matcher when an artist is known.
+def _new_subject(artist: str | None, album: str, track: str | None) -> Resolution:
+    return Resolution(
+        ResolutionStatus.RESOLVED,
+        subject=_subject_for(artist, album, None, track),
+        reason="new subject (--new)",
+    )
 
-    Without an artist the matcher cannot help — it is artist-scoped by design —
-    so fall back to exact normalized-title equality across the whole library.
-    That is deliberately strict: one hit resolves, several are ambiguous, and a
-    near miss is not a match at all.
+
+def _find_album(
+    scope: list[LibraryAlbum], artist: str | None, album: str
+) -> tuple[LibraryAlbum | None, MatchStatus, str]:
+    """Match a title within an already artist-scoped list.
+
+    `scope` is one artist's albums when an artist was given, else the whole
+    library — and without an artist the matcher cannot help at all, since it is
+    artist-scoped by design, so that case is exact normalized-title equality
+    only: one hit resolves, several are ambiguous, a near miss is nothing.
+
+    An exact title that hits MORE THAN ONE release is ambiguous even when the
+    artist is known. Two editions can share artist and title while differing in
+    `mb_albumid`, and the matcher returns whichever comes first — which would
+    then bake an arbitrary release id into the subject key.
     """
+    key = normalize_title(album)
+    exact = [a for a in scope if key and normalize_title(a.album) == key]
+    if len({a.mb_albumid for a in exact}) > 1:
+        return None, MatchStatus.UNCERTAIN, (
+            f"{len(exact)} releases of {album!r} differ by MusicBrainz id — "
+            "resolve with --key <album_key>"
+        )
     if artist:
         item = CollectionItem(source="note", source_id="query", artist=artist, title=album)
-        result = match_items([item], library)[0]
+        result = match_items([item], scope)[0]
         return result.matched, result.status, result.reason
 
-    key = normalize_title(album)
-    hits = [a for a in library if key and normalize_title(a.album) == key]
-    if len(hits) == 1:
-        return hits[0], MatchStatus.OWNED, "exact title, one album in the library"
-    if len(hits) > 1:
+    if len(exact) == 1:
+        return exact[0], MatchStatus.OWNED, "exact title, one album in the library"
+    if len(exact) > 1:
         return None, MatchStatus.UNCERTAIN, (
-            f"{len(hits)} albums titled {album!r} — name the artist with --artist"
+            f"{len(exact)} albums titled {album!r} — name the artist with --artist"
         )
     return None, MatchStatus.MISSING, f"no album matching {album!r} in the library"
 

@@ -197,3 +197,54 @@ def test_a_note_carries_its_session_in_the_view(conn):
     view = svc.add_note(conn, subject=ALBUM, body="b", now=500, session_id=session.id)
     assert view.session.title == "Sunday CDs"
     assert svc.add_note(conn, subject=OTHER, body="b", now=600).session is None
+
+
+# ── review round 3 (PR #74) ──────────────────────────────────────────────────
+
+def test_a_note_written_before_the_record_was_owned_stays_with_the_work(conn):
+    """`album_key` prefers a MusicBrainz id, so a record's key CHANGES the day
+    it is ripped. Without adoption, the wishlist note ("look for this") is
+    orphaned on a name-derived subject the moment the real one resolves — it
+    still exists, but stops appearing under the album it is about. The real
+    corpus contains exactly such a note."""
+    wishlist = NoteSubjectRef.for_album("Loreena McKennitt", "Morada Del Corazon")
+    before = svc.add_note(conn, subject=wishlist, body="Look for this record.", now=100)
+
+    owned = NoteSubjectRef.for_album("Loreena McKennitt", "Morada Del Corazon", "mb-morada")
+    after = svc.add_note(conn, subject=owned, body="Finally heard it.", now=200)
+
+    assert before.subject.id == after.subject.id, "one subject, not a fork"
+    assert len(svc.list_notes(conn, album="Morada Del Corazon")) == 2
+    assert svc.get_note(conn, before.id).subject.subject_key == owned.subject_key
+
+
+def test_adoption_does_not_fire_when_the_mbid_subject_already_exists(conn):
+    """Two subjects genuinely exist; re-keying would collide on
+    UNIQUE(kind, subject_key)."""
+    owned = NoteSubjectRef.for_album("Loreena McKennitt", "An Ancient Muse", "mb-muse")
+    named = NoteSubjectRef.for_album("Loreena McKennitt", "An Ancient Muse")
+    a = svc.add_note(conn, subject=owned, body="owned", now=100)
+    b = svc.add_note(conn, subject=named, body="named", now=200)
+    c = svc.add_note(conn, subject=owned, body="owned again", now=300)
+    assert a.subject.id == c.subject.id
+    assert b.subject.id != a.subject.id
+
+
+def test_adoption_never_runs_backwards(conn):
+    """A name-keyed ref cannot guess an MBID it has never seen, so it must not
+    hijack an existing MBID-backed subject."""
+    owned = NoteSubjectRef.for_album("Old 97's", "Fight Songs", "mb-fight")
+    named = NoteSubjectRef.for_album("Old 97's", "Fight Songs")
+    a = svc.add_note(conn, subject=owned, body="owned", now=100)
+    b = svc.add_note(conn, subject=named, body="named", now=200)
+    assert a.subject.id != b.subject.id
+
+
+def test_tagging_a_missing_note_raises_lookup_error_not_an_integrity_error(conn):
+    """`note_tag.note_id` has a foreign key, so inserting first raised
+    sqlite3.IntegrityError — which the CLI does not catch, so `note tag 999
+    todo` printed a traceback instead of an error."""
+    with pytest.raises(LookupError):
+        svc.tag_note(conn, 999, ["todo"])
+    with pytest.raises(LookupError):
+        svc.untag_note(conn, 999, "todo")

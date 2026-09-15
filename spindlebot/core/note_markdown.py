@@ -56,6 +56,15 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 _ESCAPABLE = re.compile(r"^(\\*)(#{1,6}\s)")
 
 MAX_DEPTH = 3  # artist, album, track
+# `#{1,6}` is all markdown has, and a track sits two levels below the root, so a
+# root deeper than 4 renders track headings nothing can parse back.
+MAX_ROOT_LEVEL = 6 - (MAX_DEPTH - 1)
+
+# Tags are metadata, not prose. An HTML comment keeps them out of the rendered
+# text while still surviving a round trip, which matters because `note export` is
+# the documented escape hatch — tags vanishing on re-import would lose part of
+# what the author recorded.
+_TAGS = re.compile(r"^<!--\s*tags:\s*(.*?)\s*-->\s*$", re.I)
 
 
 @dataclass(frozen=True)
@@ -66,6 +75,7 @@ class ParsedNote:
     artist: str | None = None
     album: str | None = None
     track: str | None = None
+    tags: tuple[str, ...] = ()
     # Where it came from, for the --dry-run resolution table. Excluded from
     # equality: a rendered document has no line numbers, and the round-trip
     # contract is about content.
@@ -93,6 +103,14 @@ class ParsedDocument:
     skipped: tuple[SkippedHeading, ...] = ()
 
 
+def _check_root_level(root_level: int) -> None:
+    if not 1 <= root_level <= MAX_ROOT_LEVEL:
+        raise ValueError(
+            f"root level must be 1-{MAX_ROOT_LEVEL} (a track sits two levels "
+            f"below it, and markdown stops at 6 '#'), got {root_level}"
+        )
+
+
 def _unescape(line: str) -> str:
     m = _ESCAPABLE.match(line)
     return line[1:] if m and m.group(1) else line
@@ -106,8 +124,9 @@ def parse(text: str, *, root_level: int = 1) -> ParsedDocument:
     """Read a markdown document into notes plus the headings it could not use.
 
     `root_level` is the heading level that means "artist"; album and track are
-    the two levels below it.
+    the two levels below it, so it must leave room for both.
     """
+    _check_root_level(root_level)
     artist_level = root_level
     album_level = root_level + 1
     track_level = root_level + 2
@@ -117,21 +136,31 @@ def parse(text: str, *, root_level: int = 1) -> ParsedDocument:
     artist = album = track = None
     kind: NoteSubjectKind | None = None
     buf: list[str] = []
+    tags: tuple[str, ...] = ()
     start_line = 0
 
     def flush() -> None:
-        nonlocal buf
+        nonlocal buf, tags
         body = canonicalize_body("\n".join(buf))
         if kind is not None and body:
             notes.append(ParsedNote(
                 kind=kind, body=body, artist=artist, album=album,
-                track=track, line_no=start_line,
+                track=track, tags=tags, line_no=start_line,
             ))
         buf = []
+        tags = ()
 
     for line_no, line in enumerate(text.splitlines(), start=1):
         m = _HEADING.match(line)
         if not m:
+            tag_line = _TAGS.match(line)
+            # Only before any prose: a tags comment further down is the author's
+            # own text, not metadata this format put there.
+            if tag_line and not any(b.strip() for b in buf):
+                tags = tuple(
+                    t for t in (p.strip() for p in tag_line.group(1).split(",")) if t
+                )
+                continue
             buf.append(_unescape(line))
             continue
 
@@ -175,6 +204,7 @@ def render(notes, *, root_level: int = 1) -> str:
     re-emit the deepest heading — that is what keeps them two notes instead of
     merging into one body on the way back in.
     """
+    _check_root_level(root_level)
     out: list[str] = []
     prev: tuple[str | None, ...] = (None, None, None)
 
@@ -208,6 +238,9 @@ def render(notes, *, root_level: int = 1) -> str:
             if i < start:
                 continue
             out.append(f"{'#' * (root_level + i)} {chain[i]}")
+            out.append("")
+        if note.tags:
+            out.append(f"<!-- tags: {', '.join(note.tags)} -->")
             out.append("")
         out.extend(_escape(line) for line in note.body.split("\n"))
         out.append("")
