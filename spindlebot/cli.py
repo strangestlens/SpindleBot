@@ -21,6 +21,19 @@ Usage:
     python -m spindlebot collection-ignore --list [--json]                      Show what's ignored
     python -m spindlebot collection-ignore --remove <id...> [--json]            Un-ignore (also --unignore)
     python -m spindlebot collection-ignore --clear --yes [--json]               Un-ignore everything
+    python -m spindlebot note add [--artist <a>] [--album <b>] [--track <t>] [--mbid <id>] [--new] [-m <text>|-F <file>|-] [--tag <t>] [--session <id>] [--json]
+                                                      Write a listening note at artist / album / track level
+    python -m spindlebot note list [--artist <a>] [--album <b>] [--track <t>] [--kind artist|album|track] [--tag <t>] [--session <id>] [--since <date>] [--all] [--json]
+    python -m spindlebot note show <id> [--history] [--json]      Show a note, optionally every revision
+    python -m spindlebot note edit <id> [-m <text>|-F <file>|-]   Append a revision (unchanged text writes nothing)
+    python -m spindlebot note rm <id> | restore <id>              Retire a note (SOFT) or bring it back
+    python -m spindlebot note tag <id> <tag>... | untag <id> <tag>
+    python -m spindlebot note session start [--title <text>]      Open a listening sitting
+    python -m spindlebot note sessions [--since <date>] [--json]  The listening log, newest first
+    python -m spindlebot note import <file> [--dry-run] [--root-level N] [--new] [--skip-unresolved] [--json]
+                                                      Import a markdown document of notes (atomic; --dry-run shows the resolution table)
+    python -m spindlebot note export [--artist <a>] [--album <b>] [--kind <k>] [--since <d>] [--root-level N] [-o <file>]
+                                                      Write notes back out as markdown that `note import` reads identically
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -1063,6 +1076,634 @@ def cmd_collection_ignore(cfg, args: list[str]) -> int:
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
+# ── note ──────────────────────────────────────────────────────────────────────
+
+_NOTE_VALUE_FLAGS = {
+    "--artist", "--album", "--track", "--tag", "--session", "--since",
+    "--kind", "--index", "--title", "-m", "--message", "-F", "--file",
+    "--root-level", "-o", "--out", "--mbid",
+}
+_NOTE_BOOL_FLAGS = {"--json", "--new", "--all", "--history", "-",
+                    "--dry-run", "--skip-unresolved"}
+
+# What each subcommand actually accepts. A SHARED flag table was not enough:
+# `note list --new` and `note export --tag todo` were accepted and then silently
+# ignored, `note list typo` dropped its operand, and `note show nope` reached a
+# bare int() and printed a traceback. `operands` is (min, max) with None for
+# unbounded; `numeric` means the first operand is a note id.
+_NOTE_SPECS: dict[str, dict] = {
+    "add": {"flags": {"--artist", "--album", "--track", "--tag", "--session",
+                      "--index", "--new", "-m", "--message", "-F", "--file", "-",
+                      "--json", "--mbid"},
+            "operands": (0, 0)},
+    "list": {"flags": {"--artist", "--album", "--track", "--kind", "--tag",
+                       "--session", "--since", "--all", "--json"},
+             "operands": (0, 0)},
+    "show": {"flags": {"--history", "--json"}, "operands": (1, 1), "numeric": True},
+    "edit": {"flags": {"-m", "--message", "-F", "--file", "-", "--json"},
+             "operands": (1, 1), "numeric": True},
+    "rm": {"flags": {"--json"}, "operands": (1, 1), "numeric": True},
+    "restore": {"flags": {"--json"}, "operands": (1, 1), "numeric": True},
+    "tag": {"flags": {"--json"}, "operands": (2, None), "numeric": True},
+    "untag": {"flags": {"--json"}, "operands": (2, 2), "numeric": True},
+    "session": {"flags": {"--title", "--json"}, "operands": (1, 1)},
+    "sessions": {"flags": {"--since", "--json"}, "operands": (0, 0)},
+    "import": {"flags": {"--dry-run", "--root-level", "--new", "--index",
+                         "--skip-unresolved", "--session", "--title", "--json"},
+               "operands": (1, 1)},
+    "export": {"flags": {"--artist", "--album", "--track", "--kind", "--since",
+                         "--root-level", "-o", "--out", "--json"},
+               "operands": (0, 0)},
+}
+
+
+def _note_opts(args: list[str], flag: str) -> list[str]:
+    """Every value given for a repeatable flag, in order."""
+    return [args[i + 1] for i, a in enumerate(args) if a == flag and i + 1 < len(args)]
+
+
+def _note_opt(args: list[str], *flags: str) -> str | None:
+    for flag in flags:
+        values = _note_opts(args, flag)
+        if values:
+            return values[0]
+    return None
+
+
+def _note_positionals(args: list[str]) -> list[str]:
+    """Bare tokens, excluding flags and the values they consume."""
+    out, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in _NOTE_VALUE_FLAGS:
+            skip = True
+            continue
+        if arg in _NOTE_BOOL_FLAGS or arg.startswith("-") and arg != "-":
+            continue
+        out.append(arg)
+    return out
+
+
+def _note_unknown_flags(args: list[str], allowed: set[str] | None = None) -> list[str]:
+    """Options this subcommand does not define.
+
+    Silently ignoring them is dangerous rather than lenient: `note list
+    --artistt X` dropped the filter and listed the WHOLE corpus, and
+    `note export --artsit X` exported everything. Both look like success.
+
+    `allowed` scopes the check to one subcommand; without it only the global
+    tables apply, which is what let `note list --new` through.
+    """
+    unknown, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in _NOTE_VALUE_FLAGS:
+            skip = True
+            if allowed is not None and arg not in allowed:
+                unknown.append(arg)
+            continue
+        if arg == "-" or not arg.startswith("-"):
+            continue
+        if arg in _NOTE_BOOL_FLAGS and (allowed is None or arg in allowed):
+            continue
+        unknown.append(arg)
+    return unknown
+
+
+def _note_usage_error(sub: str, args: list[str]) -> str | None:
+    """Validate one subcommand's flags and operands, or return the complaint."""
+    spec = _NOTE_SPECS[sub]
+    unknown = _note_unknown_flags(args, spec["flags"])
+    if unknown:
+        return f"note {sub}: unknown option(s): {' '.join(unknown)}"
+
+    operands = _note_positionals(args)
+    low, high = spec["operands"]
+    if len(operands) < low:
+        return f"note {sub}: expected {low} operand(s), got {len(operands)}"
+    if high is not None and len(operands) > high:
+        return (f"note {sub}: unexpected argument(s): "
+                f"{' '.join(operands[high:])}")
+    if spec.get("numeric") and operands and not operands[0].lstrip("-").isdigit():
+        return f"note {sub}: {operands[0]!r} is not a note id"
+    if sub == "session" and operands and operands[0] != "start":
+        return "Usage: spindlebot note session start [--title <text>]"
+    return None
+
+
+def _parse_since(raw: str) -> int:
+    """`--since 2026-01-01` or a full ISO timestamp, as epoch seconds.
+
+    Interpreted in LOCAL time — a bare date means local midnight — which is what
+    `note sessions` renders against.
+    """
+    from datetime import date, datetime
+    try:
+        if len(raw) == 10:
+            return int(datetime.combine(date.fromisoformat(raw), datetime.min.time()).timestamp())
+        return int(datetime.fromisoformat(raw).timestamp())
+    except ValueError as e:
+        raise ValueError(f"--since wants YYYY-MM-DD or an ISO timestamp, got {raw!r}") from e
+
+
+def _launch_editor(path: Path) -> None:
+    import subprocess
+    editor = os.environ.get("SPINDLEBOT_EDITOR") or os.environ.get("VISUAL") \
+        or os.environ.get("EDITOR") or "vi"
+    subprocess.run([*editor.split(), str(path)], check=False)
+
+
+def read_note_body(
+    args: list[str],
+    *,
+    initial: str = "",
+    stdin=None,
+    launch_editor=None,
+) -> str:
+    """Resolve a note body from the four input modes, in precedence order.
+
+    1. `-m/--message`, repeatable, joined by a blank line — multi-paragraph
+       input without fighting the shell over newlines
+    2. `-F/--file <path>`
+    3. `-`, or a piped stdin — reading a note out of anything upstream
+    4. nothing, on a terminal — open $EDITOR
+
+    The editor buffer gets NO commented header. Git can use `#` for that because
+    `#` is not meaningful in a commit message; here it is a markdown heading, and
+    a header would make "strip the comments" and "keep the author's headings"
+    the same operation. The subject is already on the command line the user just
+    typed.
+    """
+    stdin = stdin if stdin is not None else sys.stdin
+    launch_editor = launch_editor or _launch_editor
+
+    messages = _note_opts(args, "-m") + _note_opts(args, "--message")
+    if messages:
+        return "\n\n".join(messages)
+
+    path = _note_opt(args, "-F", "--file")
+    if path == "-" or (path is None and "-" in args):
+        return stdin.read()
+    if path is not None:
+        return Path(path).expanduser().read_text(encoding="utf-8")
+
+    if not stdin.isatty():
+        return stdin.read()
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch = Path(tmp) / "NOTE_EDITMSG.md"
+        scratch.write_text(initial, encoding="utf-8")
+        launch_editor(scratch)
+        return scratch.read_text(encoding="utf-8")
+
+
+def _note_resolve(*args, **kwargs):
+    """Indirection so the CLI's own accept/refuse gate is testable on its own,
+    independently of what the resolver currently happens to return."""
+    from spindlebot.services.note_resolve import resolve
+    return resolve(*args, **kwargs)
+
+
+def cmd_note(cfg, args: list[str]) -> int:
+    """
+    Listening notes at artist / album / track level.
+
+    Notes are the only authored, un-regenerable data in this system, so every
+    write here appends: editing a note adds a revision, deleting one is a status
+    change, and `note export` exists so the writing is never trapped in SQLite.
+    """
+    import json as _json
+
+    from spindlebot.core.enums import NoteSubjectKind
+    from spindlebot.core.notes import canonicalize_body
+    from spindlebot.db.connection import open_db
+    from spindlebot.services import notes as svc
+    from spindlebot.services.note_resolve import ResolutionStatus
+
+    want_json = "--json" in args
+    sub = args[0] if args and not args[0].startswith("-") else None
+
+    def fail(msg: str, *, hints: list[str] | None = None) -> int:
+        if want_json:
+            print(_json.dumps({"error": msg, "candidates": hints or []}))
+        else:
+            print(msg, file=sys.stderr)
+            for hint in hints or []:
+                print(f"    {hint}", file=sys.stderr)
+        return 1
+
+    def view_payload(view) -> dict:
+        return {
+            "id": view.id,
+            "uuid": view.note.uuid,
+            "kind": str(view.subject.kind),
+            "subject": view.label,
+            "subject_key": view.subject.subject_key,
+            "revision": view.revision,
+            "tags": list(view.tags),
+            "session_id": view.note.session_id,
+            "created_utc": view.note.created_utc,
+            "updated_utc": view.note.updated_utc,
+            "body": view.body,
+        }
+
+    if sub not in _NOTE_SPECS:
+        return fail(
+            "Usage: spindlebot note add|list|show|edit|rm|restore|tag|untag|"
+            "sessions|session start|import|export"
+        )
+
+    rest = args[1:]
+    usage_error = _note_usage_error(sub, rest)
+    if usage_error:
+        return fail(usage_error)
+    positionals = _note_positionals(rest)
+    conn = open_db(cfg.core.db_path)
+    try:
+        # ── add ──────────────────────────────────────────────────────────────
+        if sub == "add":
+            artist = _note_opt(rest, "--artist")
+            album = _note_opt(rest, "--album")
+            track = _note_opt(rest, "--track")
+            allow_new = "--new" in rest
+
+            library = []
+            try:
+                from spindlebot.services import library_index
+                library = library_index.load(cfg, _note_opt(rest, "--index") or "auto").albums
+            except (RuntimeError, ValueError) as e:
+                # Without --new there is nothing to resolve against and a note
+                # would be filed under an unverified subject; with it, the user
+                # has already said the library is not the authority here.
+                if not allow_new:
+                    return fail(f"cannot read the library: {e}")
+
+            try:
+                resolution = _note_resolve(
+                    library, artist=artist, album=album, track=track,
+                    mb_albumid=_note_opt(rest, "--mbid"), allow_new=allow_new,
+                )
+            except ValueError as e:
+                return fail(str(e))
+
+            if resolution.status is not ResolutionStatus.RESOLVED:
+                return fail(
+                    f"{resolution.status}: {resolution.reason}",
+                    hints=[c.label for c in resolution.candidates]
+                    + ["(use --new to write about something the library doesn't have)"],
+                )
+
+            body = canonicalize_body(read_note_body(rest))
+            if not body:
+                return fail("empty note, nothing written")
+
+            session_raw = _note_opt(rest, "--session")
+            view = svc.add_note(
+                conn,
+                subject=resolution.subject,
+                body=body,
+                session_id=int(session_raw) if session_raw else None,
+                tags=_note_opts(rest, "--tag"),
+            )
+            conn.commit()
+            if want_json:
+                print(_json.dumps(view_payload(view)))
+            else:
+                print(f"note {view.id}  {view.label}")
+            return 0
+
+        # ── list ─────────────────────────────────────────────────────────────
+        if sub == "list":
+            kind_raw = _note_opt(rest, "--kind")
+            since_raw = _note_opt(rest, "--since")
+            session_raw = _note_opt(rest, "--session")
+            try:
+                kind = NoteSubjectKind(kind_raw) if kind_raw else None
+                since = _parse_since(since_raw) if since_raw else None
+            except ValueError as e:
+                return fail(str(e))
+
+            views = svc.list_notes(
+                conn,
+                artist=_note_opt(rest, "--artist"),
+                album=_note_opt(rest, "--album"),
+                track=_note_opt(rest, "--track"),
+                kind=kind,
+                tag=_note_opt(rest, "--tag"),
+                session_id=int(session_raw) if session_raw else None,
+                since_utc=since,
+                include_deleted="--all" in rest,
+            )
+            if want_json:
+                print(_json.dumps({"count": len(views),
+                                   "notes": [view_payload(v) for v in views]}))
+                return 0
+            if not views:
+                print("no notes")
+                return 0
+            for view in views:
+                tags = f"  [{' '.join(view.tags)}]" if view.tags else ""
+                first = view.body.split("\n", 1)[0]
+                head = first if len(first) <= 72 else first[:71] + "…"
+                print(f"{view.id:>5}  {view.label}{tags}")
+                print(f"       {head}")
+            return 0
+
+        # ── show ─────────────────────────────────────────────────────────────
+        if sub == "show":
+            if not positionals:
+                return fail("Usage: spindlebot note show <id> [--history]")
+            view = svc.get_note(conn, int(positionals[0]))
+            if view is None:
+                return fail(f"no note {positionals[0]}")
+            revisions = svc.history(conn, view.id) if "--history" in rest else []
+            if want_json:
+                payload = view_payload(view)
+                payload["history"] = [
+                    {"seq": r.seq, "sha256": r.sha256, "created_utc": r.created_utc,
+                     "body": r.body}
+                    for r in revisions
+                ]
+                print(_json.dumps(payload))
+                return 0
+            print(f"note {view.id}  {view.label}")
+            print(f"  revision {view.revision}"
+                  + (f"  tags: {' '.join(view.tags)}" if view.tags else ""))
+            print()
+            print(view.body)
+            # Newest prior edit first, oldest last — the order `docs/notes.md`
+            # documents, and the useful one: recent context is nearer the top.
+            for revision in reversed(revisions[:-1]):
+                print(f"\n--- revision {revision.seq} ---")
+                print(revision.body)
+            return 0
+
+        # ── edit ─────────────────────────────────────────────────────────────
+        if sub == "edit":
+            if not positionals:
+                return fail("Usage: spindlebot note edit <id> [-m <text> | -F <file>]")
+            current = svc.get_note(conn, int(positionals[0]))
+            if current is None:
+                return fail(f"no note {positionals[0]}")
+            body = canonicalize_body(read_note_body(rest, initial=current.body))
+            if not body:
+                return fail("empty note, nothing written")
+            view, changed = svc.edit_note(conn, note_id=current.id, body=body)
+            conn.commit()
+            if want_json:
+                payload = view_payload(view)
+                payload["changed"] = changed
+                print(_json.dumps(payload))
+            else:
+                print(f"note {view.id}  revision {view.revision}"
+                      + ("" if changed else "  (unchanged)"))
+            return 0
+
+        # ── rm / restore ─────────────────────────────────────────────────────
+        if sub in {"rm", "restore"}:
+            if not positionals:
+                return fail(f"Usage: spindlebot note {sub} <id>")
+            try:
+                view = (svc.delete_note if sub == "rm" else svc.restore_note)(
+                    conn, int(positionals[0])
+                )
+            except LookupError as e:
+                return fail(str(e))
+            conn.commit()
+            if want_json:
+                print(_json.dumps(view_payload(view)))
+            else:
+                action = "removed" if sub == "rm" else "restored"
+                suffix = " (recoverable: note restore)" if sub == "rm" else ""
+                print(f"{action} note {view.id}{suffix}")
+            return 0
+
+        # ── tag / untag ──────────────────────────────────────────────────────
+        if sub in {"tag", "untag"}:
+            if len(positionals) < 2:
+                return fail(f"Usage: spindlebot note {sub} <id> <tag>...")
+            note_id, tags = int(positionals[0]), positionals[1:]
+            try:
+                view = (
+                    svc.tag_note(conn, note_id, tags) if sub == "tag"
+                    else svc.untag_note(conn, note_id, tags[0])
+                )
+            except LookupError as e:
+                return fail(str(e))
+            conn.commit()
+            if want_json:
+                print(_json.dumps(view_payload(view)))
+            else:
+                print(f"note {view.id}  tags: {' '.join(view.tags) or '(none)'}")
+            return 0
+
+        # ── import ───────────────────────────────────────────────────────────
+        if sub == "import":
+            from spindlebot.core.note_markdown import _check_root_level, parse
+            from spindlebot.services.note_import import apply_import, plan_import
+
+            if not positionals:
+                return fail("Usage: spindlebot note import <file> [--dry-run] "
+                            "[--root-level N] [--new] [--skip-unresolved]")
+            source = Path(positionals[0]).expanduser()
+            if not source.is_file():
+                return fail(f"no such file: {source}")
+
+            try:
+                root_level = int(_note_opt(rest, "--root-level") or 1)
+                _check_root_level(root_level)
+            except ValueError as e:
+                return fail(f"--root-level: {e}" if "root level" in str(e)
+                            else "--root-level wants an integer")
+
+            document = parse(source.read_text(encoding="utf-8"), root_level=root_level)
+            if not document.notes:
+                return fail(
+                    f"no notes found in {source} at heading level {root_level} — "
+                    "try --root-level 2 if the file opens with a grouping heading"
+                )
+
+            allow_new = "--new" in rest
+            library = []
+            try:
+                from spindlebot.services import library_index
+                library = library_index.load(cfg, _note_opt(rest, "--index") or "auto").albums
+            except (RuntimeError, ValueError) as e:
+                if not allow_new:
+                    return fail(f"cannot read the library: {e}")
+
+            plan = plan_import(conn, library, list(document.notes), allow_new=allow_new)
+            dry_run = "--dry-run" in rest
+            skipping = "--skip-unresolved" in rest
+
+            # Atomic unless told otherwise: an import that files most of a
+            # document and silently drops the rest is the failure this whole
+            # command exists to avoid.
+            blocked = bool(plan.unresolved) and not skipping
+            # Every single note failing to resolve almost never means every
+            # heading is wrong; it means the heading window is. Say so, rather
+            # than printing the same "did you mean" against each line.
+            all_unresolved = bool(plan.rows) and len(plan.unresolved) == len(plan.rows)
+            hint = (
+                f"nothing resolved at heading level {root_level} — if the file opens "
+                f"with a grouping heading, try --root-level {root_level + 1}"
+                if all_unresolved else ""
+            )
+            if not dry_run and not blocked and plan.writable:
+                session_id_raw = _note_opt(rest, "--session")
+                session_id = int(session_id_raw) if session_id_raw else svc.start_session(
+                    conn, title=_note_opt(rest, "--title") or source.name
+                ).id
+                plan = apply_import(conn, plan, session_id=session_id)
+                conn.commit()
+
+            if want_json:
+                print(_json.dumps({
+                    "source": str(source),
+                    "dry_run": dry_run,
+                    "blocked": blocked,
+                    "hint": hint,
+                    "skipped_headings": [
+                        {"text": h.text, "line": h.line_no, "reason": h.reason}
+                        for h in document.skipped
+                    ],
+                    "rows": [
+                        {"line": r.parsed.line_no, "status": str(r.status),
+                         "subject": r.label, "detail": r.detail, "note_id": r.note_id}
+                        for r in plan.rows
+                    ],
+                }))
+                return 1 if blocked else 0
+
+            for heading in document.skipped:
+                print(f"  skipped heading  line {heading.line_no}: "
+                      f"{heading.text}  ({heading.reason})")
+            for row in plan.rows:
+                marker = {"imported": "+", "ready": "·", "duplicate": "=",
+                          "unresolved": "!"}[str(row.status)]
+                print(f"  {marker} {str(row.status):<11} line {row.parsed.line_no:>4}  "
+                      f"{row.label}")
+                if row.detail:
+                    print(f"      {row.detail}")
+            if hint:
+                print(f"\n{hint}", file=sys.stderr)
+            if blocked:
+                print(f"nothing written: {len(plan.unresolved)} note(s) did not "
+                      "resolve. Fix the headings, add --new, or --skip-unresolved.",
+                      file=sys.stderr)
+                return 1
+            if dry_run:
+                print(f"\n[dry-run] {len(plan.writable)} note(s) would be imported")
+            return 0
+
+        # ── export ───────────────────────────────────────────────────────────
+        if sub == "export":
+            from spindlebot.core.note_markdown import (
+                ParsedNote, _check_root_level, render,
+            )
+
+            try:
+                root_level = int(_note_opt(rest, "--root-level") or 1)
+                _check_root_level(root_level)
+                kind_raw = _note_opt(rest, "--kind")
+                since_raw = _note_opt(rest, "--since")
+                kind = NoteSubjectKind(kind_raw) if kind_raw else None
+                since = _parse_since(since_raw) if since_raw else None
+            except ValueError as e:
+                return fail(str(e))
+
+            views = svc.list_notes(
+                conn,
+                artist=_note_opt(rest, "--artist"),
+                album=_note_opt(rest, "--album"),
+                track=_note_opt(rest, "--track"),
+                kind=kind, since_utc=since,
+            )
+            # Grouped for reading, not newest-first: an exported document is
+            # meant to be read (and re-imported) as a document.
+            #
+            # This ordering also GUARANTEES the round trip, which is why it is
+            # not merely cosmetic. Heading nesting cannot express an empty parent
+            # level once one is in scope above it, so a note that leaves a level
+            # empty must never follow one that fills it. Sorting None as "" puts
+            # every such note FIRST within its prefix — ("a", "", "c") sorts
+            # before ("a", "b", "") — so the unrepresentable ordering cannot
+            # arise. `core.note_markdown.unrepresentable` states the limitation;
+            # tests assert this sort keeps it empty.
+            views.sort(key=lambda v: (
+                (v.subject.artist_name or "").casefold(),
+                (v.subject.album_title or "").casefold(),
+                (v.subject.track_title or "").casefold(),
+                v.note.created_utc,
+            ))
+            parsed = [
+                ParsedNote(
+                    kind=v.subject.kind, body=v.body,
+                    artist=v.subject.artist_name, album=v.subject.album_title,
+                    track=v.subject.track_title, tags=v.tags,
+                )
+                for v in views
+            ]
+            text = render(parsed, root_level=root_level)
+
+            destination = _note_opt(rest, "-o", "--out")
+            if destination:
+                Path(destination).expanduser().write_text(text, encoding="utf-8")
+                print(f"{len(views)} note(s) -> {destination}")
+            else:
+                sys.stdout.write(text)
+            return 0
+
+        # ── sessions ─────────────────────────────────────────────────────────
+        if sub == "session":
+            if not positionals or positionals[0] != "start":
+                return fail("Usage: spindlebot note session start [--title <text>]")
+            session = svc.start_session(conn, title=_note_opt(rest, "--title"))
+            conn.commit()
+            if want_json:
+                print(_json.dumps({"id": session.id, "uuid": session.uuid,
+                                   "title": session.title,
+                                   "occurred_utc": session.occurred_utc}))
+            else:
+                print(f"session {session.id}"
+                      + (f"  {session.title}" if session.title else ""))
+            return 0
+
+        since_raw = _note_opt(rest, "--since")
+        try:
+            since = _parse_since(since_raw) if since_raw else None
+        except ValueError as e:
+            return fail(str(e))
+        sessions = svc.list_sessions(conn, since_utc=since)
+        if want_json:
+            print(_json.dumps({"count": len(sessions), "sessions": [
+                {"id": s.session.id, "title": s.session.title,
+                 "occurred_utc": s.session.occurred_utc, "notes": s.note_count}
+                for s in sessions
+            ]}))
+            return 0
+        if not sessions:
+            print("no sessions")
+            return 0
+        # LOCAL time, not UTC. A listening sitting is a local-time event — a
+        # session started at 21:23 rendered as the following day under UTC — and
+        # `--since` already reads its date locally, so a UTC display disagreed
+        # with the filter that selects it.
+        from datetime import datetime
+        for item in sessions:
+            when = datetime.fromtimestamp(item.session.occurred_utc).strftime("%Y-%m-%d")
+            title = item.session.title or "(untitled)"
+            print(f"{item.session.id:>5}  {when}  {title}  — {item.note_count} note(s)")
+        return 0
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = (argv if argv is not None else sys.argv)[1:]
 
@@ -1155,6 +1796,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "collection-ignore":
         return cmd_collection_ignore(cfg, args[1:])
+
+    if command == "note":
+        return cmd_note(cfg, args[1:])
 
     if command == "notify":
         if len(args) < 3:
