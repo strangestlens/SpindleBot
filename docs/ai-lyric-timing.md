@@ -148,6 +148,13 @@ passages, where the old behaviour was to spread unmatched lines evenly across
 wall-clock time and land them in silence (one track went from 65.9s mean error
 to 4.8s).
 
+One caveat on any number here: Demucs on MPS is not bit-reproducible. The same
+track separated twice differs by up to 0.18 in sample amplitude — enough to move
+the derived vocal-activity envelope (15 intervals versus 19 on one track) and to
+swing mean error by a few tenths of a second, concentrated on tracks where the
+alignment is already marginal. Before/after comparisons are only meaningful
+against the *same* cached stems; absolute figures carry run-to-run noise.
+
 The known remaining weakness is **repetition assignment**. Lyrics transcribed
 from liner notes print a chorus once even though it's sung three times, and
 nothing in the audio says which repetition the written lines belong to. The

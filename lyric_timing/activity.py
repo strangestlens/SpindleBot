@@ -23,7 +23,14 @@ SILENCE_RATIO = 0.05
 
 # Quantile taken as "this is how loud the vocal is when present". The 90th
 # rather than the max: a single percussive plosive should not set the scale.
+# It is taken over the loud frames only — a track can easily be more than 90%
+# instrumental, and a quantile over every frame would then read the track's own
+# silence as its reference level and find no vocal at all.
 REFERENCE_QUANTILE = 0.9
+
+# Frames quieter than this fraction of the loudest frame don't get a say in
+# where the reference level sits.
+QUIET_FLOOR_RATIO = 0.02
 
 # Sung-through gaps (breaths, stops between words) are shorter than this;
 # only longer silences separate one sung stretch from the next.
@@ -52,7 +59,11 @@ def intervals_from_rms(
     """
     if not rms or hop_seconds <= 0:
         return []
-    threshold = _quantile(rms, REFERENCE_QUANTILE) * SILENCE_RATIO
+    peak = max(rms)
+    if peak <= 0:
+        return []
+    loud = [v for v in rms if v > peak * QUIET_FLOOR_RATIO]
+    threshold = _quantile(loud, REFERENCE_QUANTILE) * SILENCE_RATIO if loud else 0.0
     if threshold <= 0:
         return []
 

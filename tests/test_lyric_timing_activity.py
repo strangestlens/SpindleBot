@@ -61,3 +61,10 @@ def test_intervals_are_ordered_and_non_overlapping():
     assert len(intervals) == 3
     assert all(a[1] <= b[0] for a, b in zip(intervals, intervals[1:]))
     assert all(e - s >= MIN_ACTIVE_SECONDS for s, e in intervals)
+
+
+def test_sparse_vocals_are_still_detected():
+    # under a second of singing in a ten-second stretch: the reference level
+    # has to come from the loud frames, or the track's own silence sets it
+    intervals = intervals_from_rms(rms((0.5, 9), (0.0, 91)), HOP)
+    assert intervals == [(0.0, 0.9)]

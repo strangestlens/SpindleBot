@@ -152,12 +152,12 @@ def test_align_end_to_end_with_canned_words():
     assert isinstance(timings[0], LineTiming)
 
 
-def _one_weak_line_backend():
-    # line 0 matches only 1 of 4 tokens (conf 0.9 * 0.25 = 0.225) at a bogus
-    # late time; lines 1-2 are solid anchors
+def _one_weak_line_backend(weak_at=55.0):
+    # line 0 matches only 1 of 4 tokens (conf 0.9 * 0.25 = 0.225); lines 1-2
+    # are solid anchors at 20.0 and 40.0
     return MockBackend(
         words_for(
-            ("hello", 55.0),
+            ("hello", weak_at),
             ("second", 20.0), ("line", 20.4), ("okay", 20.8),
             ("third", 40.0), ("line", 40.4), ("okay", 40.8),
         )
@@ -179,9 +179,21 @@ def test_align_keeps_a_weak_match_above_the_default_threshold():
     # 0.225 is weak enough to render as "check this line" but is still
     # evidence; the default threshold keeps it rather than interpolating
     lines = ["Hello there world friend", "Second line okay", "Third line okay"]
-    timings = align(AUDIO, lines, _one_weak_line_backend(), duration=60.0)
-    assert timings[0].time == 55.0
+    timings = align(AUDIO, lines, _one_weak_line_backend(weak_at=10.0), duration=60.0)
+    assert timings[0].time == 10.0
     assert timings[0].confidence == 0.225
+
+
+def test_a_weak_anchor_never_drags_confident_lines():
+    # the weak line matched at a bogus 55.0, after two lines matched at 20.0
+    # and 40.0 with four times its confidence. Monotonicity would otherwise
+    # clamp both strong lines forward to 55.0 — one bad anchor pinning a whole
+    # track. The weak anchor loses instead.
+    lines = ["Hello there world friend", "Second line okay", "Third line okay"]
+    timings = align(AUDIO, lines, _one_weak_line_backend(), duration=60.0)
+    assert timings[1].time == 20.0
+    assert timings[2].time == 40.0
+    assert timings[0].time <= 20.0
 
 
 def test_align_output_is_monotonic_and_clamped():

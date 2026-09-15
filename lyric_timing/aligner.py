@@ -183,6 +183,42 @@ def interpolate_missing(
     return out
 
 
+def resolve_anchor_conflicts(
+    times: Sequence[float | None], confidences: Sequence[float]
+) -> list[float | None]:
+    """Drop matched times that contradict better-matched ones.
+
+    A line matched *later* than a subsequent line with a stronger match cannot
+    be right, and `enforce_monotonic` would otherwise drag that stronger line
+    forward to meet it — one weak anchor pinning everything after it. Keeps the
+    set of anchors with the greatest total confidence whose times are
+    non-decreasing in line order; the losers become None and are interpolated
+    like any other unmatched line. This is what makes "a confident line never
+    moves" true of the whole pipeline rather than of interpolation alone.
+    """
+    anchors = [i for i, t in enumerate(times) if t is not None]
+    if len(anchors) < 2:
+        return list(times)
+
+    # weighted longest non-decreasing subsequence over the anchor times
+    best = [0.0] * len(anchors)
+    parent = [-1] * len(anchors)
+    for a, i in enumerate(anchors):
+        best[a] = confidences[i]
+        for b in range(a):
+            j = anchors[b]
+            if times[j] <= times[i] and best[b] + confidences[i] > best[a]:
+                best[a] = best[b] + confidences[i]
+                parent[a] = b
+
+    keep: set[int] = set()
+    a = max(range(len(anchors)), key=lambda x: best[x])
+    while a != -1:
+        keep.add(anchors[a])
+        a = parent[a]
+    return [t if i in keep else None for i, t in enumerate(times)]
+
+
 def enforce_monotonic(times: Sequence[float]) -> list[float]:
     out: list[float] = []
     for t in times:
@@ -216,6 +252,7 @@ def align(
         t if t is not None and conf >= min_confidence else None
         for t, conf in assigned
     ]
+    raw_times = resolve_anchor_conflicts(raw_times, [conf for _, conf in assigned])
     times = enforce_monotonic(
         interpolate_missing(raw_times, duration, heard.vocal_activity)
     )
