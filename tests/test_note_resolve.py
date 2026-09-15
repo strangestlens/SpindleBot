@@ -82,8 +82,9 @@ def test_a_duplicate_title_without_an_artist_is_ambiguous():
 def test_a_mistyped_title_offers_the_artists_albums_rather_than_guessing():
     r = resolve(LIBRARY, artist="Old 97s", album="Fite Songs")
     assert r.status is ResolutionStatus.AMBIGUOUS
-    labels = [c.label for c in r.candidates]
-    assert "Old 97's — Fight Songs" in labels
+    # Labels now carry the --mbid selector, so match on the album rather than
+    # the whole string.
+    assert any("Fight Songs" in c.label for c in r.candidates)
     assert all(c.artist == "Old 97's" for c in r.candidates)
 
 
@@ -253,3 +254,60 @@ def test_a_track_ref_carries_its_albums_mbid():
     gains a MusicBrainz id."""
     r = resolve(LIBRARY, artist="Old 97s", album="Fight Songs", track="Murder")
     assert r.subject.mbid == "mb-fight"
+
+
+# ── review round 4 (PR #74) ──────────────────────────────────────────────────
+
+EDITIONS = [
+    LibraryAlbum("Old 97's", "Fight Songs", 1999, "mb-original"),
+    LibraryAlbum("Old 97's", "Fight Songs", 2019, "mb-deluxe"),
+]
+
+
+def test_the_ambiguous_release_message_names_a_flag_that_exists():
+    """It said "resolve with --key <album_key>", which was never implemented —
+    so a legitimate note about either release was impossible to add except with
+    --new, which throws the release identity away."""
+    r = resolve(EDITIONS, artist="Old 97s", album="Fight Songs")
+    assert r.status is ResolutionStatus.AMBIGUOUS
+    assert "--mbid" in r.reason
+
+
+def test_the_candidates_offer_the_releases_not_the_discography():
+    """Two textually identical rows are useless for choosing between editions,
+    so the label carries the value --mbid wants."""
+    r = resolve(EDITIONS, artist="Old 97s", album="Fight Songs")
+    assert len(r.candidates) == 2
+    assert {c.mb_albumid for c in r.candidates} == {"mb-original", "mb-deluxe"}
+    assert all("--mbid" in c.label for c in r.candidates)
+
+
+def test_mbid_selects_one_release():
+    r = resolve(EDITIONS, artist="Old 97s", album="Fight Songs", mb_albumid="mb-deluxe")
+    assert r.ok and r.subject.mbid == "mb-deluxe"
+
+
+def test_mbid_picks_out_the_right_subject_key():
+    a = resolve(EDITIONS, artist="Old 97s", album="Fight Songs", mb_albumid="mb-original")
+    b = resolve(EDITIONS, artist="Old 97s", album="Fight Songs", mb_albumid="mb-deluxe")
+    assert a.subject.subject_key != b.subject.subject_key
+
+
+def test_an_unknown_mbid_is_refused_rather_than_ignored():
+    r = resolve(EDITIONS, artist="Old 97s", album="Fight Songs", mb_albumid="mb-nope")
+    assert not r.ok and "MusicBrainz id" in r.reason
+
+
+def test_the_loose_artist_match_folds_punctuation_too():
+    """`normalize_artist` alone is not an equality basis — the fourth instance of
+    that trap on this branch, and this one silently emptied the candidate list
+    for the very artist the strict key was introduced for."""
+    from spindlebot.services.note_resolve import _albums_by_loose_artist
+    assert len(_albums_by_loose_artist(EDITIONS, "Old 97s")) == 2
+    assert len(_albums_by_loose_artist(EDITIONS, "old 97's")) == 2
+
+
+def test_the_loose_artist_match_still_ignores_the_article():
+    from spindlebot.services.note_resolve import _albums_by_loose_artist
+    library = [LibraryAlbum("The Beatles", "Revolver", 1966, None)]
+    assert len(_albums_by_loose_artist(library, "Beatles")) == 1

@@ -75,7 +75,15 @@ under the same album.
 
 If two of your releases share an artist and title but differ by MusicBrainz id —
 an original and a reissue — resolution refuses rather than picking one, since
-guessing would bake an arbitrary release into the note's identity.
+guessing would bake an arbitrary release into the note's identity. It lists both
+with the id that selects them:
+
+```
+$ spindlebot note add --artist "Old 97s" --album "Fight Songs" -m "..."
+ambiguous: 2 releases of 'Fight Songs' differ by MusicBrainz id — pick one with --mbid <id>
+    Old 97's — Fight Songs  [--mbid 1f2c...]
+    Old 97's — Fight Songs  [--mbid 9ab4...]
+```
 
 ## Reading back
 
@@ -198,13 +206,18 @@ Tags travel with a note, as an HTML comment under its heading:
 ```markdown
 ## Fight Songs
 
-<!-- tags: surprise, todo -->
+<!-- tags: ["surprise", "todo"] -->
 
 Overall a delightful record.
 ```
 
-It is invisible in rendered markdown and read back on import. Only a marker
-above the prose counts as metadata — one further down is your own text.
+It is invisible in rendered markdown and read back on import. The payload is a
+JSON array so that a tag containing a comma survives; a hand-written
+`<!-- tags: todo, surprise -->` is also accepted, since nobody should have to
+type JSON in their own notes.
+
+Only a marker above the prose counts as metadata. If your own text starts with
+one, export escapes it (`\<!-- tags: ... -->`) so it comes back as text.
 
 What export does **not** carry is a subject's MusicBrainz id. Re-importing
 re-resolves by name against whatever the library holds at that point, which is

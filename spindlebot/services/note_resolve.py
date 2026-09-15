@@ -30,7 +30,7 @@ from spindlebot.core.collection_match import (
     normalize_artist,
     normalize_title,
 )
-from spindlebot.core.notes import NoteSubjectRef, artist_key
+from spindlebot.core.notes import NoteSubjectRef, artist_key, text_key
 
 MAX_CANDIDATES = 8
 
@@ -63,8 +63,12 @@ class Resolution:
 
 
 def _candidate(album: LibraryAlbum) -> Candidate:
+    # The mbid goes in the LABEL as well as the field: a candidate list whose
+    # rows are textually identical is useless for choosing between editions,
+    # and the id is what `--mbid` wants.
+    suffix = f"  [--mbid {album.mb_albumid}]" if album.mb_albumid else ""
     return Candidate(
-        label=f"{album.albumartist} — {album.album}",
+        label=f"{album.albumartist} — {album.album}{suffix}",
         artist=album.albumartist,
         album=album.album,
         mb_albumid=album.mb_albumid,
@@ -91,15 +95,27 @@ def _albums_by_artist(library: list[LibraryAlbum], artist: str) -> list[LibraryA
 def _albums_by_loose_artist(
     library: list[LibraryAlbum], artist: str
 ) -> list[LibraryAlbum]:
-    """Albums whose artist matches under the MATCHER's normalization.
+    """Albums whose artist matches ignoring the leading article.
 
     Article-insensitive, so typing "Beatles" reaches "The Beatles". That fold is
     right here and wrong in `artist_key` — here a human confirms or the caller
     refuses; a uuid has no such recourse, and folding the article there merged
     "The Band" with "Band" permanently.
+
+    `normalize_artist` alone is NOT a usable equality basis, for the fourth time
+    on this branch: it replaces punctuation with a space, so "Old 97s" folds to
+    `old 97s` and "Old 97's" to `old 97 s`. This function silently matched
+    nothing for exactly the artist that motivated the strict key, which emptied
+    the candidate list an ambiguous release needs. Running the result through
+    `text_key` removes the separators and leaves the article strip intact.
     """
-    key = normalize_artist(artist)
-    return [a for a in library if key and normalize_artist(a.albumartist) == key]
+    key = _loose_key(artist)
+    return [a for a in library if key and _loose_key(a.albumartist) == key]
+
+
+def _loose_key(name: str | None) -> str:
+    """Article-stripped AND separator-free — the two folds composed."""
+    return text_key(normalize_artist(name))
 
 
 def _near_artists(library: list[LibraryAlbum], artist: str) -> list[str]:
@@ -112,15 +128,25 @@ def _near_artists(library: list[LibraryAlbum], artist: str) -> list[str]:
     return [by_key[k] for k in close]
 
 
+def _releases_of(scope: list[LibraryAlbum], album: str) -> list[LibraryAlbum]:
+    key = normalize_title(album)
+    return [a for a in scope if key and normalize_title(a.album) == key]
+
+
 def resolve(
     library: list[LibraryAlbum],
     *,
     artist: str | None = None,
     album: str | None = None,
     track: str | None = None,
+    mb_albumid: str | None = None,
     allow_new: bool = False,
 ) -> Resolution:
     """Resolve a typed subject against the library.
+
+    `mb_albumid` picks one release when an artist and title match several — the
+    only way to say "this edition, not that one" without `--new`, which would
+    throw the release identity away.
 
     `allow_new` is the caller's explicit "yes, this really is something the
     library does not have" — without it an unmatched query is an error rather
@@ -132,6 +158,13 @@ def resolve(
     if album is None and artist is None:
         raise ValueError("nothing to resolve: pass --artist, --album or --track")
 
+    if mb_albumid:
+        library = [a for a in library if a.mb_albumid == mb_albumid]
+        if not library and not allow_new:
+            return Resolution(
+                ResolutionStatus.UNMATCHED,
+                reason=f"no album with MusicBrainz id {mb_albumid!r} in the library",
+            )
     if album is None:
         return _resolve_artist(library, artist, allow_new=allow_new)
     return _resolve_album(library, artist, album, track, allow_new=allow_new)
@@ -267,10 +300,15 @@ def _resolve_album(
         # into two subjects for the same unowned record.
         return _new_subject(canonical_artist, album, track)
 
+    # When several releases share the title, THEY are the choice to offer — the
+    # artist's whole discography is noise, and the candidate labels carry the
+    # `--mbid` value that resolves it.
+    releases = _releases_of(scope, album)
+    offer = releases if len(releases) > 1 else _shortlist(library, artist, matched)
     return Resolution(
         ResolutionStatus.AMBIGUOUS if matched is not None or status is MatchStatus.UNCERTAIN
         else ResolutionStatus.UNMATCHED,
-        candidates=tuple(_candidate(a) for a in _shortlist(library, artist, matched)),
+        candidates=tuple(_candidate(a) for a in offer),
         reason=reason,
     )
 
@@ -298,12 +336,11 @@ def _find_album(
     `mb_albumid`, and the matcher returns whichever comes first — which would
     then bake an arbitrary release id into the subject key.
     """
-    key = normalize_title(album)
-    exact = [a for a in scope if key and normalize_title(a.album) == key]
+    exact = _releases_of(scope, album)
     if len({a.mb_albumid for a in exact}) > 1:
         return None, MatchStatus.UNCERTAIN, (
             f"{len(exact)} releases of {album!r} differ by MusicBrainz id — "
-            "resolve with --key <album_key>"
+            "pick one with --mbid <id>"
         )
     if artist:
         item = CollectionItem(source="note", source_id="query", artist=artist, title=album)

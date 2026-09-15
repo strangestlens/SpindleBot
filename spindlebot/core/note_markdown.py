@@ -43,6 +43,7 @@ without ever naming its parents.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -50,10 +51,12 @@ from spindlebot.core.enums import NoteSubjectKind
 from spindlebot.core.notes import canonicalize_body
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
-# A body line that *looks* like a heading is escaped on the way out and
-# unescaped on the way in. Counting the backslashes keeps it reversible, so an
-# author who genuinely wrote `\# not a heading` gets that text back verbatim.
-_ESCAPABLE = re.compile(r"^(\\*)(#{1,6}\s)")
+# A body line that *looks* structural is escaped on the way out and unescaped on
+# the way in, so an author who genuinely wrote `\# not a heading` gets that text
+# back verbatim. Both markers belong here: a body whose first line was
+# `<!-- tags: ... -->` was consumed as metadata, which dropped the line and, if
+# it was the ONLY line, the entire note.
+_ESCAPABLE = re.compile(r"^\\*(?:#{1,6}\s|<!--\s*tags:)", re.I)
 
 MAX_DEPTH = 3  # artist, album, track
 # `#{1,6}` is all markdown has, and a track sits two levels below the root, so a
@@ -64,6 +67,11 @@ MAX_ROOT_LEVEL = 6 - (MAX_DEPTH - 1)
 # text while still surviving a round trip, which matters because `note export` is
 # the documented escape hatch — tags vanishing on re-import would lose part of
 # what the author recorded.
+#
+# The payload is a JSON array, not a comma-joined list. Tags are an OPEN set and
+# `add_tags` accepts any non-blank string, so a tag containing a comma —
+# "pressing, original" — split into two on the way back in and broke the
+# round-trip contract. JSON quotes and escapes for us.
 _TAGS = re.compile(r"^<!--\s*tags:\s*(.*?)\s*-->\s*$", re.I)
 
 
@@ -103,6 +111,24 @@ class ParsedDocument:
     skipped: tuple[SkippedHeading, ...] = ()
 
 
+def _decode_tags(payload: str) -> tuple[str, ...]:
+    """Read a tags payload, tolerating the older comma-joined form.
+
+    JSON is what `render` writes. The comma fallback exists because a
+    hand-written file is a supported way in, and asking someone to type a JSON
+    array in their notes would be absurd — it just cannot represent a tag that
+    contains a comma, which is exactly why the canonical form is JSON.
+    """
+    payload = payload.strip()
+    if payload.startswith("["):
+        try:
+            decoded = json.loads(payload)
+        except ValueError:
+            decoded = []
+        return tuple(str(t).strip() for t in decoded if str(t).strip())
+    return tuple(t for t in (p.strip() for p in payload.split(",")) if t)
+
+
 def _check_root_level(root_level: int) -> None:
     if not 1 <= root_level <= MAX_ROOT_LEVEL:
         raise ValueError(
@@ -112,8 +138,10 @@ def _check_root_level(root_level: int) -> None:
 
 
 def _unescape(line: str) -> str:
-    m = _ESCAPABLE.match(line)
-    return line[1:] if m and m.group(1) else line
+    """Drop exactly one escaping backslash, if that is what it is."""
+    if line.startswith("\\") and _ESCAPABLE.match(line[1:]):
+        return line[1:]
+    return line
 
 
 def _escape(line: str) -> str:
@@ -155,11 +183,10 @@ def parse(text: str, *, root_level: int = 1) -> ParsedDocument:
         if not m:
             tag_line = _TAGS.match(line)
             # Only before any prose: a tags comment further down is the author's
-            # own text, not metadata this format put there.
+            # own text. An escaped marker never reaches here — it fails this
+            # pattern and is unescaped into the body below.
             if tag_line and not any(b.strip() for b in buf):
-                tags = tuple(
-                    t for t in (p.strip() for p in tag_line.group(1).split(",")) if t
-                )
+                tags = _decode_tags(tag_line.group(1))
                 continue
             buf.append(_unescape(line))
             continue
@@ -240,7 +267,7 @@ def render(notes, *, root_level: int = 1) -> str:
             out.append(f"{'#' * (root_level + i)} {chain[i]}")
             out.append("")
         if note.tags:
-            out.append(f"<!-- tags: {', '.join(note.tags)} -->")
+            out.append(f"<!-- tags: {json.dumps(list(note.tags))} -->")
             out.append("")
         out.extend(_escape(line) for line in note.body.split("\n"))
         out.append("")
