@@ -373,3 +373,72 @@ def test_acceptance_is_gated_on_the_resolution_STATUS(cfg, capsys, monkeypatch):
     assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
                 "-m", "x", "--json") == 1
     assert "ambiguous" in _json_out(capsys)["error"]
+
+
+# ── session dates render in local time ───────────────────────────────────────
+
+@pytest.fixture
+def fixed_tz(monkeypatch):
+    """Pin the process timezone so "local" is assertable.
+
+    `time.tzset` is POSIX-only, which is fine — this project is macOS, and CI
+    runs Linux. The env var alone is not enough: Python caches the zone.
+    """
+    import time
+
+    def _set(name: str):
+        monkeypatch.setenv("TZ", name)
+        time.tzset()
+    yield _set
+    time.tzset()  # monkeypatch has restored TZ; make Python notice
+
+
+def test_session_dates_render_in_local_time(cfg, capsys, fixed_tz):
+    """A listening sitting is a local-time event. 2026-09-15 04:23 UTC is
+    2026-09-14 21:23 in Los Angeles — rendering it as the 15th puts an evening's
+    listening on the wrong day, and disagrees with `--since`, which already
+    reads a bare date as LOCAL midnight.
+    """
+    fixed_tz("America/Los_Angeles")
+    evening_local = 1789435401  # 2026-09-14 21:23 PDT / 2026-09-15 04:23 UTC
+
+    from spindlebot.db.connection import open_db
+    from spindlebot.services import notes as svc
+    conn = open_db(cfg.core.db_path)
+    svc.start_session(conn, title="Sunday CDs", occurred_utc=evening_local,
+                      now=evening_local)
+    conn.commit()
+    conn.close()
+    capsys.readouterr()
+
+    assert _run(cfg, "sessions") == 0
+    out = capsys.readouterr().out
+    assert "2026-09-14" in out
+    assert "2026-09-15" not in out
+
+
+def test_since_selects_the_session_its_own_date_display_shows(cfg, capsys, fixed_tz):
+    """The consistency the UTC bug broke: a session shown as the 14th has to be
+    the one `--since 2026-09-14` returns."""
+    fixed_tz("America/Los_Angeles")
+    evening_local = 1789435401
+
+    from spindlebot.db.connection import open_db
+    from spindlebot.services import notes as svc
+    conn = open_db(cfg.core.db_path)
+    svc.start_session(conn, title="Sunday CDs", occurred_utc=evening_local,
+                      now=evening_local)
+    conn.commit()
+    conn.close()
+    capsys.readouterr()
+
+    _run(cfg, "sessions", "--since", "2026-09-14", "--json")
+    assert _json_out(capsys)["count"] == 1
+    _run(cfg, "sessions", "--since", "2026-09-15", "--json")
+    assert _json_out(capsys)["count"] == 0
+
+
+def test_session_json_reports_the_raw_epoch(cfg, capsys):
+    """Machine output stays timezone-free; only the human rendering localizes."""
+    _run(cfg, "session", "start", "--title", "x", "--json")
+    assert isinstance(_json_out(capsys)["occurred_utc"], int)

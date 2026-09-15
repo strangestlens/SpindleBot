@@ -114,6 +114,9 @@ spindlebot note list --session 3
 spindlebot note sessions --since 2026-01-01
 ```
 
+Session dates are shown in local time, and `--since` reads a bare date as local
+midnight.
+
 `session_id` is optional — a note written outside a sitting is still a
 first-class note.
 
@@ -133,9 +136,14 @@ artist level and reports `CDs` as a skipped heading rather than inventing an
 artist by that name.
 
 ```bash
-spindlebot note import notes.md --root-level 2 --dry-run   # resolution table, writes nothing
+spindlebot note import notes.md --root-level 2 --dry-run   # resolution table, writes no notes
 spindlebot note import notes.md --root-level 2             # one import = one session
 ```
+
+`--dry-run` writes no *notes*, but it still opens the database, and opening it
+applies any pending schema migration — as every `spindlebot` command does.
+Migrations are additive and forward-only, so this is safe; it is just not
+literally a no-op on the file.
 
 Three guarantees:
 
