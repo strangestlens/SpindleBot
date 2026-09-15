@@ -114,7 +114,7 @@ Full reference in [collection audit](collection-audit.md).
 ## Listening notes
 
 ```bash
-python3 -m spindlebot note add [--artist <a>] [--album <b>] [--track <t>] [--new]
+python3 -m spindlebot note add [--artist <a>] [--album <b>] [--track <t>] [--mbid <id>] [--new]
                           [-m <text> | -F <file> | -] [--tag <t>] [--session <id>] [--json]
 python3 -m spindlebot note list [--artist <a>] [--album <b>] [--track <t>]
                           [--kind artist|album|track] [--tag <t>] [--session <id>]

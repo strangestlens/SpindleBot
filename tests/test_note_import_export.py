@@ -292,3 +292,39 @@ def test_the_grouped_sort_leaves_nothing_unrepresentable(cfg, capsys):
         for v in views
     ]
     assert unrepresentable(parsed) == ()
+
+
+def test_re_importing_after_the_album_is_ripped_does_not_duplicate(cfg, capsys):
+    """Idempotence has to survive a subject's identity sharpening.
+
+    `add_note` re-keys a name-derived subject onto its MusicBrainz-backed key the
+    first time the album resolves with an id. Looking up only the NEW key found
+    nothing, so the row was marked READY and a second copy of a body already
+    present was inserted — the failure landing exactly when a wishlist note
+    graduates to an owned one, which is the real corpus's situation.
+    """
+    from spindlebot.core.notes import NoteSubjectRef
+    from spindlebot.db.connection import open_db
+    from spindlebot.services import notes as svc
+
+    conn = open_db(cfg.core.db_path)
+    svc.add_note(conn, subject=NoteSubjectRef.for_album(
+        "Loreena McKennitt", "Morada Del Corazon"), body="Look for this record.")
+    conn.commit()
+    conn.close()
+
+    doc = FIXTURE.parent / "_morada.md"
+    doc.write_text("# Loreena McKennitt\n\n## Morada Del Corazon\n\nLook for this record.\n",
+                   encoding="utf-8")
+    try:
+        # The library now knows it, with an MBID.
+        from spindlebot.services import library_index
+        owned = [LibraryAlbum("Loreena McKennitt", "Morada Del Corazon", 2001, "mb-morada")]
+        library_index.load = lambda cfg, index="auto": library_index.LibraryIndex(albums=owned)
+
+        assert _run(cfg, "import", str(doc), "--json") == 0
+        assert _statuses(_json_out(capsys)) == ["duplicate"]
+        _run(cfg, "list", "--json")
+        assert _json_out(capsys)["count"] == 1
+    finally:
+        doc.unlink(missing_ok=True)

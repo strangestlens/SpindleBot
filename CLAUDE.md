@@ -384,10 +384,24 @@ ADOPTED onto the real subject (`NoteSubjectRef.alt_keys` +
 to. Adoption only runs toward the MBID-backed key; a name-keyed ref cannot guess
 an id it has never seen.
 
-**Anything the CLI does not define is an error.** Silently ignoring unknown
-options is not lenient, it is dangerous: `note list --artistt X` dropped the
-filter and listed the whole corpus, and `note export --artsit X` exported
-everything. Both looked like success.
+**Anything the CLI does not define is an error, PER SUBCOMMAND** (`_NOTE_SPECS`).
+Silently ignoring unknown options is not lenient, it is dangerous: `note list
+--artistt X` dropped the filter and listed the whole corpus, and `note export
+--artsit X` exported everything. A single shared flag table was not enough
+either — it let `note list --new` and `note export --tag todo` through to be
+ignored, dropped stray operands, and let a non-numeric id reach a bare `int()`
+and print a traceback.
+
+**Export metadata must be structurally unambiguous.** Tags ride in an HTML
+comment whose payload is a JSON array: tags are an open set, so comma-joining
+split `pressing, original` into two tags. The marker is also in `_ESCAPABLE`,
+because a body whose first line looked like it was eaten as metadata — taking
+the whole note with it when that was the only line.
+
+**Dedup must look where adoption will land.** `note import` checks
+`subject.alt_keys` as well as the current key; otherwise re-importing a note
+whose album has since been ripped inserts a second copy, since the MBID-backed
+key it now resolves to has no row yet.
 
 ## Known gotchas
 

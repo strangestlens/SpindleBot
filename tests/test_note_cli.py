@@ -139,7 +139,7 @@ def test_add_refuses_an_unresolvable_subject_and_offers_candidates(cfg, capsys):
     assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fite Songs",
                 "-m", "x", "--json") == 1
     payload = _json_out(capsys)
-    assert "Old 97's — Fight Songs" in payload["candidates"]
+    assert any("Fight Songs" in c for c in payload["candidates"])
 
 
 def test_add_refuses_a_track_without_an_album(cfg, capsys):
@@ -340,17 +340,25 @@ def test_an_unknown_subcommand_is_rejected(cfg, capsys):
 
 # ── argv parsing ─────────────────────────────────────────────────────────────
 
-def test_a_flags_value_is_never_read_as_a_positional(cfg, capsys):
-    """`note tag 1 todo --session 3` must attach one tag, not two.
+def test_a_flags_value_is_never_read_as_a_positional(cfg, capsys, tmp_path):
+    """`note import <file> --root-level 2` has ONE operand, not two.
 
-    The hand-rolled parser has to know that `--session` consumed the `3`. Skip
-    that and the value lands in the positional list, where `tag` reads
-    everything after the id as a tag name.
+    The hand-rolled parser has to know that `--root-level` consumed the `2`.
+    Skip that and the value lands in the positional list, where the operand
+    check rejects a perfectly valid command.
     """
+    doc = tmp_path / "n.md"
+    doc.write_text("# CDs\n\n## Old 97s\n\n### Fight Songs\n\nbody\n", encoding="utf-8")
+    assert _run(cfg, "import", str(doc), "--root-level", "2", "--dry-run", "--json") == 0
+
+
+def test_a_flag_belonging_to_another_subcommand_is_rejected(cfg, capsys):
+    """`--session` is meaningful on `add`, not on `tag`. A shared flag table
+    accepted it there and then silently ignored it."""
     _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "b", "--json")
     note_id = _json_out(capsys)["id"]
-    _run(cfg, "tag", str(note_id), "todo", "--session", "3", "--json")
-    assert _json_out(capsys)["tags"] == ["todo"]
+    assert _run(cfg, "tag", str(note_id), "todo", "--session", "3", "--json") == 1
+    assert "--session" in _json_out(capsys)["error"]
 
 
 def test_acceptance_is_gated_on_the_resolution_STATUS(cfg, capsys, monkeypatch):
@@ -521,3 +529,79 @@ def test_history_prints_newest_prior_edit_first_and_oldest_last(cfg, capsys):
     _run(cfg, "show", str(note_id), "--history")
     out = capsys.readouterr().out
     assert out.index("third") < out.index("second") < out.index("first")
+
+
+# ── per-subcommand validation (review round 4, PR #74) ───────────────────────
+# A shared flag table was not enough. Flags from other subcommands were accepted
+# and silently ignored, stray operands were dropped, and a non-numeric id
+# reached a bare int() and printed a traceback.
+
+@pytest.mark.parametrize("args,expect", [
+    (["list", "--new"], "--new"),
+    (["export", "--tag", "todo"], "--tag"),
+    (["list", "--dry-run"], "--dry-run"),
+    (["sessions", "--artist", "X"], "--artist"),
+])
+def test_a_flag_from_another_subcommand_is_rejected(cfg, capsys, args, expect):
+    assert _run(cfg, *args, "--json") == 1
+    assert expect in _json_out(capsys)["error"]
+
+
+@pytest.mark.parametrize("args", [
+    ["list", "typo"], ["sessions", "extra"], ["export", "stray"],
+    ["show", "1", "2"], ["untag", "1", "a", "b"],
+])
+def test_a_stray_operand_is_rejected(cfg, capsys, args):
+    assert _run(cfg, *args, "--json") == 1
+    assert "argument" in _json_out(capsys)["error"]
+
+
+@pytest.mark.parametrize("args", [
+    ["show", "nope"], ["rm", "nope"], ["restore", "nope"],
+    ["edit", "nope", "-m", "x"], ["tag", "nope", "todo"], ["untag", "nope", "todo"],
+])
+def test_a_non_numeric_note_id_is_an_error_not_a_traceback(cfg, capsys, args):
+    """`note show nope` raised an uncaught ValueError out of int()."""
+    assert _run(cfg, *args, "--json") == 1
+    assert "not a note id" in _json_out(capsys)["error"]
+
+
+@pytest.mark.parametrize("args", [
+    ["show"], ["edit"], ["rm"], ["restore"], ["tag", "1"], ["untag", "1"], ["import"],
+])
+def test_a_missing_operand_is_rejected(cfg, capsys, args):
+    assert _run(cfg, *args, "--json") == 1
+
+
+def test_session_only_accepts_start(cfg, capsys):
+    assert _run(cfg, "session", "stop", "--json") == 1
+    assert _run(cfg, "session", "start", "--json") == 0
+
+
+@pytest.mark.parametrize("args", [
+    ["list"], ["sessions"], ["export"], ["session", "start"],
+    ["list", "--artist", "Old 97s", "--kind", "album", "--all"],
+    ["export", "--root-level", "2", "--kind", "track"],
+])
+def test_valid_invocations_still_pass_validation(cfg, capsys, args):
+    assert _run(cfg, *args, "--json") == 0
+
+
+def test_mbid_picks_a_release_from_the_cli(cfg, capsys, monkeypatch):
+    from spindlebot.services import library_index
+    editions = [
+        LibraryAlbum("Old 97's", "Fight Songs", 1999, "mb-original"),
+        LibraryAlbum("Old 97's", "Fight Songs", 2019, "mb-deluxe"),
+    ]
+    monkeypatch.setattr(library_index, "load",
+                        lambda cfg, index="auto": library_index.LibraryIndex(albums=editions))
+
+    assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+                "-m", "x", "--json") == 1
+    payload = _json_out(capsys)
+    assert "--mbid" in payload["error"]
+    assert any("--mbid mb-deluxe" in c for c in payload["candidates"]), \
+        "the candidate list has to carry the value that resolves it"
+
+    assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+                "--mbid", "mb-deluxe", "-m", "x", "--json") == 0
