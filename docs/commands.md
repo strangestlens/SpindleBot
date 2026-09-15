@@ -119,11 +119,14 @@ python3 -m lyric_timing audit <dir-or-.lrc ...> [--json]
 
 # retime — forced alignment; must run from the repo root, via the AI venv
 ~/.local/share/spindlebot/ai-venv/bin/python -m lyric_timing retime \
-    <audio> <lrc> [--overwrite] [--json] [--no-vocal-sep]
+    <audio> <lrc> [--overwrite] [--json] [--no-vocal-sep] \
+    [--model wav2vec2_en|mms_fa] [--language <iso-639-1>]
 ```
 
 `retime` is non-destructive by default — the new LRC goes to stdout unless you
-pass `--overwrite`. Full reference in [AI lyric timing](ai-lyric-timing.md).
+pass `--overwrite`. `--model` defaults to the English model, which is the more
+accurate one on English singing; `mms_fa` is the multilingual alternative. Full
+reference in [AI lyric timing](ai-lyric-timing.md).
 
 ## Standalone web tools
 
