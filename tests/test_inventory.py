@@ -803,6 +803,150 @@ def test_second_scan_no_changes_rehashes_nothing(conn, tmp_path, monkeypatch):
     assert pres["observed_utc"] == 2000   # refreshed
 
 
+def _install_tag_spy(monkeypatch):
+    """Count how many times the scan actually opens a file to read its tags."""
+    spy = _HashSpy(inventory._read_tags)
+    monkeypatch.setattr(inventory, "_read_tags", spy)
+    return spy
+
+
+def test_second_scan_no_changes_reads_no_tags(conn, tmp_path):
+    """An unchanged file's header is not re-read.
+
+    Unchanged bytes cannot carry changed tags, and album membership is already
+    recorded in album_track — so a rescan needs no per-file open at all. On a
+    slow volume (a USB DAP) that open, not hashing, is what a rescan costs:
+    measured at ~300s of a ~5.5min scan, against 16s for the whole tree walk.
+    """
+    root = tmp_path / "Pending"
+    for n, md5 in ((1, bytes(range(1, 17))), (2, bytes(range(33, 49)))):
+        _write_flac(root / "AA" / "Album" / f"0{n}.flac", audio_md5_bytes=md5,
+                    tags={"album": "Album", "albumartist": "AA",
+                          "title": f"T{n}", "tracknumber": str(n)})
+
+    result, loc = _run(conn, root, now=1000)
+    assert result.albums == 1
+
+    with pytest.MonkeyPatch.context() as mp:
+        spy = _install_tag_spy(mp)
+        result2, _ = _run(conn, root, now=2000)
+
+    assert spy.calls == 0
+    # Same accounting as before: both tracks seen, both already known, one album.
+    assert result2.scanned == 2 and result2.new == 0 and result2.updated == 2
+    assert result2.albums == 1
+    assert audio_repo.count(conn) == 2
+    assert album_repo.count(conn) == 1
+
+
+def test_skipped_tag_read_still_refreshes_last_seen(conn, tmp_path):
+    """Skipping the read must not freeze last_seen_utc — the row WAS observed."""
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Album" / "01.flac", audio_md5_bytes=bytes(range(1, 17)),
+                tags={"album": "Album", "albumartist": "AA", "title": "One",
+                      "tracknumber": "1"})
+    _run(conn, root, now=1000)
+
+    with pytest.MonkeyPatch.context() as mp:
+        spy = _install_tag_spy(mp)
+        _run(conn, root, now=2000)
+    assert spy.calls == 0
+
+    audio = conn.execute("SELECT first_seen_utc, last_seen_utc FROM audio_content").fetchone()
+    assert (audio["first_seen_utc"], audio["last_seen_utc"]) == (1000, 2000)
+    alb = conn.execute("SELECT first_seen_utc, last_seen_utc FROM album").fetchone()
+    assert (alb["first_seen_utc"], alb["last_seen_utc"]) == (1000, 2000)
+
+
+def test_changed_file_still_reads_tags(conn, tmp_path):
+    """The skip is keyed off the same (size, mtime) reuse test as hashing."""
+    root = tmp_path / "Pending"
+    path = root / "01.flac"
+    _write_flac(path, audio_md5_bytes=bytes(range(1, 17)),
+                tags={"album": "Album", "albumartist": "AA", "title": "One"})
+    _run(conn, root, now=1000)
+
+    _write_flac(path, audio_md5_bytes=bytes(range(17, 33)),
+                tags={"album": "Renamed", "albumartist": "AA", "title": "One"})
+    with open(path, "ab") as fh:
+        fh.write(b"padding")
+
+    with pytest.MonkeyPatch.context() as mp:
+        spy = _install_tag_spy(mp)
+        _run(conn, root, now=2000)
+
+    assert spy.calls == 1
+    assert album_repo.get_by_key(conn, album_key("AA", "Renamed", None)) is not None
+
+
+def test_unchanged_track_with_no_album_link_falls_back_to_tags(conn, tmp_path):
+    """A reuse hit without an album_track row must still read tags.
+
+    An untagged track records no album on the first scan. Reusing its identity is
+    still correct, but there is no recorded membership to recover, so the tag read
+    is the only way to notice it should now be grouped — skipping it would strand
+    the track album-less forever.
+    """
+    root = tmp_path / "Pending"
+    path = root / "01.flac"
+    _write_flac(path, audio_md5_bytes=bytes(range(1, 17)), tags={"title": "Lonely"})
+    _run(conn, root, now=1000)
+    assert album_repo.count(conn) == 0
+
+    with pytest.MonkeyPatch.context() as mp:
+        spy = _install_tag_spy(mp)
+        _run(conn, root, now=2000)
+
+    assert spy.calls == 1          # no link to recover from → read the file
+    assert audio_repo.count(conn) == 1
+
+
+def test_ambiguous_album_membership_falls_back_to_tags(conn, tmp_path):
+    """A track linked to two albums must NOT have one of them guessed for it.
+
+    `album_track` is many-to-many (schema_v3): one audio identity can belong to an
+    original release AND a compilation/reissue. The DB cannot say which album a
+    given PATH sits under, so the no-read path must not pick one — doing so files
+    the directory under the wrong album and re-parents its album-level sidecars.
+
+    The reachable shape is ONE copy at the scanned location with more than one
+    membership (the other copy lives elsewhere, or the compilation has no audio
+    here). Two copies in the same tree do NOT reach it: they share a presence row
+    keyed (audio_id, location_id), so each overwrites the other's rel_path within
+    the scan and neither ever gets a reuse hit.
+
+    The decoy album is created FIRST so it holds the lower id — otherwise picking
+    "the first membership" would land on the right album by accident and the test
+    would pass against the bug.
+    """
+    decoy = album_repo.upsert(conn, album_key=album_key("AA", "Compilation", None),
+                              now=500, albumartist="AA", album="Compilation")
+
+    root = tmp_path / "Pending"
+    _write_flac(root / "AA" / "Original" / "01.flac", audio_md5_bytes=bytes(range(1, 17)),
+                tags={"album": "Original", "albumartist": "AA", "title": "One",
+                      "tracknumber": "1"})
+    (root / "AA" / "Original" / "cover.jpg").write_bytes(b"\xff\xd8original")
+    _run(conn, root, now=1000)
+
+    audio = audio_repo.get_by_identity(conn, bytes(range(1, 17)).hex())
+    original = album_repo.get_by_key(conn, album_key("AA", "Original", None))
+    assert decoy.id < original.id, "setup: the wrong album must sort first"
+    album_repo.link_track(conn, decoy.id, audio.id)
+    assert album_repo.album_ids_for_track(conn, audio.id) == [decoy.id, original.id]
+
+    with pytest.MonkeyPatch.context() as mp:
+        spy = _install_tag_spy(mp)
+        _run(conn, root, now=2000)
+
+    assert spy.calls == 1, "ambiguous membership must fall back to reading tags"
+    cover = sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                             parent_id=original.id, role=SidecarRole.COVER)
+    assert cover is not None, "the cover was re-parented to the wrong album"
+    assert sidecar_repo.get(conn, parent_kind=SidecarParentKind.ALBUM,
+                            parent_id=decoy.id, role=SidecarRole.COVER) is None
+
+
 def test_changed_size_is_rehashed(conn, tmp_path, monkeypatch):
     root = tmp_path / "Pending"
     path = root / "01.flac"

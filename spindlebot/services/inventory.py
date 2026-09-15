@@ -32,7 +32,7 @@ from spindlebot.core.enums import (
     SidecarRole,
 )
 from spindlebot.core.identity import ContentId, audio_content_id, file_sha256
-from spindlebot.core.models import Location
+from spindlebot.core.models import AudioContent, Location
 from spindlebot.core.progress import ProgressCallback, emit
 from spindlebot.db.repositories import (
     album_repo,
@@ -263,14 +263,20 @@ def _identify_or_reuse(
     byte_size: int,
     mtime: int,
     rehash: bool,
-) -> tuple[ContentId, str]:
-    """Return (identity, file_sha256) for `path`, reusing the DB when unchanged.
+) -> tuple[ContentId, str, AudioContent | None]:
+    """Return (identity, file_sha256, reused_row) for `path`, reusing the DB.
 
     On a repeat scan a file whose recorded presence matches on
     (rel_path, byte_size, mtime) is treated as unchanged: its stored identity and
     per-copy sha256 are reused, avoiding both hashes. Any mismatch — new file,
     changed size/mtime, missing mtime (pre-v6 row), or `rehash=True` — falls back
     to hashing the bytes.
+
+    The third element is the existing `audio_content` row on a reuse hit and None
+    otherwise. The caller uses it to skip the tag read as well: bytes that did
+    not change cannot carry different tags, and on a slow volume opening every
+    file to re-read a header the DB already holds is the dominant cost of an
+    otherwise-incremental scan.
     """
     if not rehash:
         prior = presence_repo.get_by_rel_path(conn, location_id, rel_path)
@@ -284,8 +290,8 @@ def _identify_or_reuse(
             audio = audio_repo.get_by_id(conn, prior.audio_id)
             if audio is not None:
                 cid = ContentId(IdentityKind(audio.identity_kind), audio.identity)
-                return cid, prior.file_sha256
-    return audio_content_id(path), file_sha256(path)
+                return cid, prior.file_sha256, audio
+    return audio_content_id(path), file_sha256(path), None
 
 
 def _sidecar_digest_or_reuse(
@@ -378,27 +384,56 @@ def inventory_location(
         for path in audio_files:
             result.scanned += 1
             try:
-                # Merge over the empty shape so indexing below can never KeyError,
-                # even if _read_tags ever regresses to a partial dict — without a
-                # broad KeyError catch that would mask unrelated bugs downstream.
-                tags = {**_EMPTY_TAGS, **_read_tags(path)}
                 rel_path = str(path.relative_to(root))
                 st = path.stat()
                 byte_size = st.st_size
                 mtime = st.st_mtime_ns
 
-                cid, digest = _identify_or_reuse(
+                cid, digest, reused = _identify_or_reuse(
                     conn, path, location_id=location.id, rel_path=rel_path,
                     byte_size=byte_size, mtime=mtime, rehash=rehash,
                 )
-                existed = audio_repo.get_by_identity(conn, cid.value) is not None
-                beets_item_id = beets_index.get(os.fsencode(str(path))) if beets_index else None
-                audio = audio_repo.upsert(
-                    conn, cid, now=now, beets_item_id=beets_item_id,
-                    artist=tags["artist"], album=tags["album"], title=tags["title"],
-                    disc_no=tags["disc_no"], track_no=tags["track_no"],
-                    duration_s=tags["duration_s"],
+                # An unchanged file's album membership is already recorded, so the
+                # tags that would only be used to re-derive it need not be read.
+                # Two cases still must read: no link yet (never had an album tag,
+                # or was linked before its album existed), and AMBIGUOUS
+                # membership. album_track is many-to-many, so byte-identical audio
+                # under two releases (an original and a reissue) shares one
+                # audio_content row linked to both albums — and the DB cannot say
+                # which one THIS path sits under. Guessing attributes the file,
+                # its directory, and its album-level sidecars to the wrong album.
+                reused_album_ids = (
+                    album_repo.album_ids_for_track(conn, reused.id)
+                    if reused is not None else []
                 )
+                reused_album_id = (
+                    reused_album_ids[0] if len(reused_album_ids) == 1 else None
+                )
+                beets_item_id = beets_index.get(os.fsencode(str(path))) if beets_index else None
+
+                if reused is not None and reused_album_id is not None:
+                    # Unchanged bytes cannot carry changed tags: skip the header
+                    # read entirely and just record that we saw it. This is the
+                    # whole point of the incremental path — on a slow volume the
+                    # per-file open, not hashing, is what a rescan costs.
+                    tags = _EMPTY_TAGS
+                    audio = reused
+                    existed = True
+                    audio_repo.touch_last_seen(
+                        conn, audio_id=audio.id, now=now, beets_item_id=beets_item_id,
+                    )
+                else:
+                    # Merge over the empty shape so indexing below can never KeyError,
+                    # even if _read_tags ever regresses to a partial dict — without a
+                    # broad KeyError catch that would mask unrelated bugs downstream.
+                    tags = {**_EMPTY_TAGS, **_read_tags(path)}
+                    existed = audio_repo.get_by_identity(conn, cid.value) is not None
+                    audio = audio_repo.upsert(
+                        conn, cid, now=now, beets_item_id=beets_item_id,
+                        artist=tags["artist"], album=tags["album"], title=tags["title"],
+                        disc_no=tags["disc_no"], track_no=tags["track_no"],
+                        duration_s=tags["duration_s"],
+                    )
                 presence_repo.set_presence(
                     conn,
                     audio_id=audio.id,
@@ -412,7 +447,12 @@ def inventory_location(
                 )
                 done_bytes += byte_size
                 stem_audio[(path.parent, path.stem.lower())] = audio.id
-                if tags["album"]:
+                if reused_album_id is not None:
+                    # Already linked and already named; only the observation is new.
+                    album_repo.touch_last_seen(conn, album_id=reused_album_id, now=now)
+                    dir_albums[path.parent].add(reused_album_id)
+                    seen_albums.add(reused_album_id)
+                elif tags["album"]:
                     album = album_repo.upsert(
                         conn,
                         album_key=album_key(tags["albumartist"], tags["album"], tags["mb_albumid"]),

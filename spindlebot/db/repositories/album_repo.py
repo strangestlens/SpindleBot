@@ -95,3 +95,28 @@ def list_all(conn: sqlite3.Connection) -> list[Album]:
 
 def count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM album").fetchone()[0]
+
+
+def album_ids_for_track(conn: sqlite3.Connection, audio_id: int) -> list[int]:
+    """Every album this track is linked to, ascending.
+
+    `album_track` is deliberately many-to-many (schema_v3): one audio identity
+    can belong to an original release AND a compilation/reissue, and two copies
+    of byte-identical audio under different albums share a single audio_content
+    row. Callers that want to recover a copy's album from the DB instead of from
+    its tags MUST check for exactly one membership — with more than one there is
+    no way to tell from the DB alone which album *this* copy sits under, and
+    picking any of them attributes the copy, its directory, and its album-level
+    sidecars to the wrong release.
+    """
+    return [r[0] for r in conn.execute(
+        "SELECT album_id FROM album_track WHERE audio_id = ? ORDER BY album_id",
+        (audio_id,),
+    ).fetchall()]
+
+
+def touch_last_seen(conn: sqlite3.Connection, *, album_id: int, now: int) -> None:
+    """Refresh last_seen_utc without rewriting the advisory tags. See audio_repo."""
+    conn.execute(
+        "UPDATE album SET last_seen_utc = ? WHERE id = ?", (now, album_id)
+    )
