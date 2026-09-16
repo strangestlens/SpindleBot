@@ -92,6 +92,15 @@ ASR model and is clearly the more accurate of the two on English singing.
 right choice for lyrics the English model has no orthography for. Passing
 `--language` with a non-English code while on the English model logs a hint.
 
+Every output time is finally pulled 0.2 s earlier. Forced alignment is
+systematically late — CTC commits to a character only once it has seen enough
+evidence — and a lyric line wants to be readable a moment before it is sung.
+The figure is not a taste setting: the signed error against hand-timed lyrics is
++0.23 s median across 597 well-placed lines, and independently, a listener
+correcting nine AI-timed tracks by ear moved lines earlier by 0.20 s median in
+97% of their adjustments. Applying it cuts mean absolute error from 0.441 s to
+0.379 s and lifts within-half-a-second from 68% to 74%.
+
 Parenthetical ad-libs (`walk away (walk away)`) are stripped for the alignment
 pass only — they're backing-vocal echoes that overlap the lead and distort
 neighbouring lines. Output keeps the original text.

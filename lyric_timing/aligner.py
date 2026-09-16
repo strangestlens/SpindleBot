@@ -32,6 +32,16 @@ from lyric_timing.backends.base import AlignmentBackend, Word
 # start being trusted, so keep a floor.
 DEFAULT_MIN_CONFIDENCE = 0.15
 
+# Every output time is pulled this far earlier. Forced alignment is
+# systematically late: CTC commits to a character only once it has seen enough
+# evidence, so the frame it picks sits slightly after the true onset. Measured
+# two independent ways that agree — the signed error against hand-timed lyrics
+# is +0.23 s median over 597 well-placed lines, and a listener correcting nine
+# AI-timed tracks by ear moved lines earlier by 0.20 s median in 97% of their
+# adjustments. 0.2 s is also the empirical optimum: mean absolute error 0.441 s
+# -> 0.379 s, within half a second 68% -> 74%.
+DEFAULT_OUTPUT_LEAD = 0.2
+
 # Line spacing used when interpolation has no second anchor to derive a gap
 # from (e.g. a single confident line in the whole song).
 FALLBACK_LINE_GAP = 3.0
@@ -234,6 +244,7 @@ def align(
     language: str | None = None,
     duration: float | None = None,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    lead: float = DEFAULT_OUTPUT_LEAD,
 ) -> list[LineTiming]:
     """Produce a timestamp + confidence for every lyric line, in line order.
 
@@ -241,7 +252,10 @@ def align(
     output keeps each line's original text); a line that is *only* an ad-lib
     gets its time by interpolation like any unmatched line. When the backend
     reports where the vocal is active, interpolated lines are placed in sung
-    time, so they land on singing rather than mid-instrumental.
+    time, so they land on singing rather than mid-instrumental. Every time is
+    finally pulled `lead` seconds earlier (see DEFAULT_OUTPUT_LEAD): a line
+    should be readable a moment before it is sung, and the alignment runs late
+    besides.
     """
     alignment_texts = [strip_parentheticals(t) for t in line_texts]
     transcript = "\n".join(alignment_texts)
@@ -258,7 +272,7 @@ def align(
     )
     if duration:
         times = [min(t, duration) for t in times]
-    times = [max(t, 0.0) for t in times]
+    times = [max(t - lead, 0.0) for t in times]
 
     return [
         LineTiming(text=text, time=round(t, 2), confidence=round(conf, 3))

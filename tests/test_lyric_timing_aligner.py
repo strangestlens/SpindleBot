@@ -143,7 +143,7 @@ def test_align_end_to_end_with_canned_words():
     backend = MockBackend(
         words_for(("Hello", 10.0), ("world", 10.5), ("Goodbye", 50.0), ("moon", 50.5))
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
     assert [t.text for t in timings] == lines
     assert timings[0].time == 10.0
     assert timings[2].time == 50.0
@@ -167,7 +167,7 @@ def _one_weak_line_backend(weak_at=55.0):
 def test_align_low_confidence_time_is_interpolated_but_conf_reported():
     lines = ["Hello there world friend", "Second line okay", "Third line okay"]
     timings = align(
-        AUDIO, lines, _one_weak_line_backend(), duration=60.0, min_confidence=0.5
+        AUDIO, lines, _one_weak_line_backend(), duration=60.0, min_confidence=0.5, lead=0.0
     )
     assert timings[0].time < 20.0  # extrapolated before first anchor, not 55.0
     assert 0.0 < timings[0].confidence < 0.5
@@ -179,7 +179,7 @@ def test_align_keeps_a_weak_match_above_the_default_threshold():
     # 0.225 is weak enough to render as "check this line" but is still
     # evidence; the default threshold keeps it rather than interpolating
     lines = ["Hello there world friend", "Second line okay", "Third line okay"]
-    timings = align(AUDIO, lines, _one_weak_line_backend(weak_at=10.0), duration=60.0)
+    timings = align(AUDIO, lines, _one_weak_line_backend(weak_at=10.0), duration=60.0, lead=0.0)
     assert timings[0].time == 10.0
     assert timings[0].confidence == 0.225
 
@@ -190,7 +190,7 @@ def test_a_weak_anchor_never_drags_confident_lines():
     # clamp both strong lines forward to 55.0 — one bad anchor pinning a whole
     # track. The weak anchor loses instead.
     lines = ["Hello there world friend", "Second line okay", "Third line okay"]
-    timings = align(AUDIO, lines, _one_weak_line_backend(), duration=60.0)
+    timings = align(AUDIO, lines, _one_weak_line_backend(), duration=60.0, lead=0.0)
     assert timings[1].time == 20.0
     assert timings[2].time == 40.0
     assert timings[0].time <= 20.0
@@ -205,7 +205,7 @@ def test_align_output_is_monotonic_and_clamped():
             ("line", 99.0), ("c", 99.2), ("here", 99.4),
         )
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
     times = [t.time for t in timings]
     assert times == sorted(times)
     assert all(0.0 <= t <= 60.0 for t in times)
@@ -228,7 +228,7 @@ def test_align_ignores_backing_vocal_echoes():
             ("Walk", 20.0), ("away", 20.4), ("now", 20.8),
         )
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
     assert timings[0].time == 10.0
     assert timings[0].confidence > 0.8
     assert timings[0].text == "Keep your lips sealed (lips sealed)"  # text kept
@@ -243,7 +243,7 @@ def test_align_pure_adlib_line_is_interpolated():
             ("Third", 30.0), ("line", 30.3), ("here", 30.6),
         )
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
     assert 10.0 < timings[1].time < 30.0
     assert timings[1].confidence == 0.0
 
@@ -258,7 +258,7 @@ def test_align_keeps_interpolated_lines_out_of_the_instrumental():
         # nothing is sung between 8 s and 50 s
         vocal_activity=[(4.0, 8.0), (50.0, 58.0)],
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
     assert timings[0].time == 5.0
     assert timings[2].time == 55.0
     assert 4.0 <= timings[1].time <= 8.0 or 50.0 <= timings[1].time <= 58.0
@@ -272,14 +272,34 @@ def test_align_without_activity_data_interpolates_linearly():
             ("Third", 55.0), ("line", 55.3), ("here", 55.6),
         )
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
     assert timings[1].time == 30.0
 
 
 def test_align_with_generated_mock_words_is_ordered():
     lines = ["First line of song", "Second line of song", "Third line of song"]
-    timings = align(AUDIO, lines, MockBackend(duration=180.0), duration=180.0)
+    timings = align(AUDIO, lines, MockBackend(duration=180.0), duration=180.0, lead=0.0)
     times = [t.time for t in timings]
     assert times == sorted(times)
     assert times[0] >= 0.0 and times[-1] <= 180.0
     assert all(t.confidence > 0.5 for t in timings)
+
+
+def test_output_is_pulled_earlier_by_the_lead():
+    # the alignment runs systematically late, and a lyric line should be
+    # readable a moment before it is sung
+    lines = ["Hello world", "Goodbye moon"]
+    backend = MockBackend(words_for(("Hello", 10.0), ("world", 10.5),
+                                    ("Goodbye", 50.0), ("moon", 50.5)))
+    timings = align(AUDIO, lines, backend, duration=60.0)
+    assert timings[0].time == 9.8
+    assert timings[1].time == 49.8
+
+
+def test_the_lead_never_pushes_a_line_before_the_track():
+    lines = ["Hello world", "Goodbye moon"]
+    backend = MockBackend(words_for(("Hello", 0.1), ("world", 0.5),
+                                    ("Goodbye", 50.0), ("moon", 50.5)))
+    timings = align(AUDIO, lines, backend, duration=60.0)
+    assert timings[0].time == 0.0
+    assert [t.time for t in timings] == sorted(t.time for t in timings)
