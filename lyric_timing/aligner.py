@@ -188,6 +188,16 @@ def interpolate_missing(
             prev = next(a for a in reversed(anchors) if a[0] < i)
             nxt = next(a for a in anchors if a[0] > i)
             frac = (i - prev[0]) / (nxt[0] - prev[0])
+            if nxt[1] <= prev[1]:
+                # No singing at all between these two anchors — both map to the
+                # same sung coordinate, so sung time has nothing to say about
+                # what lies between them. Going through `from_sung` anyway would
+                # throw the whole run forward onto the next onset, past the
+                # later anchor, and monotonicity would then drag that anchor
+                # with it. Spread the run in wall clock instead.
+                prev_t, nxt_t = times[prev[0]], times[nxt[0]]
+                out[i] = max(0.0, prev_t + frac * (nxt_t - prev_t))
+                continue
             x = prev[1] + frac * (nxt[1] - prev[1])
         out[i] = max(0.0, from_sung(x))
     return out

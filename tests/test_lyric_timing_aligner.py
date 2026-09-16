@@ -128,6 +128,19 @@ def test_confident_lines_keep_their_times_even_inside_a_gap():
     assert times[1] == 15.0  # an anchor is never moved out of a silent stretch
 
 
+def test_two_anchors_inside_one_silent_gap_keep_their_times():
+    # both anchors sit in the same silence, so sung time maps them to the same
+    # coordinate and has nothing to say about what lies between them. Mapping
+    # through it anyway throws the middle line forward onto the next onset,
+    # past the second anchor, and monotonicity then drags that anchor with it.
+    activity = [(0.0, 10.0), (30.0, 40.0)]
+    times = interpolate_missing([15.0, None, 20.0], activity=activity)
+    assert times[0] == 15.0
+    assert times[2] == 20.0
+    assert 15.0 <= times[1] <= 20.0
+    assert enforce_monotonic(times) == times
+
+
 def test_no_anchors_spreads_across_sung_time():
     activity = [(0.0, 1.0), (50.0, 60.0)]
     times = interpolate_missing([None, None, None], duration=60.0, activity=activity)
