@@ -1370,7 +1370,14 @@ def cmd_note(cfg, args: list[str]) -> int:
     if usage_error:
         return fail(usage_error)
     positionals = _note_positionals(rest)
-    conn = open_db(cfg.core.db_path)
+    try:
+        # Inside the boundary's reach: an unwritable path or a failed migration
+        # is the user's configuration, not a bug, and it was bypassing the
+        # handler below because it ran before the `try`.
+        conn = open_db(cfg.core.db_path)
+    except (OSError, _sqlite3.Error) as e:
+        return fail(f"could not open {cfg.core.db_path}: {e}")
+
     try:
         # ── add ──────────────────────────────────────────────────────────────
         if sub == "add":
@@ -1557,7 +1564,9 @@ def cmd_note(cfg, args: list[str]) -> int:
 
         # ── import ───────────────────────────────────────────────────────────
         if sub == "import":
-            from spindlebot.core.note_markdown import _check_root_level, parse
+            from spindlebot.core.note_markdown import (
+                MAX_ROOT_LEVEL, _check_root_level, parse,
+            )
             from spindlebot.services.note_import import apply_import, plan_import
 
             if not positionals:
@@ -1606,11 +1615,17 @@ def cmd_note(cfg, args: list[str]) -> int:
             # heading is wrong; it means the heading window is. Say so, rather
             # than printing the same "did you mean" against each line.
             all_unresolved = bool(plan.rows) and len(plan.unresolved) == len(plan.rows)
-            hint = (
-                f"nothing resolved at heading level {root_level} — if the file opens "
-                f"with a grouping heading, try --root-level {root_level + 1}"
-                if all_unresolved else ""
-            )
+            hint = ""
+            if all_unresolved:
+                hint = f"nothing resolved at heading level {root_level}"
+                # Only suggest a deeper root if one exists — at the maximum the
+                # advice would name a level `_check_root_level` rejects.
+                hint += (
+                    f" — if the file opens with a grouping heading, try "
+                    f"--root-level {root_level + 1}"
+                    if root_level < MAX_ROOT_LEVEL
+                    else "; check that the heading levels match artist/album/track"
+                )
             # Runs even with nothing READY: a DUPLICATE row may still need its
             # subject adopted onto the identified key. A session is only opened
             # when something will actually be written into it.
@@ -1711,6 +1726,13 @@ def cmd_note(cfg, args: list[str]) -> int:
                 (v.subject.album_title or "").casefold(),
                 (v.subject.track_title or "").casefold(),
                 v.note.created_utc,
+                # Ties are normal, not exotic: `note import` stamps every note in
+                # a document with the same second. Without this, two notes on one
+                # subject came out newest-first (list order), re-imported into
+                # ascending ids, and the NEXT export reversed them — breaking the
+                # byte-identical round trip. Ascending id is the order a
+                # re-import reproduces.
+                v.note.id,
             ))
             if want_json:
                 # The LOSSLESS format. Markdown carries prose for humans and
@@ -1818,8 +1840,12 @@ def cmd_note(cfg, args: list[str]) -> int:
     # and a CLI must answer those with an error and an exit code, never a stack
     # trace. Specific validation still comes first where a better message is
     # possible; this is the floor.
-    except (FileNotFoundError, IsADirectoryError, PermissionError) as e:
-        return fail(f"could not read that file: {e}")
+    except OSError as e:
+        # OSError, not three of its subclasses: a user-supplied path can fail
+        # with ENOTDIR (`-F /some/file/child`), ENAMETOOLONG, ENOSPC on an
+        # export write, or any other I/O error, and every one of those was
+        # escaping as a traceback. Covers `-o` writes as well as `-F` reads.
+        return fail(f"file error: {e}")
     except UnicodeDecodeError:
         return fail("that file is not UTF-8 text")
     except LookupError as e:

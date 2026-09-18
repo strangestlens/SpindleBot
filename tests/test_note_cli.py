@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -619,13 +620,13 @@ def test_a_bare_dash_is_a_legitimate_value():
 def test_a_missing_body_file_is_an_error_not_a_traceback(cfg, capsys):
     assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
                 "-F", "/nonexistent/body.md", "--json") == 1
-    assert "could not read" in _json_out(capsys)["error"]
+    assert "file error" in _json_out(capsys)["error"]
 
 
 def test_a_directory_as_the_body_file_is_an_error(cfg, capsys, tmp_path):
     assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
                 "-F", str(tmp_path), "--json") == 1
-    assert "could not read" in _json_out(capsys)["error"]
+    assert "file error" in _json_out(capsys)["error"]
 
 
 def test_a_non_utf8_body_file_is_an_error(cfg, capsys, tmp_path):
@@ -688,3 +689,41 @@ def test_a_missing_backend_is_still_skippable_with_new(cfg, capsys, monkeypatch)
         RuntimeError("beets is not installed")))
     assert _run(cfg, "add", "--artist", "Nobody", "--album", "Nothing",
                 "--new", "-m", "x", "--json") == 0
+
+
+# ── review round 7 (PR #74): the error boundary covers the whole family ──────
+
+def test_any_filesystem_error_on_a_body_path_is_handled(cfg, capsys, tmp_path):
+    """Three OSError subclasses was not the family. `-F /some/file/child` raises
+    ENOTDIR and escaped as a traceback."""
+    regular = tmp_path / "afile"
+    regular.write_text("x", encoding="utf-8")
+    assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+                "-F", str(regular / "child"), "--json") == 1
+    assert "file error" in _json_out(capsys)["error"]
+
+
+def test_an_unwritable_export_path_is_handled(cfg, capsys, tmp_path):
+    regular = tmp_path / "afile"
+    regular.write_text("x", encoding="utf-8")
+    assert _run(cfg, "export", "-o", str(regular / "child" / "out.md"), "--json") == 1
+
+
+def test_an_unopenable_database_is_an_error_not_a_traceback(capsys):
+    """`open_db` ran before the boundary, so an unwritable path or a failed
+    migration bypassed it entirely."""
+    from types import SimpleNamespace as NS
+    broken = NS(core=NS(db_path=Path("/nonexistent-root/spindlebot.db")))
+    assert cmd_note(broken, ["list", "--json"]) == 1
+    assert "could not open" in _json_out(capsys)["error"]
+
+
+def test_the_root_level_hint_never_suggests_an_invalid_level(cfg, capsys, tmp_path):
+    """At the maximum root level the advice named a level `_check_root_level`
+    rejects."""
+    doc = tmp_path / "n.md"
+    doc.write_text("#### Nobody At All\n\nbody\n", encoding="utf-8")
+    assert _run(cfg, "import", str(doc), "--root-level", "4", "--json") == 1
+    hint = _json_out(capsys)["hint"]
+    assert "--root-level 5" not in hint
+    assert hint, "still explains what went wrong"

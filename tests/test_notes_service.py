@@ -12,6 +12,7 @@ import pytest
 from spindlebot.core.enums import NoteStatus, NoteSubjectKind
 from spindlebot.core.notes import NoteSubjectRef
 from spindlebot.db.connection import open_db
+from spindlebot.db.repositories import note_subject_repo
 from spindlebot.services import notes as svc
 
 ARTIST = NoteSubjectRef.for_artist("Old 97's")
@@ -297,3 +298,49 @@ def test_adoption_is_idempotent(conn):
     first = svc.adopt_subject(conn, owned, now=200)
     second = svc.adopt_subject(conn, owned, now=300)
     assert first.id == second.id
+
+
+def test_a_punctuation_only_name_is_a_real_filter_not_an_absent_one(conn):
+    """`--album '!!!'` normalizes to an empty key. Testing truthiness skipped
+    the predicate and returned every unrelated note — and such a name is
+    creatable with --new, so it has to work."""
+    svc.add_note(conn, subject=ALBUM, body="unrelated", now=100)
+    assert svc.list_notes(conn, album="!!!") == []
+
+    odd = NoteSubjectRef.for_album("Old 97's", "!!!")
+    wanted = svc.add_note(conn, subject=odd, body="the odd one", now=200)
+    assert [v.id for v in svc.list_notes(conn, album="!!!")] == [wanted.id]
+
+
+def test_an_album_only_wishlist_is_adopted_when_the_artist_arrives(conn):
+    """`note add --album X --new` records artist_name=None. Requiring
+    artist_key(None) to equal the real artist key could never match, so the note
+    was stranded the moment the record resolved — and unlike a spelling drift,
+    `note list --artist` could not find it either."""
+    before = svc.add_note(conn, subject=NoteSubjectRef.for_album(
+        None, "Morada Del Corazon"), body="Look for this.", now=100)
+    after = svc.add_note(conn, subject=NoteSubjectRef.for_album(
+        "Loreena McKennitt", "Morada Del Corazon", "mb-morada"), body="Heard it.", now=200)
+
+    assert before.subject.id == after.subject.id
+    assert len(svc.list_notes(conn, artist="Loreena McKennitt")) == 2
+
+
+def test_adoption_refuses_when_two_unidentified_subjects_could_match(conn):
+    """A blank field means "not yet known", which can describe several works —
+    so the fallback only adopts when exactly one candidate matches. An EXACT
+    name-key hit still wins, being the stronger signal."""
+    svc.add_note(conn, subject=NoteSubjectRef.for_album(None, "Fight Songs"),
+                 body="no artist", now=100)
+    svc.add_note(conn, subject=NoteSubjectRef.for_album("Old 97s", "Fight Songs"),
+                 body="other spelling", now=200)
+    incoming = NoteSubjectRef.for_album("Old 97's", "Fight Songs", "mb-fight")
+    assert svc.find_adoptable_subject(conn, incoming) is None
+
+
+def test_a_subject_with_every_field_blank_adopts_nothing(conn):
+    """Otherwise it would match every work there is."""
+    blank = NoteSubjectRef(kind=NoteSubjectKind.ALBUM, subject_key="blank-key")
+    note_subject_repo.upsert(conn, blank, 100)
+    incoming = NoteSubjectRef.for_album("Old 97's", "Fight Songs", "mb-fight")
+    assert svc.find_adoptable_subject(conn, incoming) is None

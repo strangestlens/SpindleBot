@@ -509,3 +509,30 @@ def test_a_duplicate_only_import_does_not_open_an_empty_session(cfg, capsys, tmp
     assert set(_statuses(_json_out(capsys))) == {"duplicate"}
     _run(cfg, "sessions", "--json")
     assert _json_out(capsys)["count"] == before
+
+
+def test_notes_sharing_a_subject_and_a_second_round_trip_stably(cfg, capsys, tmp_path):
+    """`note import` stamps every note in a document with the same second, so a
+    created_utc tie on one subject is normal, not exotic. Without an id
+    tie-break the pair came out newest-first, re-imported into ascending ids,
+    and the NEXT export reversed them — breaking byte-identical round trip."""
+    doc = tmp_path / "two.md"
+    doc.write_text(
+        "# Old 97s\n\n## Fight Songs\n\nfirst thought\n\n"
+        "## Fight Songs\n\nsecond thought\n",
+        encoding="utf-8",
+    )
+    assert _run(cfg, "import", str(doc), "--json") == 0
+    capsys.readouterr()
+
+    _run(cfg, "export")
+    first = capsys.readouterr().out
+    assert first.index("first thought") < first.index("second thought")
+
+    round_tripped = tmp_path / "again.md"
+    round_tripped.write_text(first, encoding="utf-8")
+    fresh = SimpleNamespace(core=SimpleNamespace(db_path=tmp_path / "fresh.db"))
+    assert _run(fresh, "import", str(round_tripped), "--json") == 0
+    capsys.readouterr()
+    _run(fresh, "export")
+    assert capsys.readouterr().out == first, "stable across a re-import"
