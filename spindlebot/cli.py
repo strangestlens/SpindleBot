@@ -33,7 +33,8 @@ Usage:
     python -m spindlebot note import <file> [--dry-run] [--root-level N] [--new] [--skip-unresolved] [--json]
                                                       Import a markdown document of notes (atomic; --dry-run shows the resolution table)
     python -m spindlebot note export [--artist <a>] [--album <b>] [--kind <k>] [--since <d>] [--root-level N] [-o <file>]
-                                                      Write notes back out as markdown that `note import` reads identically
+                                                      Write notes out as markdown that `note import` reads identically (prose only)
+    python -m spindlebot note export --json [-o <file>]  Lossless: tags, uuids, timestamps and every revision
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -44,6 +45,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -1174,12 +1176,33 @@ def _note_unknown_flags(args: list[str], allowed: set[str] | None = None) -> lis
     return unknown
 
 
+def _note_missing_values(args: list[str]) -> list[str]:
+    """Value flags whose value is absent, or is another option.
+
+    `--artist` consumed whatever came next unconditionally, so
+    `note add --artist --new -m x` took `--new` AS THE ARTIST NAME and would
+    happily file a note under a subject called "--new". A bare `-` is a real
+    value (read stdin), so it does not count as an option here.
+    """
+    missing = []
+    for i, arg in enumerate(args):
+        if arg not in _NOTE_VALUE_FLAGS:
+            continue
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if nxt is None or (nxt.startswith("-") and nxt != "-"):
+            missing.append(arg)
+    return missing
+
+
 def _note_usage_error(sub: str, args: list[str]) -> str | None:
     """Validate one subcommand's flags and operands, or return the complaint."""
     spec = _NOTE_SPECS[sub]
     unknown = _note_unknown_flags(args, spec["flags"])
     if unknown:
         return f"note {sub}: unknown option(s): {' '.join(unknown)}"
+    starved = _note_missing_values(args)
+    if starved:
+        return f"note {sub}: {' '.join(starved)} needs a value"
 
     operands = _note_positionals(args)
     low, high = spec["operands"]
@@ -1641,20 +1664,60 @@ def cmd_note(cfg, args: list[str]) -> int:
                 (v.subject.track_title or "").casefold(),
                 v.note.created_utc,
             ))
-            parsed = [
-                ParsedNote(
-                    kind=v.subject.kind, body=v.body,
-                    artist=v.subject.artist_name, album=v.subject.album_title,
-                    track=v.subject.track_title, tags=v.tags,
-                )
-                for v in views
-            ]
-            text = render(parsed, root_level=root_level)
+            if want_json:
+                # The LOSSLESS format. Markdown carries prose for humans and
+                # nothing else; everything un-regenerable — tags, the device
+                # -stable uuid, timestamps, and the full append-only revision
+                # chain — is here. This is the export worth scheduling.
+                payload = {
+                    "schema": "spindlebot.notes/1",
+                    "exported_utc": int(time.time()),
+                    "count": len(views),
+                    "notes": [
+                        {
+                            "uuid": v.note.uuid,
+                            "kind": str(v.subject.kind),
+                            "subject_key": v.subject.subject_key,
+                            "artist": v.subject.artist_name,
+                            "album": v.subject.album_title,
+                            "track": v.subject.track_title,
+                            "mbid": v.subject.mbid,
+                            "tags": list(v.tags),
+                            "status": str(v.note.status),
+                            "created_utc": v.note.created_utc,
+                            "updated_utc": v.note.updated_utc,
+                            "session": (
+                                {"uuid": v.session.uuid, "title": v.session.title,
+                                 "occurred_utc": v.session.occurred_utc}
+                                if v.session else None
+                            ),
+                            "revisions": [
+                                {"seq": r.seq, "body": r.body, "sha256": r.sha256,
+                                 "format": str(r.body_format), "author": r.author,
+                                 "created_utc": r.created_utc}
+                                for r in svc.history(conn, v.id)
+                            ],
+                        }
+                        for v in views
+                    ],
+                }
+                text = _json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            else:
+                text = render([
+                    ParsedNote(
+                        kind=v.subject.kind, body=v.body,
+                        artist=v.subject.artist_name, album=v.subject.album_title,
+                        track=v.subject.track_title,
+                    )
+                    for v in views
+                ], root_level=root_level)
 
             destination = _note_opt(rest, "-o", "--out")
             if destination:
                 Path(destination).expanduser().write_text(text, encoding="utf-8")
-                print(f"{len(views)} note(s) -> {destination}")
+                # Goes to stderr: stdout is the data channel, and a caller
+                # redirecting it should not find a status line in the file.
+                print(f"{len(views)} note(s) -> {destination}", file=sys.stderr)
             else:
                 sys.stdout.write(text)
             return 0

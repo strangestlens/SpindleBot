@@ -196,33 +196,33 @@ spindlebot note export -o ~/Documents/notes.md
 spindlebot note export --artist "Old 97s" --since 2026-01-01
 ```
 
-`parse(render(x)) == x` is a tested contract: export a corpus, import it into an
-empty database, export again, and the bytes match. That is what keeps your
-writing out of a SQLite-shaped trap. Export regularly — nothing else in this
-system can rebuild these rows.
+There are two formats, and the difference matters.
 
-Tags travel with a note, as an HTML comment under its heading:
+**Markdown** is for humans: prose, re-importable, and `parse(render(x)) == x` is
+a tested contract — export a corpus, import it into an empty database, export
+again, and the bytes match. It carries the writing and nothing else.
 
-```markdown
-## Fight Songs
+**`--json` is the lossless one**, and the one worth scheduling:
 
-<!-- tags: ["surprise", "todo"] -->
-
-Overall a delightful record.
+```bash
+spindlebot note export --json -o ~/Backups/notes.json
 ```
 
-It is invisible in rendered markdown and read back on import. The payload is a
-JSON array so that a tag containing a comma survives; a hand-written
-`<!-- tags: todo, surprise -->` is also accepted, since nobody should have to
-type JSON in their own notes.
+It holds every un-regenerable thing — tags, the device-stable uuid, subject
+keys, timestamps, sessions, and the full append-only revision chain. Nothing
+else in this system can rebuild those rows.
 
-Only a marker above the prose counts as metadata. If your own text starts with
-one, export escapes it (`\<!-- tags: ... -->`) so it comes back as text.
+Tags deliberately do *not* appear in the markdown. They were briefly encoded in
+an HTML comment there and it was a mistake: tags are an open set, so no
+delimiter is safe inside one, and any marker chosen can also begin a line of
+someone's actual writing. A format for humans should not be asked to be
+lossless.
 
-What export does **not** carry is a subject's MusicBrainz id. Re-importing
-re-resolves by name against whatever the library holds at that point, which is
-what makes an exported file portable; the trade is that a release whose identity
-is ambiguous comes back as a refusal rather than a silent guess.
+What the **markdown** export does not carry is a subject's MusicBrainz id or its
+tags. Re-importing re-resolves by name against whatever the library holds at
+that point, which is what makes the file portable between libraries; the trade
+is that a release whose identity is ambiguous comes back as a refusal rather
+than a silent guess. The `--json` export keeps all of it.
 
 Output is grouped by artist → album → track rather than newest-first, because an
 exported document is meant to be read as a document.

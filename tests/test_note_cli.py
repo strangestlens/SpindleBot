@@ -486,27 +486,6 @@ def test_a_value_that_looks_like_a_flag_is_not_flagged():
     assert _note_unknown_flags(["--tag", "-weird"]) == []
 
 
-def test_tags_survive_export_and_re_import(cfg, capsys, tmp_path):
-    """Export is the escape hatch; a tag lost in the round trip is authored
-    metadata gone."""
-    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "body",
-         "--tag", "todo", "--tag", "surprise", "--json")
-    capsys.readouterr()
-
-    _run(cfg, "export")
-    exported = capsys.readouterr().out
-    doc = tmp_path / "tagged.md"
-    doc.write_text(exported, encoding="utf-8")
-
-    fresh = SimpleNamespace(core=SimpleNamespace(db_path=tmp_path / "fresh.db"))
-    assert _run(fresh, "import", str(doc), "--json") == 0
-    _run(fresh, "list", "--json")
-    assert _json_out(capsys)["notes"][0]["tags"] == ["surprise", "todo"]
-
-    _run(fresh, "export")
-    assert capsys.readouterr().out == exported
-
-
 @pytest.mark.parametrize("sub", ["import", "export"])
 def test_an_out_of_range_root_level_is_refused_at_both_entry_points(cfg, capsys, sub, tmp_path):
     doc = tmp_path / "n.md"
@@ -605,3 +584,26 @@ def test_mbid_picks_a_release_from_the_cli(cfg, capsys, monkeypatch):
 
     assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
                 "--mbid", "mb-deluxe", "-m", "x", "--json") == 0
+
+
+# ── review round 5 (PR #74) ──────────────────────────────────────────────────
+
+@pytest.mark.parametrize("args,flag", [
+    (["add", "--artist", "--new", "-m", "x"], "--artist"),
+    (["add", "--artist", "Old 97s", "--album", "--json"], "--album"),
+    (["list", "--tag"], "--tag"),
+    (["export", "--root-level"], "--root-level"),
+])
+def test_a_value_flag_does_not_swallow_the_next_option(cfg, capsys, args, flag):
+    """`note add --artist --new -m x` took `--new` AS THE ARTIST NAME and would
+    have filed a note under a subject called "--new"."""
+    assert _run(cfg, *args, "--json") == 1
+    error = _json_out(capsys)["error"]
+    assert flag in error and "needs a value" in error
+
+
+def test_a_bare_dash_is_a_legitimate_value():
+    """`-F -` means read stdin; the option-looking-value check must allow it."""
+    from spindlebot.cli import _note_missing_values
+    assert _note_missing_values(["-F", "-"]) == []
+    assert _note_missing_values(["--artist", "X"]) == []

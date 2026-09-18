@@ -177,6 +177,9 @@ class _ArtistMatch:
     albums: tuple[LibraryAlbum, ...] = ()
     candidates: tuple[Candidate, ...] = ()
     reason: str = ""
+    # True when the name reached SEVERAL real artists — distinct from "reached
+    # none", which --new may legitimately override.
+    ambiguous: bool = False
 
 
 def _match_artist(library: list[LibraryAlbum], artist: str) -> _ArtistMatch:
@@ -219,6 +222,7 @@ def _match_artist(library: list[LibraryAlbum], artist: str) -> _ArtistMatch:
                 for group in by_subject.values()
             ),
             reason=f"{len(by_subject)} artists match {artist!r} ignoring the article",
+            ambiguous=True,
         )
 
     return _ArtistMatch(
@@ -239,15 +243,17 @@ def _resolve_artist(
             subject=NoteSubjectRef.for_artist(found.canonical),
             reason=found.reason,
         )
-    if allow_new:
+    # --new says "the library is not the authority here". It does NOT say "pick
+    # something": when the name matches two real artists, creating a third
+    # subject under the typed spelling is the guess this module refuses to make.
+    if allow_new and not found.ambiguous:
         return Resolution(
             ResolutionStatus.RESOLVED,
             subject=NoteSubjectRef.for_artist(artist),
             reason="new subject (--new)",
         )
     return Resolution(
-        ResolutionStatus.AMBIGUOUS if found.candidates and len(found.candidates) > 1
-        else ResolutionStatus.UNMATCHED,
+        ResolutionStatus.AMBIGUOUS if found.ambiguous else ResolutionStatus.UNMATCHED,
         candidates=found.candidates,
         reason=found.reason,
     )
@@ -273,12 +279,12 @@ def _resolve_album(
     if artist:
         found = _match_artist(library, artist)
         if not found.canonical:
-            if allow_new:
+            if allow_new and not found.ambiguous:
                 # Nothing to canonicalize against; the typed spelling is all
                 # there is, and --new says the library is not the authority.
                 return _new_subject(artist, album, track)
             return Resolution(
-                ResolutionStatus.AMBIGUOUS if len(found.candidates) > 1
+                ResolutionStatus.AMBIGUOUS if found.ambiguous
                 else ResolutionStatus.UNMATCHED,
                 candidates=found.candidates,
                 reason=found.reason,
@@ -294,10 +300,12 @@ def _resolve_album(
             reason=reason,
         )
 
-    if allow_new:
+    if allow_new and len({a.mb_albumid for a in _releases_of(scope, album)}) <= 1:
         # The artist resolved, so key the new subject off the LIBRARY's spelling
         # rather than what was typed — otherwise "Old 97s" and "Old 97's" fork
-        # into two subjects for the same unowned record.
+        # into two subjects for the same unowned record. But --new must not slip
+        # past an ambiguous RELEASE either: the album is in the library twice and
+        # the caller still has to say which.
         return _new_subject(canonical_artist, album, track)
 
     # When several releases share the title, THEY are the choice to offer — the

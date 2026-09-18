@@ -392,11 +392,23 @@ either — it let `note list --new` and `note export --tag todo` through to be
 ignored, dropped stray operands, and let a non-numeric id reach a bare `int()`
 and print a traceback.
 
-**Export metadata must be structurally unambiguous.** Tags ride in an HTML
-comment whose payload is a JSON array: tags are an open set, so comma-joining
-split `pressing, original` into two tags. The marker is also in `_ESCAPABLE`,
-because a body whose first line looked like it was eaten as metadata — taking
-the whole note with it when that was the only line.
+**Two export formats, and the split is deliberate.** Markdown carries PROSE for
+humans and nothing else; `note export --json` is the lossless one (tags, uuid,
+subject key, timestamps, sessions, every revision) and the one to back up.
+Encoding tags into the markdown was tried and reverted: tags are an open set, so
+no delimiter is safe inside one, and any marker can also begin a line of real
+writing. Do not re-add metadata to the markdown format.
+
+**`library_index._dedupe` groups by artist+title but keeps one row per distinct
+`mb_albumid`.** Collapsing on artist+title alone merged an original and a
+reissue, which understated the audit AND silently disabled note resolution's
+release disambiguation — a resolver can only refuse to guess between editions it
+can see. A row with no MBID is kept only when its group has no identified
+release at all, which is the beets-vs-DB overlap the function exists for.
+
+**`--new` means "the library is not the authority", never "pick one".** It is
+blocked when the artist matches several real artists, and when the album matches
+several releases; only a genuinely absent subject may be created.
 
 **Dedup must look where adoption will land.** `note import` checks
 `subject.alt_keys` as well as the current key; otherwise re-importing a note

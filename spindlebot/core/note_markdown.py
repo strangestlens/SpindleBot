@@ -24,8 +24,12 @@ the split survives a round trip.
 `# Old 97's` above `## Fight Songs` says where the album sits, it is not an
 empty note about the artist.
 
-`parse(render(notes)) == notes` is the contract, and it is what makes
-`note export` a real escape hatch rather than a lossy pretty-printer.
+`parse(render(notes)) == notes` is the contract for the PROSE — which is what
+this format carries and all it carries. Tags, ids, timestamps and revision
+history live in `note export --json`; they were briefly encoded in an HTML
+comment here and it was a mistake. Tags are an open set, so no delimiter is safe
+inside one, and any marker chosen can also open a line of someone's actual
+writing. A format for humans should not be asked to be lossless.
 
 It holds for every chain shape including gapped ones — an album with no artist,
 an artist with a track and no album — with one inherent exception: heading
@@ -43,7 +47,6 @@ without ever naming its parents.
 """
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 
@@ -51,28 +54,15 @@ from spindlebot.core.enums import NoteSubjectKind
 from spindlebot.core.notes import canonicalize_body
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
-# A body line that *looks* structural is escaped on the way out and unescaped on
-# the way in, so an author who genuinely wrote `\# not a heading` gets that text
-# back verbatim. Both markers belong here: a body whose first line was
-# `<!-- tags: ... -->` was consumed as metadata, which dropped the line and, if
-# it was the ONLY line, the entire note.
-_ESCAPABLE = re.compile(r"^\\*(?:#{1,6}\s|<!--\s*tags:)", re.I)
+# A body line that *looks* like a heading is escaped on the way out and
+# unescaped on the way in, so an author who genuinely wrote `\# not a heading`
+# gets that text back verbatim.
+_ESCAPABLE = re.compile(r"^\\*#{1,6}\s")
 
 MAX_DEPTH = 3  # artist, album, track
 # `#{1,6}` is all markdown has, and a track sits two levels below the root, so a
 # root deeper than 4 renders track headings nothing can parse back.
 MAX_ROOT_LEVEL = 6 - (MAX_DEPTH - 1)
-
-# Tags are metadata, not prose. An HTML comment keeps them out of the rendered
-# text while still surviving a round trip, which matters because `note export` is
-# the documented escape hatch — tags vanishing on re-import would lose part of
-# what the author recorded.
-#
-# The payload is a JSON array, not a comma-joined list. Tags are an OPEN set and
-# `add_tags` accepts any non-blank string, so a tag containing a comma —
-# "pressing, original" — split into two on the way back in and broke the
-# round-trip contract. JSON quotes and escapes for us.
-_TAGS = re.compile(r"^<!--\s*tags:\s*(.*?)\s*-->\s*$", re.I)
 
 
 @dataclass(frozen=True)
@@ -83,7 +73,6 @@ class ParsedNote:
     artist: str | None = None
     album: str | None = None
     track: str | None = None
-    tags: tuple[str, ...] = ()
     # Where it came from, for the --dry-run resolution table. Excluded from
     # equality: a rendered document has no line numbers, and the round-trip
     # contract is about content.
@@ -109,24 +98,6 @@ class SkippedHeading:
 class ParsedDocument:
     notes: tuple[ParsedNote, ...] = ()
     skipped: tuple[SkippedHeading, ...] = ()
-
-
-def _decode_tags(payload: str) -> tuple[str, ...]:
-    """Read a tags payload, tolerating the older comma-joined form.
-
-    JSON is what `render` writes. The comma fallback exists because a
-    hand-written file is a supported way in, and asking someone to type a JSON
-    array in their notes would be absurd — it just cannot represent a tag that
-    contains a comma, which is exactly why the canonical form is JSON.
-    """
-    payload = payload.strip()
-    if payload.startswith("["):
-        try:
-            decoded = json.loads(payload)
-        except ValueError:
-            decoded = []
-        return tuple(str(t).strip() for t in decoded if str(t).strip())
-    return tuple(t for t in (p.strip() for p in payload.split(",")) if t)
 
 
 def _check_root_level(root_level: int) -> None:
@@ -164,30 +135,21 @@ def parse(text: str, *, root_level: int = 1) -> ParsedDocument:
     artist = album = track = None
     kind: NoteSubjectKind | None = None
     buf: list[str] = []
-    tags: tuple[str, ...] = ()
     start_line = 0
 
     def flush() -> None:
-        nonlocal buf, tags
+        nonlocal buf
         body = canonicalize_body("\n".join(buf))
         if kind is not None and body:
             notes.append(ParsedNote(
                 kind=kind, body=body, artist=artist, album=album,
-                track=track, tags=tags, line_no=start_line,
+                track=track, line_no=start_line,
             ))
         buf = []
-        tags = ()
 
     for line_no, line in enumerate(text.splitlines(), start=1):
         m = _HEADING.match(line)
         if not m:
-            tag_line = _TAGS.match(line)
-            # Only before any prose: a tags comment further down is the author's
-            # own text. An escaped marker never reaches here — it fails this
-            # pattern and is unescaped into the body below.
-            if tag_line and not any(b.strip() for b in buf):
-                tags = _decode_tags(tag_line.group(1))
-                continue
             buf.append(_unescape(line))
             continue
 
@@ -265,9 +227,6 @@ def render(notes, *, root_level: int = 1) -> str:
             if i < start:
                 continue
             out.append(f"{'#' * (root_level + i)} {chain[i]}")
-            out.append("")
-        if note.tags:
-            out.append(f"<!-- tags: {json.dumps(list(note.tags))} -->")
             out.append("")
         out.extend(_escape(line) for line in note.body.split("\n"))
         out.append("")

@@ -127,6 +127,7 @@ python3 -m spindlebot note session start [--title <text>]
 python3 -m spindlebot note sessions [--since <date>] [--json]
 python3 -m spindlebot note import <file> [--dry-run] [--root-level N] [--new] [--skip-unresolved]
 python3 -m spindlebot note export [--artist <a>] [--kind <k>] [--since <d>] [-o <file>]
+python3 -m spindlebot note export --json [-o <file>]     # lossless: tags, uuids, revisions
 ```
 
 `add` refuses an ambiguous subject rather than guessing; `--new` writes about

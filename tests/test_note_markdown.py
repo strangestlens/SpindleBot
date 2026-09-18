@@ -324,37 +324,7 @@ def test_the_sample_corpus_is_fully_representable():
     assert unrepresentable(doc.notes, root_level=2) == ()
 
 
-# ── tags and root-level bounds (review round 3, PR #74) ──────────────────────
-
-def test_tags_survive_the_round_trip():
-    """`note export` is the documented escape hatch, so tags attached with
-    `note add --tag todo` cannot vanish on re-import."""
-    notes = [_note(NoteSubjectKind.ALBUM, "body", artist="A", album="B",
-                   tags=("surprise", "todo"))]
-    assert parse(render(notes)).notes == tuple(notes)
-
-
-def test_tags_render_as_an_invisible_comment():
-    """Metadata, not prose: it must not show up when the markdown is rendered."""
-    notes = [_note(NoteSubjectKind.ALBUM, "body", artist="A", album="B", tags=("todo",))]
-    out = render(notes)
-    assert '<!-- tags: ["todo"] -->' in out, "JSON payload, so a comma in a tag survives"
-    assert parse(out).notes[0].body == "body", "the marker is not part of the body"
-
-
-def test_a_tags_comment_inside_the_body_is_left_alone():
-    """Only a marker BEFORE any prose is metadata. Further down it is the
-    author's own text and must not be silently eaten."""
-    body = "some prose\n\n<!-- tags: not-metadata -->"
-    notes = [_note(NoteSubjectKind.ALBUM, body, artist="A", album="B")]
-    got = parse(render(notes)).notes[0]
-    assert got.tags == ()
-    assert "not-metadata" in got.body
-
-
-def test_a_note_with_no_tags_emits_no_marker():
-    assert "<!--" not in render([_note(NoteSubjectKind.ARTIST, "b", artist="A")])
-
+# ── root-level bounds (review round 3, PR #74) ──────────────────────────────
 
 @pytest.mark.parametrize("bad", [0, 5, 6, -1])
 def test_an_out_of_range_root_level_is_refused(bad):
@@ -374,48 +344,3 @@ def test_the_deepest_valid_root_level_still_round_trips():
     assert parse(out, root_level=4).notes == tuple(notes)
 
 
-# ── review round 4 (PR #74): the tags representation ─────────────────────────
-
-def test_a_tag_containing_a_comma_survives():
-    """Tags are an OPEN set and `add_tags` accepts any non-blank string, so a
-    comma-joined payload split one tag into two and broke the round trip. The
-    payload is JSON for exactly this reason."""
-    notes = [_note(NoteSubjectKind.ALBUM, "b", artist="A", album="B",
-                   tags=("pressing, original", "todo"))]
-    assert parse(render(notes)).notes == tuple(notes)
-
-
-@pytest.mark.parametrize("tag", ['quote"inside', "bracket]inside", "unicode ✓", "a, b, c"])
-def test_awkward_tags_round_trip(tag):
-    notes = [_note(NoteSubjectKind.ALBUM, "b", artist="A", album="B", tags=(tag,))]
-    assert parse(render(notes)).notes[0].tags == (tag,)
-
-
-def test_a_body_whose_first_line_is_the_tags_marker_survives():
-    """It was consumed as metadata, which dropped the line — and if it was the
-    ONLY line, the note had no body left and disappeared entirely."""
-    notes = [_note(NoteSubjectKind.ALBUM, "<!-- tags: not-metadata -->\n\nreal prose",
-                   artist="A", album="B")]
-    got = parse(render(notes)).notes
-    assert got == tuple(notes)
-    assert got[0].tags == ()
-
-
-def test_a_body_that_is_only_the_tags_marker_is_not_lost():
-    notes = [_note(NoteSubjectKind.ALBUM, "<!-- tags: x -->", artist="A", album="B")]
-    assert parse(render(notes)).notes == tuple(notes)
-
-
-def test_a_real_tags_marker_and_a_quoted_one_coexist():
-    notes = [_note(NoteSubjectKind.ALBUM, "<!-- tags: quoted -->", artist="A",
-                   album="B", tags=("genuine",))]
-    got = parse(render(notes)).notes[0]
-    assert got.tags == ("genuine",)
-    assert got.body == "<!-- tags: quoted -->"
-
-
-def test_a_hand_written_comma_list_is_still_accepted():
-    """A hand-written file is a supported way in; nobody should have to type a
-    JSON array in their notes."""
-    doc = parse("# A\n\n<!-- tags: todo, surprise -->\n\nbody\n")
-    assert doc.notes[0].tags == ("todo", "surprise")
