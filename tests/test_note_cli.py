@@ -607,3 +607,64 @@ def test_a_bare_dash_is_a_legitimate_value():
     from spindlebot.cli import _note_missing_values
     assert _note_missing_values(["-F", "-"]) == []
     assert _note_missing_values(["--artist", "X"]) == []
+
+
+# ── review round 5 (PR #74): user input never yields a traceback ─────────────
+# Fixed as a CLASS, not as three more instances. Unvalidated input produced a
+# traceback in every round of this review — `note show nope`, `note tag 999`,
+# `--session nope`, `-F /nope` — because each was patched where it was found.
+# `cmd_note` now converts every user-causable failure into fail(), and the
+# specific checks below exist for the better message, not for the safety.
+
+def test_a_missing_body_file_is_an_error_not_a_traceback(cfg, capsys):
+    assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+                "-F", "/nonexistent/body.md", "--json") == 1
+    assert "could not read" in _json_out(capsys)["error"]
+
+
+def test_a_directory_as_the_body_file_is_an_error(cfg, capsys, tmp_path):
+    assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+                "-F", str(tmp_path), "--json") == 1
+    assert "could not read" in _json_out(capsys)["error"]
+
+
+def test_a_non_utf8_body_file_is_an_error(cfg, capsys, tmp_path):
+    binary = tmp_path / "body.bin"
+    binary.write_bytes(b"\xff\xfe\x00\x01")
+    assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+                "-F", str(binary), "--json") == 1
+    assert "UTF-8" in _json_out(capsys)["error"]
+
+
+def test_a_readable_body_file_still_works(cfg, capsys, tmp_path):
+    body = tmp_path / "body.md"
+    body.write_text("from a file", encoding="utf-8")
+    assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+                "-F", str(body), "--json") == 0
+    assert _json_out(capsys)["body"] == "from a file"
+
+
+@pytest.mark.parametrize("sub", ["add", "list"])
+def test_a_non_numeric_session_is_rejected(cfg, capsys, sub):
+    args = [sub, "--session", "nope"]
+    if sub == "add":
+        args = ["add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "x",
+                "--session", "nope"]
+    assert _run(cfg, *args, "--json") == 1
+    assert "wants a number" in _json_out(capsys)["error"]
+
+
+def test_a_nonexistent_session_says_so_rather_than_leaking_a_foreign_key(cfg, capsys):
+    assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+                "-m", "x", "--session", "999", "--json") == 1
+    error = _json_out(capsys)["error"]
+    assert "no session 999" in error
+    assert "FOREIGN KEY" not in error
+
+
+def test_a_valid_session_still_attaches(cfg, capsys):
+    _run(cfg, "session", "start", "--title", "S", "--json")
+    session_id = _json_out(capsys)["id"]
+    assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+                "-m", "x", "--session", str(session_id), "--json") == 0
+    assert _json_out(capsys)["session_id"] == session_id

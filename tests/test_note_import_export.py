@@ -409,3 +409,42 @@ def test_writing_to_a_file_keeps_stdout_clean(cfg, capsys, tmp_path):
     assert captured.out == ""
     assert "1 note(s)" in captured.err
     assert json.loads(out.read_text(encoding="utf-8"))["count"] == 1
+
+
+def test_the_json_backup_keeps_notes_you_removed(cfg, capsys):
+    """A backup that drops what you deleted is not a backup.
+
+    `note rm` is a status change precisely because the writing survives it, and
+    the payload carries `status` so a restore can tell the difference. Filtering
+    to ACTIVE made `--json` lose a removed note AND its whole revision chain —
+    the un-regenerable part — while calling itself lossless.
+    """
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "kept",
+         "--json")
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+         "--track", "Murder", "-m", "removed", "--json")
+    note_id = _json_out(capsys)["id"]
+    _run(cfg, "edit", str(note_id), "-m", "removed, then revised", "--json")
+    _run(cfg, "rm", str(note_id), "--json")
+    capsys.readouterr()
+
+    payload = _export_json(cfg, capsys)
+    assert payload["count"] == 2
+    assert {n["status"] for n in payload["notes"]} == {"active", "deleted"}
+    gone = next(n for n in payload["notes"] if n["status"] == "deleted")
+    assert [r["body"] for r in gone["revisions"]] == ["removed", "removed, then revised"]
+
+
+def test_the_markdown_export_stays_active_only(cfg, capsys):
+    """It has nowhere to record deletion state, so re-importing a deleted note
+    would silently resurrect it."""
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "kept",
+         "--json")
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+         "--track", "Murder", "-m", "removed", "--json")
+    _run(cfg, "rm", str(_json_out(capsys)["id"]), "--json")
+    capsys.readouterr()
+
+    _run(cfg, "export")
+    text = capsys.readouterr().out
+    assert "kept" in text and "removed" not in text
