@@ -6,8 +6,8 @@ and offline; the only audio-aware piece is the injected AlignmentBackend.
 Pipeline: match backend words to lyric-line tokens (SequenceMatcher, robust
 to words the backend dropped or mangled) -> line time = first matched word's
 start -> fill unmatched/low-confidence lines by interpolating between
-confident anchors -> enforce monotonic non-decreasing times -> clamp to
-[0, duration].
+confident anchors, over sung time when the backend reports where the vocal is
+active -> enforce monotonic non-decreasing times -> clamp to [0, duration].
 """
 
 from __future__ import annotations
@@ -23,8 +23,24 @@ from lyric_timing.backends.base import AlignmentBackend, Word
 
 # Below this line confidence, a matched time is considered unreliable and is
 # replaced by interpolation between confident neighbours (the reported
-# confidence keeps its low value so callers can highlight the line).
-DEFAULT_MIN_CONFIDENCE = 0.5
+# confidence keeps its low value so callers can still highlight the line —
+# this threshold decides what to *do* with a match, not what to show).
+# Benchmarked against two albums of hand-timed lyrics: a weakly matched time
+# beats an interpolated one far more often than not, and the old 0.5 threw
+# away good matches (mean error 1.75 s -> 1.04 s on one album, 35 s -> 21 s on
+# the other). Below ~0.1 the curve flattens and near-evidence-free matches
+# start being trusted, so keep a floor.
+DEFAULT_MIN_CONFIDENCE = 0.15
+
+# Every output time is pulled this far earlier. Forced alignment is
+# systematically late: CTC commits to a character only once it has seen enough
+# evidence, so the frame it picks sits slightly after the true onset. Measured
+# two independent ways that agree — the signed error against hand-timed lyrics
+# is +0.23 s median over 597 well-placed lines, and a listener correcting nine
+# AI-timed tracks by ear moved lines earlier by 0.20 s median in 97% of their
+# adjustments. 0.2 s is also the empirical optimum: mean absolute error 0.441 s
+# -> 0.379 s, within half a second 68% -> 74%.
+DEFAULT_OUTPUT_LEAD = 0.2
 
 # Line spacing used when interpolation has no second anchor to derive a gap
 # from (e.g. a single confident line in the whole song).
@@ -94,26 +110,74 @@ def assign_words_to_lines(
     return results
 
 
+Activity = Sequence[tuple[float, float]]
+
+
+def _sung_clock(activity: Activity | None):
+    """Wall-clock <-> sung-time coordinate pair.
+
+    Sung time advances only while the singer is audible, so interpolating in
+    it spaces lines by singing rather than by wall clock: a line never lands
+    inside an instrumental stretch, and the inverse map places one that would
+    have at the next vocal onset. Without activity data both maps are the
+    identity and interpolation is plain linear.
+    """
+    if not activity:
+        return (lambda t: t), (lambda x: x)
+
+    def to_sung(t: float) -> float:
+        return sum(max(0.0, min(end, t) - start) for start, end in activity)
+
+    def from_sung(x: float) -> float:
+        # before the first onset / after the last offset, extend in wall time
+        if x < 0:
+            return activity[0][0] + x
+        elapsed = 0.0
+        for start, end in activity:
+            span = end - start
+            if x < elapsed + span:
+                return start + (x - elapsed)
+            elapsed += span
+        return activity[-1][1] + (x - elapsed)
+
+    return to_sung, from_sung
+
+
 def interpolate_missing(
-    times: Sequence[float | None], duration: float | None = None
+    times: Sequence[float | None],
+    duration: float | None = None,
+    activity: Activity | None = None,
 ) -> list[float]:
     """Fill None entries by linear interpolation between anchored neighbours.
 
     Head/tail runs extrapolate from the nearest anchor using the anchors'
     average per-line gap. With no anchors at all, lines spread evenly across
-    the duration (or FALLBACK_LINE_GAP apart without one).
+    the duration (or FALLBACK_LINE_GAP apart without one). Interpolation
+    happens in sung time when `activity` is known (see `_sung_clock`);
+    anchored lines keep their exact times either way.
     """
-    anchors = [(i, t) for i, t in enumerate(times) if t is not None]
+    to_sung, from_sung = _sung_clock(activity)
+    anchors = [(i, to_sung(t)) for i, t in enumerate(times) if t is not None]
     n = len(times)
     if not anchors:
+        horizon = to_sung(duration) if duration else None
+        if horizon:
+            return [max(0.0, from_sung(horizon * (i + 1) / (n + 1))) for i in range(n)]
         if duration and n:
             return [duration * (i + 1) / (n + 1) for i in range(n)]
         return [i * FALLBACK_LINE_GAP for i in range(n)]
 
-    first_i, first_t = anchors[0]
-    last_i, last_t = anchors[-1]
-    if last_i > first_i:
-        gap = (last_t - first_t) / (last_i - first_i)
+    first_i, first_x = anchors[0]
+    last_i, last_x = anchors[-1]
+    # With two or more anchors stranded in the same silence there is no sung
+    # time between them, so a gap measured in it is zero and every extrapolated
+    # line would map onto the same vocal onset — past the anchors themselves.
+    # Wall clock is the only information available in that case.
+    degenerate = last_i > first_i and last_x <= first_x
+    if degenerate:
+        gap = (times[last_i] - times[first_i]) / (last_i - first_i)
+    elif last_i > first_i:
+        gap = (last_x - first_x) / (last_i - first_i)
     else:
         gap = FALLBACK_LINE_GAP
 
@@ -122,16 +186,76 @@ def interpolate_missing(
         t = times[i]
         if t is not None:
             out[i] = t
-        elif i < first_i:
-            out[i] = max(0.0, first_t - (first_i - i) * gap)
+            continue
+        if i < first_i:
+            if degenerate:
+                out[i] = max(0.0, times[first_i] - (first_i - i) * gap)
+                continue
+            x = first_x - (first_i - i) * gap
         elif i > last_i:
-            out[i] = last_t + (i - last_i) * gap
+            if degenerate:
+                out[i] = max(0.0, times[last_i] + (i - last_i) * gap)
+                continue
+            x = last_x + (i - last_i) * gap
         else:
             prev = next(a for a in reversed(anchors) if a[0] < i)
             nxt = next(a for a in anchors if a[0] > i)
             frac = (i - prev[0]) / (nxt[0] - prev[0])
-            out[i] = prev[1] + frac * (nxt[1] - prev[1])
+            if nxt[1] <= prev[1]:
+                # No singing at all between these two anchors — both map to the
+                # same sung coordinate, so sung time has nothing to say about
+                # what lies between them. Going through `from_sung` anyway would
+                # throw the whole run forward onto the next onset, past the
+                # later anchor, and monotonicity would then drag that anchor
+                # with it. Spread the run in wall clock instead.
+                prev_t, nxt_t = times[prev[0]], times[nxt[0]]
+                out[i] = max(0.0, prev_t + frac * (nxt_t - prev_t))
+                continue
+            x = prev[1] + frac * (nxt[1] - prev[1])
+        out[i] = max(0.0, from_sung(x))
     return out
+
+
+def resolve_anchor_conflicts(
+    times: Sequence[float | None], confidences: Sequence[float]
+) -> list[float | None]:
+    """Drop matched times that contradict better-matched ones.
+
+    A line matched *later* than a subsequent line with a stronger match cannot
+    be right, and `enforce_monotonic` would otherwise drag that stronger line
+    forward to meet it — one weak anchor pinning everything after it. Keeps the
+    set of anchors with the greatest total confidence whose times are
+    non-decreasing in line order; the losers become None and are interpolated
+    like any other unmatched line.
+
+    Note what this does and does not promise. A retained anchor keeps its
+    measured time exactly — nothing downstream, monotonicity included, drags it.
+    But an anchor is not retained merely for being confident: a lone strong
+    match that contradicts a run of mutually consistent weaker ones loses to the
+    run, because a line matched confidently onto the wrong chorus repetition
+    looks precisely like that and the run is the better evidence.
+    """
+    anchors = [i for i, t in enumerate(times) if t is not None]
+    if len(anchors) < 2:
+        return list(times)
+
+    # weighted longest non-decreasing subsequence over the anchor times
+    best = [0.0] * len(anchors)
+    parent = [-1] * len(anchors)
+    for a, i in enumerate(anchors):
+        best[a] = confidences[i]
+        for b in range(a):
+            j = anchors[b]
+            if times[j] <= times[i] and best[b] + confidences[i] > best[a]:
+                best[a] = best[b] + confidences[i]
+                parent[a] = b
+
+    keep: set[int] = set()
+    a = max(range(len(anchors)), key=lambda x: best[x])
+    while a != -1:
+        keep.add(anchors[a])
+        a = parent[a]
+    return [t if i in keep else None for i, t in enumerate(times)]
 
 
 def enforce_monotonic(times: Sequence[float]) -> list[float]:
@@ -149,26 +273,35 @@ def align(
     language: str | None = None,
     duration: float | None = None,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    lead: float = DEFAULT_OUTPUT_LEAD,
 ) -> list[LineTiming]:
     """Produce a timestamp + confidence for every lyric line, in line order.
 
     Alignment runs on the lines with parenthetical ad-libs stripped (the
     output keeps each line's original text); a line that is *only* an ad-lib
-    gets its time by interpolation like any unmatched line.
+    gets its time by interpolation like any unmatched line. When the backend
+    reports where the vocal is active, interpolated lines are placed in sung
+    time, so they land on singing rather than mid-instrumental. Every time is
+    finally pulled `lead` seconds earlier (see DEFAULT_OUTPUT_LEAD): a line
+    should be readable a moment before it is sung, and the alignment runs late
+    besides.
     """
     alignment_texts = [strip_parentheticals(t) for t in line_texts]
     transcript = "\n".join(alignment_texts)
-    words = backend.word_timestamps(audio_path, transcript, language=language)
+    heard = backend.align_audio(audio_path, transcript, language=language)
 
-    assigned = assign_words_to_lines(alignment_texts, words)
+    assigned = assign_words_to_lines(alignment_texts, heard.words)
     raw_times = [
         t if t is not None and conf >= min_confidence else None
         for t, conf in assigned
     ]
-    times = enforce_monotonic(interpolate_missing(raw_times, duration))
+    raw_times = resolve_anchor_conflicts(raw_times, [conf for _, conf in assigned])
+    times = enforce_monotonic(
+        interpolate_missing(raw_times, duration, heard.vocal_activity)
+    )
     if duration:
         times = [min(t, duration) for t in times]
-    times = [max(t, 0.0) for t in times]
+    times = [max(t - lead, 0.0) for t in times]
 
     return [
         LineTiming(text=text, time=round(t, 2), confidence=round(conf, 3))

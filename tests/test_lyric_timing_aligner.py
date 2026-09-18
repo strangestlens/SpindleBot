@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from lyric_timing.aligner import (
+    resolve_anchor_conflicts,
     LineTiming,
     align,
     assign_words_to_lines,
@@ -91,6 +92,75 @@ def test_enforce_monotonic():
     assert enforce_monotonic([10.0, 5.0, 20.0, 15.0]) == [10.0, 10.0, 20.0, 20.0]
 
 
+# ── interpolation over sung time (vocal activity) ────────────────────────────
+
+
+def test_interpolation_avoids_an_instrumental_stretch():
+    # singing 0-10 and 30-40; wall-clock interpolation would put the middle
+    # line at 15.0, in the middle of the instrumental
+    times = interpolate_missing([0.0, None, 30.0], activity=[(0.0, 10.0), (30.0, 40.0)])
+    assert times == [0.0, 5.0, 30.0]
+
+
+def test_interpolated_lines_spread_over_sung_islands():
+    activity = [(0.0, 2.0), (10.0, 12.0), (20.0, 22.0)]
+    times = interpolate_missing([0.0, None, None, 20.0], activity=activity)
+    assert times[0] == 0.0 and times[3] == 20.0
+    assert 0.0 <= times[1] <= 2.0
+    assert 10.0 <= times[2] <= 12.0
+
+
+def test_a_line_landing_in_a_gap_moves_to_the_next_onset():
+    times = interpolate_missing([0.0, None, 16.0], activity=[(0.0, 1.0), (15.0, 16.0)])
+    assert times[1] == 15.0  # the onset, not 8.0
+
+
+def test_head_extrapolation_stops_at_the_first_onset():
+    # song opens with a 30 s instrumental; the first line was not matched
+    activity = [(30.0, 40.0), (50.0, 60.0)]
+    times = interpolate_missing([None, 32.0, 34.0], activity=activity)
+    assert 29.0 <= times[0] <= 32.0  # just before the vocal, not 30.0 s early
+
+
+def test_head_extrapolation_with_both_anchors_in_one_silence():
+    # the only two anchors sit in the same silence, so the sung gap between
+    # them is zero; extrapolating the head through sung time maps it onto the
+    # next vocal onset, past both anchors, and monotonicity drags them there.
+    activity = [(0.0, 10.0), (30.0, 40.0)]
+    times = interpolate_missing([None, 15.0, 20.0], activity=activity)
+    assert times[1] == 15.0
+    assert times[2] == 20.0
+    assert times[0] <= 15.0
+    assert enforce_monotonic(times) == times
+
+
+def test_confident_lines_keep_their_times_even_inside_a_gap():
+    activity = [(0.0, 10.0), (30.0, 40.0)]
+    times = interpolate_missing([5.0, 15.0, None, 35.0], activity=activity)
+    assert times[0] == 5.0
+    assert times[1] == 15.0  # an anchor is never moved out of a silent stretch
+
+
+def test_two_anchors_inside_one_silent_gap_keep_their_times():
+    # both anchors sit in the same silence, so sung time maps them to the same
+    # coordinate and has nothing to say about what lies between them. Mapping
+    # through it anyway throws the middle line forward onto the next onset,
+    # past the second anchor, and monotonicity then drags that anchor with it.
+    activity = [(0.0, 10.0), (30.0, 40.0)]
+    times = interpolate_missing([15.0, None, 20.0], activity=activity)
+    assert times[0] == 15.0
+    assert times[2] == 20.0
+    assert 15.0 <= times[1] <= 20.0
+    assert enforce_monotonic(times) == times
+
+
+def test_no_anchors_spreads_across_sung_time():
+    activity = [(0.0, 1.0), (50.0, 60.0)]
+    times = interpolate_missing([None, None, None], duration=60.0, activity=activity)
+    assert times[0] <= 1.0 or times[0] >= 50.0
+    assert all(50.0 <= t <= 60.0 for t in times[1:])
+
+
 # ── align (end to end with mock) ─────────────────────────────────────────────
 
 
@@ -99,7 +169,7 @@ def test_align_end_to_end_with_canned_words():
     backend = MockBackend(
         words_for(("Hello", 10.0), ("world", 10.5), ("Goodbye", 50.0), ("moon", 50.5))
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
     assert [t.text for t in timings] == lines
     assert timings[0].time == 10.0
     assert timings[2].time == 50.0
@@ -108,22 +178,48 @@ def test_align_end_to_end_with_canned_words():
     assert isinstance(timings[0], LineTiming)
 
 
-def test_align_low_confidence_time_is_interpolated_but_conf_reported():
-    lines = ["Hello there world friend", "Second line okay", "Third line okay"]
-    # line 0 matches only 1 of 4 tokens (conf 0.9 * 0.25 = 0.225 < 0.5) at a
-    # bogus late time; lines 1-2 are solid anchors
-    backend = MockBackend(
+def _one_weak_line_backend(weak_at=55.0):
+    # line 0 matches only 1 of 4 tokens (conf 0.9 * 0.25 = 0.225); lines 1-2
+    # are solid anchors at 20.0 and 40.0
+    return MockBackend(
         words_for(
-            ("hello", 55.0),
+            ("hello", weak_at),
             ("second", 20.0), ("line", 20.4), ("okay", 20.8),
             ("third", 40.0), ("line", 40.4), ("okay", 40.8),
         )
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+
+
+def test_align_low_confidence_time_is_interpolated_but_conf_reported():
+    lines = ["Hello there world friend", "Second line okay", "Third line okay"]
+    timings = align(
+        AUDIO, lines, _one_weak_line_backend(), duration=60.0, min_confidence=0.5, lead=0.0
+    )
     assert timings[0].time < 20.0  # extrapolated before first anchor, not 55.0
     assert 0.0 < timings[0].confidence < 0.5
     assert timings[1].time == 20.0
     assert timings[2].time == 40.0
+
+
+def test_align_keeps_a_weak_match_above_the_default_threshold():
+    # 0.225 is weak enough to render as "check this line" but is still
+    # evidence; the default threshold keeps it rather than interpolating
+    lines = ["Hello there world friend", "Second line okay", "Third line okay"]
+    timings = align(AUDIO, lines, _one_weak_line_backend(weak_at=10.0), duration=60.0, lead=0.0)
+    assert timings[0].time == 10.0
+    assert timings[0].confidence == 0.225
+
+
+def test_a_weak_anchor_never_drags_confident_lines():
+    # the weak line matched at a bogus 55.0, after two lines matched at 20.0
+    # and 40.0 with four times its confidence. Monotonicity would otherwise
+    # clamp both strong lines forward to 55.0 — one bad anchor pinning a whole
+    # track. The weak anchor loses instead.
+    lines = ["Hello there world friend", "Second line okay", "Third line okay"]
+    timings = align(AUDIO, lines, _one_weak_line_backend(), duration=60.0, lead=0.0)
+    assert timings[1].time == 20.0
+    assert timings[2].time == 40.0
+    assert timings[0].time <= 20.0
 
 
 def test_align_output_is_monotonic_and_clamped():
@@ -135,7 +231,7 @@ def test_align_output_is_monotonic_and_clamped():
             ("line", 99.0), ("c", 99.2), ("here", 99.4),
         )
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
     times = [t.time for t in timings]
     assert times == sorted(times)
     assert all(0.0 <= t <= 60.0 for t in times)
@@ -158,7 +254,7 @@ def test_align_ignores_backing_vocal_echoes():
             ("Walk", 20.0), ("away", 20.4), ("now", 20.8),
         )
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
     assert timings[0].time == 10.0
     assert timings[0].confidence > 0.8
     assert timings[0].text == "Keep your lips sealed (lips sealed)"  # text kept
@@ -173,15 +269,82 @@ def test_align_pure_adlib_line_is_interpolated():
             ("Third", 30.0), ("line", 30.3), ("here", 30.6),
         )
     )
-    timings = align(AUDIO, lines, backend, duration=60.0)
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
     assert 10.0 < timings[1].time < 30.0
     assert timings[1].confidence == 0.0
 
 
+def test_align_keeps_interpolated_lines_out_of_the_instrumental():
+    lines = ["First line here", "Unmatched middle line", "Third line here"]
+    backend = MockBackend(
+        words_for(
+            ("First", 5.0), ("line", 5.3), ("here", 5.6),
+            ("Third", 55.0), ("line", 55.3), ("here", 55.6),
+        ),
+        # nothing is sung between 8 s and 50 s
+        vocal_activity=[(4.0, 8.0), (50.0, 58.0)],
+    )
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
+    assert timings[0].time == 5.0
+    assert timings[2].time == 55.0
+    assert 4.0 <= timings[1].time <= 8.0 or 50.0 <= timings[1].time <= 58.0
+
+
+def test_align_without_activity_data_interpolates_linearly():
+    lines = ["First line here", "Unmatched middle line", "Third line here"]
+    backend = MockBackend(
+        words_for(
+            ("First", 5.0), ("line", 5.3), ("here", 5.6),
+            ("Third", 55.0), ("line", 55.3), ("here", 55.6),
+        )
+    )
+    timings = align(AUDIO, lines, backend, duration=60.0, lead=0.0)
+    assert timings[1].time == 30.0
+
+
 def test_align_with_generated_mock_words_is_ordered():
     lines = ["First line of song", "Second line of song", "Third line of song"]
-    timings = align(AUDIO, lines, MockBackend(duration=180.0), duration=180.0)
+    timings = align(AUDIO, lines, MockBackend(duration=180.0), duration=180.0, lead=0.0)
     times = [t.time for t in timings]
     assert times == sorted(times)
     assert times[0] >= 0.0 and times[-1] <= 180.0
     assert all(t.confidence > 0.5 for t in timings)
+
+
+def test_output_is_pulled_earlier_by_the_lead():
+    # the alignment runs systematically late, and a lyric line should be
+    # readable a moment before it is sung
+    lines = ["Hello world", "Goodbye moon"]
+    backend = MockBackend(words_for(("Hello", 10.0), ("world", 10.5),
+                                    ("Goodbye", 50.0), ("moon", 50.5)))
+    timings = align(AUDIO, lines, backend, duration=60.0)
+    assert timings[0].time == 9.8
+    assert timings[1].time == 49.8
+
+
+def test_the_lead_never_pushes_a_line_before_the_track():
+    lines = ["Hello world", "Goodbye moon"]
+    backend = MockBackend(words_for(("Hello", 0.1), ("world", 0.5),
+                                    ("Goodbye", 50.0), ("moon", 50.5)))
+    timings = align(AUDIO, lines, backend, duration=60.0)
+    assert timings[0].time == 0.0
+    assert [t.time for t in timings] == sorted(t.time for t in timings)
+
+
+def test_a_consistent_run_outvotes_a_stronger_lone_anchor():
+    # DELIBERATE: the 0.9 anchor at 100.0 contradicts five mutually consistent
+    # anchors at 90-94, and loses despite being individually stronger. A line
+    # matched confidently onto the wrong chorus repetition looks exactly like
+    # this, and the run is the better evidence.
+    times = [0.0, 100.0, 90.0, 91.0, 92.0, 93.0, 94.0]
+    confidences = [0.9, 0.9, 0.2, 0.2, 0.2, 0.2, 0.2]
+    assert resolve_anchor_conflicts(times, confidences) == [
+        0.0, None, 90.0, 91.0, 92.0, 93.0, 94.0,
+    ]
+
+
+def test_a_lone_weak_anchor_loses_to_a_stronger_one():
+    # and the converse: nothing backs up the 0.2 outlier, so it goes
+    times = [0.0, 100.0, 90.0]
+    confidences = [0.9, 0.2, 0.9]
+    assert resolve_anchor_conflicts(times, confidences) == [0.0, None, 90.0]
