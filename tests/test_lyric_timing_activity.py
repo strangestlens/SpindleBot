@@ -77,3 +77,12 @@ def test_sustained_bleed_does_not_become_the_reference():
     intervals = intervals_from_rms(rms((0.03, 95), (1.0, 5)), HOP)
     assert len(intervals) == 1
     assert intervals[0][0] >= 9.5 - ONSET_LEAD_SECONDS
+
+
+def test_a_lone_phrase_in_a_long_instrumental_is_detected():
+    # under 1% of the track is sung. No quantile over all frames can find this:
+    # at the 90th percentile the reference is silence, and at the 99th it is
+    # still silence — the cliff just moves. The reference has to come from the
+    # loudest frames however few there are.
+    intervals = intervals_from_rms(rms((0.5, 9), (0.0, 991)), HOP)
+    assert intervals == [(0.0, 0.9)]

@@ -14,6 +14,7 @@ from it lives here, pure and unit-testable.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from statistics import median
 
 # Frames quieter than this fraction of the track's loud-vocal reference
 # (~-26 dB) count as silence. A relative threshold is necessary because a
@@ -21,14 +22,17 @@ from collections.abc import Sequence
 # level that varies per track.
 SILENCE_RATIO = 0.05
 
-# Quantile taken as "this is how loud this track gets when someone is singing".
-# The 99th rather than the max, so one percussive plosive cannot set the scale;
-# and high rather than middling, because the share of a track that is sung
-# varies enormously. A 90th percentile reads a mostly-instrumental track's own
-# noise floor as its reference — either finding no vocal at all when the stem is
-# clean, or, when a dense mix leaves the stem humming just above any fixed
-# floor, taking that hum as the reference and calling the whole track sung.
-REFERENCE_QUANTILE = 0.99
+# The reference level — "how loud is this track when someone is singing" — is
+# the median of the loudest frames, taking as many frames as the shortest
+# stretch that would count as singing at all (MIN_ACTIVE_SECONDS).
+#
+# A quantile over every frame cannot do this job at any percentile. The share of
+# a track that is sung ranges from nearly all of it to under one percent, so
+# wherever the quantile sits, a sparser track reads its own silence as its
+# reference and reports no vocal at all; raising the percentile only moves the
+# cliff. Selecting the loudest frames has no cliff, and taking their median
+# rather than their maximum keeps a lone percussive transient from setting the
+# scale.
 
 # Sung-through gaps (breaths, stops between words) are shorter than this;
 # only longer silences separate one sung stretch from the next.
@@ -42,11 +46,6 @@ MIN_ACTIVE_SECONDS = 0.3
 ONSET_LEAD_SECONDS = 0.15
 
 
-def _quantile(values: Sequence[float], q: float) -> float:
-    ordered = sorted(values)
-    return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
-
-
 def intervals_from_rms(
     rms: Sequence[float], hop_seconds: float
 ) -> list[tuple[float, float]]:
@@ -57,7 +56,8 @@ def intervals_from_rms(
     """
     if not rms or hop_seconds <= 0:
         return []
-    threshold = _quantile(rms, REFERENCE_QUANTILE) * SILENCE_RATIO
+    window = max(1, round(MIN_ACTIVE_SECONDS / hop_seconds))
+    threshold = median(sorted(rms, reverse=True)[:window]) * SILENCE_RATIO
     if threshold <= 0:
         return []
 

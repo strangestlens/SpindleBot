@@ -158,3 +158,29 @@ def test_retime_missing_ai_deps_returns_int_not_systemexit(
     audio, lrc = track
     assert main(["retime", str(audio), str(lrc)]) == 2  # returns, never raises
     assert "setup-ai.sh" in capsys.readouterr().err
+
+
+def test_model_flag_reaches_the_backend(monkeypatch):
+    # the CLI tests otherwise only exercise --backend mock, so nothing checks
+    # that --model survives the trip from the parser into the real backend
+    import lyric_timing.cli as cli
+    from lyric_timing.backends import torchaudio_backend
+
+    seen = {}
+
+    class Spy:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(cli, "_ai_deps_available", lambda: True)
+    monkeypatch.setattr(torchaudio_backend, "TorchaudioBackend", Spy)
+
+    args = cli.build_parser().parse_args(
+        ["retime", "a.flac", "b.lrc", "--model", "mms_fa"]
+    )
+    cli._make_backend(args, 100.0)
+    assert seen["model"] == "mms_fa"
+
+    args = cli.build_parser().parse_args(["retime", "a.flac", "b.lrc"])
+    cli._make_backend(args, 100.0)
+    assert seen["model"] == "wav2vec2_en"
