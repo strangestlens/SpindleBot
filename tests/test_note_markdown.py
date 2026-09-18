@@ -322,3 +322,25 @@ def test_unrepresentable_respects_root_level():
 def test_the_sample_corpus_is_fully_representable():
     doc = parse(FIXTURE.read_text(encoding="utf-8"), root_level=2)
     assert unrepresentable(doc.notes, root_level=2) == ()
+
+
+# ── root-level bounds (review round 3, PR #74) ──────────────────────────────
+
+@pytest.mark.parametrize("bad", [0, 5, 6, -1])
+def test_an_out_of_range_root_level_is_refused(bad):
+    """A track sits two levels below the root and markdown stops at six `#`, so
+    root level 5 renders `####### Track` — which nothing can parse back."""
+    notes = [_note(NoteSubjectKind.TRACK, "b", artist="A", album="B", track="C")]
+    with pytest.raises(ValueError, match="root level must be 1-4"):
+        render(notes, root_level=bad)
+    with pytest.raises(ValueError, match="root level must be 1-4"):
+        parse("# A\n\nbody\n", root_level=bad)
+
+
+def test_the_deepest_valid_root_level_still_round_trips():
+    notes = [_note(NoteSubjectKind.TRACK, "b", artist="A", album="B", track="C")]
+    out = render(notes, root_level=4)
+    assert "###### C" in out
+    assert parse(out, root_level=4).notes == tuple(notes)
+
+
