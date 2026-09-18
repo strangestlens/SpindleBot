@@ -328,3 +328,84 @@ def test_re_importing_after_the_album_is_ripped_does_not_duplicate(cfg, capsys):
         assert _json_out(capsys)["count"] == 1
     finally:
         doc.unlink(missing_ok=True)
+
+
+# ── the lossless export (review round 4, PR #74) ─────────────────────────────
+# Markdown carries prose for humans and nothing else. Tags are an OPEN set, so
+# no delimiter is safe inside one and any marker chosen can also open a line of
+# someone's actual writing — encoding them in the markdown was a mistake. Every
+# un-regenerable thing lives here instead.
+
+def _export_json(cfg, capsys, *extra) -> dict:
+    _run(cfg, "export", "--json", *extra)
+    return json.loads(capsys.readouterr().out)
+
+
+def test_json_export_carries_everything_markdown_cannot(cfg, capsys):
+    _run(cfg, "session", "start", "--title", "Sunday CDs", "--json")
+    session_id = _json_out(capsys)["id"]
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "first",
+         "--tag", "todo", "--tag", "pressing, original", "--session", str(session_id),
+         "--json")
+    note_id = _json_out(capsys)["id"]
+    _run(cfg, "edit", str(note_id), "-m", "second", "--json")
+    capsys.readouterr()
+
+    payload = _export_json(cfg, capsys)
+    assert payload["schema"] == "spindlebot.notes/1"
+    note = payload["notes"][0]
+
+    assert note["tags"] == ["pressing, original", "todo"], "a comma in a tag is a non-issue here"
+    assert note["uuid"] and note["subject_key"] and note["mbid"] == "mb-fight"
+    assert note["session"]["title"] == "Sunday CDs"
+    assert [r["seq"] for r in note["revisions"]] == [1, 2]
+    assert [r["body"] for r in note["revisions"]] == ["first", "second"]
+    assert all(r["sha256"] for r in note["revisions"])
+
+
+def test_markdown_export_carries_prose_only(cfg, capsys):
+    """And says nothing about tags — no marker, nothing to collide with."""
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "body",
+         "--tag", "todo", "--json")
+    capsys.readouterr()
+    _run(cfg, "export")
+    text = capsys.readouterr().out
+    assert "body" in text
+    assert "todo" not in text and "<!--" not in text
+
+
+def test_a_body_that_looks_like_the_old_tags_marker_is_just_prose(cfg, capsys):
+    """The marker has no meaning now, so nothing can eat a line of writing."""
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
+         "-m", "<!-- tags: not-metadata -->", "--json")
+    capsys.readouterr()
+    _run(cfg, "export")
+    exported = capsys.readouterr().out
+    assert "not-metadata" in exported
+
+
+def test_json_export_honours_filters(cfg, capsys):
+    _run(cfg, "import", str(FIXTURE), "--root-level", "2", "--json")
+    capsys.readouterr()
+    payload = _export_json(cfg, capsys, "--artist", "Old 97s")
+    assert payload["count"] == 3
+    assert {n["artist"] for n in payload["notes"]} == {"Old 97s"}, \
+        "one spelling, the library's"
+
+
+def test_json_export_of_nothing_is_still_valid_json(cfg, capsys):
+    payload = _export_json(cfg, capsys)
+    assert payload["count"] == 0 and payload["notes"] == []
+
+
+def test_writing_to_a_file_keeps_stdout_clean(cfg, capsys, tmp_path):
+    """stdout is the data channel; a status line must not end up in the file or
+    in a caller's pipe."""
+    _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs", "-m", "b", "--json")
+    out = tmp_path / "notes.json"
+    capsys.readouterr()
+    assert _run(cfg, "export", "--json", "-o", str(out)) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "1 note(s)" in captured.err
+    assert json.loads(out.read_text(encoding="utf-8"))["count"] == 1

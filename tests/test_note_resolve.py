@@ -311,3 +311,50 @@ def test_the_loose_artist_match_still_ignores_the_article():
     from spindlebot.services.note_resolve import _albums_by_loose_artist
     library = [LibraryAlbum("The Beatles", "Revolver", 1966, None)]
     assert len(_albums_by_loose_artist(library, "Beatles")) == 1
+
+
+# ── review round 5 (PR #74) ──────────────────────────────────────────────────
+
+AMBIGUOUS_ARTISTS = [
+    LibraryAlbum("The Band", "Music from Big Pink", 1968, None),
+    LibraryAlbum("Band (2)", "Something Else", 2000, None),
+]
+
+
+def test_new_does_not_paper_over_an_ambiguous_artist():
+    """`--new` says "the library is not the authority here". It does NOT say
+    "pick something" — when the name reaches two real artists, inventing a third
+    subject under the typed spelling is the guess this module refuses."""
+    r = resolve(AMBIGUOUS_ARTISTS, artist="band", allow_new=True)
+    assert r.status is ResolutionStatus.AMBIGUOUS
+    assert r.subject is None
+
+
+def test_new_does_not_paper_over_an_ambiguous_artist_on_the_album_path():
+    r = resolve(AMBIGUOUS_ARTISTS, artist="band", album="Some Record", allow_new=True)
+    assert r.status is ResolutionStatus.AMBIGUOUS
+
+
+def test_new_does_not_paper_over_an_ambiguous_RELEASE():
+    """The album is in the library twice; the caller still has to say which."""
+    r = resolve(EDITIONS, artist="Old 97s", album="Fight Songs", allow_new=True)
+    assert r.status is ResolutionStatus.AMBIGUOUS
+
+
+def test_new_still_works_when_nothing_competes():
+    """Ambiguous is not the same as absent, and only the former blocks --new."""
+    assert resolve(AMBIGUOUS_ARTISTS, artist="Kathryn Joseph", allow_new=True).ok
+
+
+def test_the_release_ambiguity_check_survives_the_real_index_path():
+    """`library_index._dedupe` collapsed two releases into one BEFORE the
+    resolver saw them, which made this whole check — and `--mbid` — dead code on
+    the actual `note add` path. Resolution is only able to refuse to guess
+    between editions it can see."""
+    from spindlebot.services.library_index import _dedupe
+    indexed = _dedupe(list(EDITIONS))
+    assert len(indexed) == 2, "distinct MBIDs must survive the index"
+    assert resolve(indexed, artist="Old 97s", album="Fight Songs").status \
+        is ResolutionStatus.AMBIGUOUS
+    assert resolve(indexed, artist="Old 97s", album="Fight Songs",
+                   mb_albumid="mb-deluxe").subject.mbid == "mb-deluxe"

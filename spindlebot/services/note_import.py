@@ -132,7 +132,7 @@ def apply_import(
             continue
         view = add_note(
             conn, subject=row.subject, body=row.parsed.body,
-            now=now, session_id=session_id, tags=list(row.parsed.tags),
+            now=now, session_id=session_id,
         )
         rows.append(ImportRow(
             row.parsed, ImportRowStatus.IMPORTED, subject=row.subject,
