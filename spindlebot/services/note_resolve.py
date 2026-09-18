@@ -159,8 +159,14 @@ def resolve(
         raise ValueError("nothing to resolve: pass --artist, --album or --track")
 
     if mb_albumid:
+        # An mbid names one release, so it is meaningless without an album, and
+        # a typo must not mint a subject keyed on a release that does not exist.
+        # Refused even under --new: `--new` is for something the library lacks,
+        # not for asserting an id nothing backs.
+        if album is None:
+            raise ValueError("--mbid identifies a release: it needs --album")
         library = [a for a in library if a.mb_albumid == mb_albumid]
-        if not library and not allow_new:
+        if not library:
             return Resolution(
                 ResolutionStatus.UNMATCHED,
                 reason=f"no album with MusicBrainz id {mb_albumid!r} in the library",
@@ -300,12 +306,13 @@ def _resolve_album(
             reason=reason,
         )
 
-    if allow_new and len({a.mb_albumid for a in _releases_of(scope, album)}) <= 1:
-        # The artist resolved, so key the new subject off the LIBRARY's spelling
-        # rather than what was typed — otherwise "Old 97s" and "Old 97's" fork
-        # into two subjects for the same unowned record. But --new must not slip
-        # past an ambiguous RELEASE either: the album is in the library twice and
-        # the caller still has to say which.
+    if allow_new and status is MatchStatus.MISSING and not _releases_of(scope, album):
+        # --new creates what is ABSENT. Gating on the status, not on how many
+        # releases share the title, is what stops it papering over an UNCERTAIN
+        # near-miss: "Fite Songs" against a library holding "Fight Songs" was
+        # creating a second subject instead of asking. The artist resolved, so
+        # key off the LIBRARY's spelling — otherwise "Old 97s" and "Old 97's"
+        # fork into two subjects for one unowned record.
         return _new_subject(canonical_artist, album, track)
 
     # When several releases share the title, THEY are the choice to offer — the

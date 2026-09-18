@@ -448,3 +448,64 @@ def test_the_markdown_export_stays_active_only(cfg, capsys):
     _run(cfg, "export")
     text = capsys.readouterr().out
     assert "kept" in text and "removed" not in text
+
+
+def test_a_duplicate_row_still_adopts_the_subject(cfg, capsys):
+    """Re-importing a wishlist note after the album is ripped reported DUPLICATE
+    and skipped the row entirely — leaving the note on its old name-derived key
+    forever. Only a brand-new body happened to trigger the re-key.
+    """
+    from spindlebot.core.notes import NoteSubjectRef
+    from spindlebot.db.connection import open_db
+    from spindlebot.services import library_index, notes as svc
+
+    conn = open_db(cfg.core.db_path)
+    svc.add_note(conn, subject=NoteSubjectRef.for_album(
+        "Loreena McKennitt", "Morada Del Corazon"), body="Look for this record.")
+    conn.commit()
+    conn.close()
+
+    doc = FIXTURE.parent / "_morada_dup.md"
+    doc.write_text("# Loreena McKennitt\n\n## Morada Del Corazon\n\nLook for this record.\n",
+                   encoding="utf-8")
+    try:
+        owned = [LibraryAlbum("Loreena McKennitt", "Morada Del Corazon", 2001, "mb-morada")]
+        library_index.load = lambda cfg, index="auto": library_index.LibraryIndex(albums=owned)
+
+        assert _run(cfg, "import", str(doc), "--json") == 0
+        assert _statuses(_json_out(capsys)) == ["duplicate"], "the body is already there"
+
+        conn = open_db(cfg.core.db_path)
+        expected = NoteSubjectRef.for_album(
+            "Loreena McKennitt", "Morada Del Corazon", "mb-morada").subject_key
+        keys = [r[0] for r in conn.execute("SELECT subject_key FROM note_subject")]
+        count = conn.execute("SELECT COUNT(*) FROM note").fetchone()[0]
+        conn.close()
+        assert keys == [expected], "re-keyed onto the identified subject"
+        assert count == 1, "and nothing duplicated"
+    finally:
+        doc.unlink(missing_ok=True)
+
+
+def test_import_validates_its_session_like_add_does(cfg, capsys, tmp_path):
+    """`add` reported `no session N`; `import` fell through to the boundary and
+    answered with a raw FOREIGN KEY error."""
+    doc = tmp_path / "n.md"
+    doc.write_text("# Old 97s\n\n## Fight Songs\n\nbody\n", encoding="utf-8")
+    assert _run(cfg, "import", str(doc), "--session", "999", "--json") == 1
+    error = _json_out(capsys)["error"]
+    assert "no session 999" in error and "FOREIGN KEY" not in error
+
+
+def test_a_duplicate_only_import_does_not_open_an_empty_session(cfg, capsys, tmp_path):
+    """The adoption pass has to run with nothing READY, but a session with no
+    notes in it is noise in the listening log."""
+    _run(cfg, "import", str(FIXTURE), "--root-level", "2", "--json")
+    capsys.readouterr()
+    _run(cfg, "sessions", "--json")
+    before = _json_out(capsys)["count"]
+
+    assert _run(cfg, "import", str(FIXTURE), "--root-level", "2", "--json") == 0
+    assert set(_statuses(_json_out(capsys))) == {"duplicate"}
+    _run(cfg, "sessions", "--json")
+    assert _json_out(capsys)["count"] == before

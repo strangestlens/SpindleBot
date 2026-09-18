@@ -42,23 +42,58 @@ class NoteView:
         return self.subject.label
 
 
-def _subject_row(conn, subject: NoteSubjectRef, now: int) -> NoteSubject:
-    """Get-or-create the subject, ADOPTING one the same work was filed under
-    before its identity sharpened.
+def find_adoptable_subject(conn, subject: NoteSubjectRef) -> NoteSubject | None:
+    """An existing UNIDENTIFIED subject that is the same work as `subject`.
 
     `album_key` prefers a MusicBrainz id, so a record's key changes the day it is
-    ripped. Without this, a note written while the record was still a wishlist
-    entry would be orphaned on a name-derived subject the moment the real one
-    resolves — the note would still exist but would stop showing up under the
-    album it is about.
+    ripped. A note written while the record was still a wishlist entry would
+    otherwise be orphaned on its name-derived subject the moment the real one
+    resolves — still in the database, but no longer showing up under the album it
+    is about.
+
+    Matching is on CANONICALIZED display fields, not on a recomputed key.
+    `alt_keys` recomputes through `album_key`, which only lowercases and strips,
+    so a wishlist typed as "Old 97s" did not match a later library row spelling it
+    "Old 97's" — the same normalization trap as everywhere else on this branch,
+    inside the very code meant to prevent a fork. `alt_keys` stays as the exact
+    fast path; this is the fold that actually decides.
+
+    Only a subject with NO mbid is adoptable, and only BY one that has an mbid.
+    That is what keeps two genuinely different releases — same artist, same title,
+    different ids — from being merged into each other.
     """
+    if not subject.mbid:
+        return None
+    for previous_key in subject.alt_keys:
+        found = note_subject_repo.get(conn, subject.kind, previous_key)
+        if found is not None and not found.mbid:
+            return found
+    want = (
+        artist_key(subject.artist_name),
+        text_key(subject.album_title),
+        text_key(subject.track_title),
+    )
+    for row in note_subject_repo.list_all(conn, subject.kind):
+        if row.mbid:
+            continue
+        if (artist_key(row.artist_name), text_key(row.album_title),
+                text_key(row.track_title)) == want:
+            return row
+    return None
+
+
+def adopt_subject(conn, subject: NoteSubjectRef, now: int | None = None) -> NoteSubject:
+    """Get-or-create the subject, re-keying an earlier unidentified one onto it."""
+    now = now if now is not None else _now()
     if note_subject_repo.get(conn, subject.kind, subject.subject_key) is None:
-        for previous_key in subject.alt_keys:
-            legacy = note_subject_repo.get(conn, subject.kind, previous_key)
-            if legacy is not None:
-                note_subject_repo.rekey(conn, legacy.id, subject.subject_key)
-                break
+        legacy = find_adoptable_subject(conn, subject)
+        if legacy is not None:
+            note_subject_repo.rekey(conn, legacy.id, subject.subject_key)
     return note_subject_repo.upsert(conn, subject, now)
+
+
+def _subject_row(conn, subject: NoteSubjectRef, now: int) -> NoteSubject:
+    return adopt_subject(conn, subject, now)
 
 
 def _view(conn, note: Note) -> NoteView:

@@ -379,10 +379,17 @@ consequences that are easy to undo by accident:
 
 **A subject's key changes when its identity sharpens**, because `album_key`
 prefers a MusicBrainz id — so a note written before an album was ripped must be
-ADOPTED onto the real subject (`NoteSubjectRef.alt_keys` +
-`note_subject_repo.rekey`), or it is silently orphaned on a key nothing resolves
-to. Adoption only runs toward the MBID-backed key; a name-keyed ref cannot guess
-an id it has never seen.
+ADOPTED onto the real subject, or it is silently orphaned on a key nothing
+resolves to. `services/notes.find_adoptable_subject` decides, and it matches on
+CANONICALIZED DISPLAY FIELDS, not on a recomputed key: `alt_keys` goes through
+`album_key`, which only lowercases and strips, so a wishlist typed "Old 97s" did
+not match a later library row spelling it "Old 97's". Only an UNIDENTIFIED
+subject is adoptable and only BY one carrying an mbid, which is what keeps two
+real editions from merging.
+
+`note import` must adopt too: a DUPLICATE row (body already present) still needs
+its subject re-keyed, and `apply_import` therefore runs even when nothing is
+READY. A session is only opened when something will be written into it.
 
 **No user input may reach a traceback.** `cmd_note` ends in a boundary that
 turns every user-causable failure — a bad `-F` path, non-UTF-8 bytes, a missing
@@ -418,9 +425,16 @@ release disambiguation — a resolver can only refuse to guess between editions 
 can see. A row with no MBID is kept only when its group has no identified
 release at all, which is the beets-vs-DB overlap the function exists for.
 
-**`--new` means "the library is not the authority", never "pick one".** It is
-blocked when the artist matches several real artists, and when the album matches
-several releases; only a genuinely absent subject may be created.
+**`--new` means "the library is not the authority", never "pick one".** Gated on
+the match STATUS being MISSING with no exact releases — not on how many releases
+share a title, which let an UNCERTAIN near-miss ("Fite Songs" against a library
+holding "Fight Songs") mint a second subject. Also blocked when the artist
+matches several real artists. `--mbid` is a precise claim: it requires
+`--album`, and an unknown id is refused even under `--new` rather than dropped.
+
+**`--new` skips an UNAVAILABLE library (RuntimeError), never an invalid one.** A
+mistyped `--index` raises ValueError and must reach `fail()`; swallowing it
+silently consulted a different backend than the one asked for.
 
 **Dedup must look where adoption will land.** `note import` checks
 `subject.alt_keys` as well as the current key; otherwise re-importing a note

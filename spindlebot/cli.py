@@ -1198,6 +1198,21 @@ def _note_missing_values(args: list[str]) -> list[str]:
     return missing
 
 
+def _note_missing_session(conn, raw: str | None) -> str | None:
+    """Complain if a named session does not exist. Shared by `add` and `import`.
+
+    `add` validated it and `import` did not, so `note import --session 999` fell
+    through to the boundary handler and answered with a raw FOREIGN KEY error
+    instead of something a person can act on.
+    """
+    if not raw:
+        return None
+    from spindlebot.db.repositories import note_repo
+    if note_repo.get_session(conn, int(raw)) is None:
+        return f"no session {raw} — `note session start` makes one"
+    return None
+
+
 def _note_usage_error(sub: str, args: list[str]) -> str | None:
     """Validate one subcommand's flags and operands, or return the complaint."""
     spec = _NOTE_SPECS[sub]
@@ -1314,7 +1329,6 @@ def cmd_note(cfg, args: list[str]) -> int:
     from spindlebot.core.enums import NoteSubjectKind
     from spindlebot.core.notes import canonicalize_body
     from spindlebot.db.connection import open_db
-    from spindlebot.db.repositories import note_repo
     from spindlebot.services import notes as svc
     from spindlebot.services.note_resolve import ResolutionStatus
 
@@ -1369,10 +1383,13 @@ def cmd_note(cfg, args: list[str]) -> int:
             try:
                 from spindlebot.services import library_index
                 library = library_index.load(cfg, _note_opt(rest, "--index") or "auto").albums
-            except (RuntimeError, ValueError) as e:
-                # Without --new there is nothing to resolve against and a note
-                # would be filed under an unverified subject; with it, the user
-                # has already said the library is not the authority here.
+            except RuntimeError as e:
+                # A backend being unavailable is skippable under --new, which
+                # says the library is not the authority for this note. Without
+                # --new there is nothing to resolve against and the note would be
+                # filed under an unverified subject. A ValueError is NOT caught:
+                # an unknown --index is the user's mistake, and silently ignoring
+                # the index they asked for is never the right answer.
                 if not allow_new:
                     return fail(f"cannot read the library: {e}")
 
@@ -1396,8 +1413,9 @@ def cmd_note(cfg, args: list[str]) -> int:
                 return fail("empty note, nothing written")
 
             session_raw = _note_opt(rest, "--session")
-            if session_raw and note_repo.get_session(conn, int(session_raw)) is None:
-                return fail(f"no session {session_raw} — `note session start` makes one")
+            missing_session = _note_missing_session(conn, session_raw)
+            if missing_session:
+                return fail(missing_session)
             view = svc.add_note(
                 conn,
                 subject=resolution.subject,
@@ -1568,9 +1586,13 @@ def cmd_note(cfg, args: list[str]) -> int:
             try:
                 from spindlebot.services import library_index
                 library = library_index.load(cfg, _note_opt(rest, "--index") or "auto").albums
-            except (RuntimeError, ValueError) as e:
+            except RuntimeError as e:
                 if not allow_new:
                     return fail(f"cannot read the library: {e}")
+
+            missing_session = _note_missing_session(conn, _note_opt(rest, "--session"))
+            if missing_session:
+                return fail(missing_session)
 
             plan = plan_import(conn, library, list(document.notes), allow_new=allow_new)
             dry_run = "--dry-run" in rest
@@ -1589,11 +1611,19 @@ def cmd_note(cfg, args: list[str]) -> int:
                 f"with a grouping heading, try --root-level {root_level + 1}"
                 if all_unresolved else ""
             )
-            if not dry_run and not blocked and plan.writable:
+            # Runs even with nothing READY: a DUPLICATE row may still need its
+            # subject adopted onto the identified key. A session is only opened
+            # when something will actually be written into it.
+            if not dry_run and not blocked:
                 session_id_raw = _note_opt(rest, "--session")
-                session_id = int(session_id_raw) if session_id_raw else svc.start_session(
-                    conn, title=_note_opt(rest, "--title") or source.name
-                ).id
+                if session_id_raw:
+                    session_id = int(session_id_raw)
+                elif plan.writable:
+                    session_id = svc.start_session(
+                        conn, title=_note_opt(rest, "--title") or source.name
+                    ).id
+                else:
+                    session_id = None
                 plan = apply_import(conn, plan, session_id=session_id)
                 conn.commit()
 

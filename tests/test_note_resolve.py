@@ -358,3 +358,35 @@ def test_the_release_ambiguity_check_survives_the_real_index_path():
         is ResolutionStatus.AMBIGUOUS
     assert resolve(indexed, artist="Old 97s", album="Fight Songs",
                    mb_albumid="mb-deluxe").subject.mbid == "mb-deluxe"
+
+
+# ── review round 6 (PR #74) ──────────────────────────────────────────────────
+
+def test_mbid_without_an_album_is_a_usage_error():
+    """An mbid names one RELEASE, so it is meaningless on an artist query — and
+    it was silently ignored there."""
+    with pytest.raises(ValueError, match="needs --album"):
+        resolve(LIBRARY, artist="Old 97s", mb_albumid="mb-fight")
+
+
+def test_an_unknown_mbid_is_refused_even_under_new():
+    """`--new` is for something the library lacks, not for asserting a release id
+    nothing backs. It was being dropped, so the subject came out name-keyed and
+    the requested id vanished."""
+    r = resolve(LIBRARY, artist="Old 97s", album="Fight Songs",
+                mb_albumid="mb-typo", allow_new=True)
+    assert not r.ok and "MusicBrainz id" in r.reason
+
+
+def test_new_does_not_slip_past_an_uncertain_title():
+    """"Fite Songs" against a library holding "Fight Songs" was creating a second
+    subject instead of asking. The gate is the match STATUS, not how many
+    releases share the title."""
+    r = resolve(LIBRARY, artist="Old 97s", album="Fite Songs", allow_new=True)
+    assert r.status is ResolutionStatus.AMBIGUOUS
+    assert r.subject is None
+
+
+def test_new_still_creates_a_genuinely_absent_album():
+    r = resolve(LIBRARY, artist="Old 97s", album="Wreck Your Life", allow_new=True)
+    assert r.ok and r.subject.album_title == "Wreck Your Life"

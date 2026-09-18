@@ -71,7 +71,9 @@ something you do not own yet.
 When you later rip that record, the note follows it. A subject's key prefers the
 MusicBrainz id, so it changes the day the album enters the library — the earlier
 note's subject is re-keyed to match rather than left behind, so both notes stay
-under the same album.
+under the same album. That holds even if you spelled it differently the first
+time ("Old 97s" before, "Old 97's" in the library), and re-importing the same
+file also performs the re-key.
 
 If two of your releases share an artist and title but differ by MusicBrainz id —
 an original and a reissue — resolution refuses rather than picking one, since

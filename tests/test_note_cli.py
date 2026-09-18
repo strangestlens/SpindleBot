@@ -668,3 +668,23 @@ def test_a_valid_session_still_attaches(cfg, capsys):
     assert _run(cfg, "add", "--artist", "Old 97s", "--album", "Fight Songs",
                 "-m", "x", "--session", str(session_id), "--json") == 0
     assert _json_out(capsys)["session_id"] == session_id
+
+
+def test_an_unknown_index_is_a_usage_error_even_with_new(cfg, capsys, monkeypatch):
+    """`--new` skips a library that is UNAVAILABLE; it must not swallow a
+    mistyped `--index`, which silently ignored the backend the user asked for."""
+    from spindlebot.services import library_index
+    monkeypatch.setattr(library_index, "load", lambda cfg, index="auto": (
+        library_index.LibraryIndex(albums=list(LIBRARY)) if index in library_index.KNOWN_INDEXES
+        else (_ for _ in ()).throw(ValueError(f"unknown library index {index!r}"))))
+    assert _run(cfg, "add", "--artist", "Nobody", "--album", "Nothing",
+                "--index", "typo", "--new", "-m", "x", "--json") == 1
+    assert "unknown library index" in _json_out(capsys)["error"]
+
+
+def test_a_missing_backend_is_still_skippable_with_new(cfg, capsys, monkeypatch):
+    from spindlebot.services import library_index
+    monkeypatch.setattr(library_index, "load", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("beets is not installed")))
+    assert _run(cfg, "add", "--artist", "Nobody", "--album", "Nothing",
+                "--new", "-m", "x", "--json") == 0
