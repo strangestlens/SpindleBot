@@ -69,11 +69,8 @@ def _existing_subject(conn, subject: NoteSubjectRef):
     found = note_subject_repo.get(conn, subject.kind, subject.subject_key)
     if found is not None:
         return found
-    for previous_key in subject.alt_keys:
-        found = note_subject_repo.get(conn, subject.kind, previous_key)
-        if found is not None:
-            return found
-    return None
+    from spindlebot.services.notes import find_adoptable_subject
+    return find_adoptable_subject(conn, subject)
 
 
 def plan_import(
@@ -123,10 +120,19 @@ def apply_import(
     conn, plan: ImportPlan, *, session_id: int | None = None, now: int | None = None
 ) -> ImportPlan:
     """Write every READY row. The caller commits."""
-    from spindlebot.services.notes import add_note
+    from spindlebot.services.notes import add_note, adopt_subject
 
     rows = []
     for row in plan.rows:
+        if row.status is ImportRowStatus.DUPLICATE and row.subject is not None:
+            # The body is already there, but the SUBJECT may still be the
+            # name-derived one from before the album was ripped. Skipping the row
+            # outright left it on the old key forever — only a brand-new body
+            # happened to trigger the re-key. Nothing is written twice; the
+            # adoption is idempotent.
+            adopt_subject(conn, row.subject, now)
+            rows.append(row)
+            continue
         if row.status is not ImportRowStatus.READY:
             rows.append(row)
             continue

@@ -248,3 +248,52 @@ def test_tagging_a_missing_note_raises_lookup_error_not_an_integrity_error(conn)
         svc.tag_note(conn, 999, ["todo"])
     with pytest.raises(LookupError):
         svc.untag_note(conn, 999, "todo")
+
+
+# ── review round 6 (PR #74): adoption must survive spelling drift ────────────
+
+def test_adoption_survives_a_spelling_difference(conn):
+    """A wishlist note typed "Old 97s" while the library was empty, then the
+    album is ripped and the library spells it "Old 97's" with an MBID.
+
+    `alt_keys` recomputes through `album_key`, which only lowercases and strips —
+    so the two keys differed and the note forked. The FIFTH instance of this
+    normalization trap on this branch, inside the code written to prevent a fork.
+    Matching is on canonicalized display fields now.
+    """
+    typed = NoteSubjectRef.for_album("Old 97s", "Fight Songs")
+    before = svc.add_note(conn, subject=typed, body="Look for this.", now=100)
+
+    owned = NoteSubjectRef.for_album("Old 97's", "Fight Songs", "mb-fight")
+    after = svc.add_note(conn, subject=owned, body="Heard it.", now=200)
+
+    assert before.subject.id == after.subject.id
+    assert len(svc.list_notes(conn, album="Fight Songs")) == 2
+
+
+def test_adoption_never_merges_two_identified_releases(conn):
+    """Only an UNIDENTIFIED subject is adoptable, and only by one with an mbid —
+    otherwise an original and a reissue would collapse into each other."""
+    original = svc.add_note(conn, subject=NoteSubjectRef.for_album(
+        "Old 97's", "Fight Songs", "mb-original"), body="the original", now=100)
+    reissue = svc.add_note(conn, subject=NoteSubjectRef.for_album(
+        "Old 97's", "Fight Songs", "mb-deluxe"), body="the reissue", now=200)
+    assert original.subject.id != reissue.subject.id
+
+
+def test_a_nameless_subject_is_not_adopted_by_an_unrelated_one(conn):
+    """Canonicalized display matching must not collapse different albums."""
+    a = svc.add_note(conn, subject=NoteSubjectRef.for_album(
+        "Old 97's", "Fight Songs"), body="one", now=100)
+    b = svc.add_note(conn, subject=NoteSubjectRef.for_album(
+        "Old 97's", "Too Far to Care", "mb-tftc"), body="two", now=200)
+    assert a.subject.id != b.subject.id
+
+
+def test_adoption_is_idempotent(conn):
+    owned = NoteSubjectRef.for_album("Old 97's", "Fight Songs", "mb-fight")
+    svc.add_note(conn, subject=NoteSubjectRef.for_album("Old 97s", "Fight Songs"),
+                 body="wishlist", now=100)
+    first = svc.adopt_subject(conn, owned, now=200)
+    second = svc.adopt_subject(conn, owned, now=300)
+    assert first.id == second.id
