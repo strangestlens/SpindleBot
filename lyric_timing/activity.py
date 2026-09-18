@@ -21,16 +21,14 @@ from collections.abc import Sequence
 # level that varies per track.
 SILENCE_RATIO = 0.05
 
-# Quantile taken as "this is how loud the vocal is when present". The 90th
-# rather than the max: a single percussive plosive should not set the scale.
-# It is taken over the loud frames only — a track can easily be more than 90%
-# instrumental, and a quantile over every frame would then read the track's own
-# silence as its reference level and find no vocal at all.
-REFERENCE_QUANTILE = 0.9
-
-# Frames quieter than this fraction of the loudest frame don't get a say in
-# where the reference level sits.
-QUIET_FLOOR_RATIO = 0.02
+# Quantile taken as "this is how loud this track gets when someone is singing".
+# The 99th rather than the max, so one percussive plosive cannot set the scale;
+# and high rather than middling, because the share of a track that is sung
+# varies enormously. A 90th percentile reads a mostly-instrumental track's own
+# noise floor as its reference — either finding no vocal at all when the stem is
+# clean, or, when a dense mix leaves the stem humming just above any fixed
+# floor, taking that hum as the reference and calling the whole track sung.
+REFERENCE_QUANTILE = 0.99
 
 # Sung-through gaps (breaths, stops between words) are shorter than this;
 # only longer silences separate one sung stretch from the next.
@@ -59,11 +57,7 @@ def intervals_from_rms(
     """
     if not rms or hop_seconds <= 0:
         return []
-    peak = max(rms)
-    if peak <= 0:
-        return []
-    loud = [v for v in rms if v > peak * QUIET_FLOOR_RATIO]
-    threshold = _quantile(loud, REFERENCE_QUANTILE) * SILENCE_RATIO if loud else 0.0
+    threshold = _quantile(rms, REFERENCE_QUANTILE) * SILENCE_RATIO
     if threshold <= 0:
         return []
 

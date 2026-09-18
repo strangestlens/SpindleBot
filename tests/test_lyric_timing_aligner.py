@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from lyric_timing.aligner import (
+    resolve_anchor_conflicts,
     LineTiming,
     align,
     assign_words_to_lines,
@@ -119,6 +120,18 @@ def test_head_extrapolation_stops_at_the_first_onset():
     activity = [(30.0, 40.0), (50.0, 60.0)]
     times = interpolate_missing([None, 32.0, 34.0], activity=activity)
     assert 29.0 <= times[0] <= 32.0  # just before the vocal, not 30.0 s early
+
+
+def test_head_extrapolation_with_both_anchors_in_one_silence():
+    # the only two anchors sit in the same silence, so the sung gap between
+    # them is zero; extrapolating the head through sung time maps it onto the
+    # next vocal onset, past both anchors, and monotonicity drags them there.
+    activity = [(0.0, 10.0), (30.0, 40.0)]
+    times = interpolate_missing([None, 15.0, 20.0], activity=activity)
+    assert times[1] == 15.0
+    assert times[2] == 20.0
+    assert times[0] <= 15.0
+    assert enforce_monotonic(times) == times
 
 
 def test_confident_lines_keep_their_times_even_inside_a_gap():
@@ -316,3 +329,22 @@ def test_the_lead_never_pushes_a_line_before_the_track():
     timings = align(AUDIO, lines, backend, duration=60.0)
     assert timings[0].time == 0.0
     assert [t.time for t in timings] == sorted(t.time for t in timings)
+
+
+def test_a_consistent_run_outvotes_a_stronger_lone_anchor():
+    # DELIBERATE: the 0.9 anchor at 100.0 contradicts five mutually consistent
+    # anchors at 90-94, and loses despite being individually stronger. A line
+    # matched confidently onto the wrong chorus repetition looks exactly like
+    # this, and the run is the better evidence.
+    times = [0.0, 100.0, 90.0, 91.0, 92.0, 93.0, 94.0]
+    confidences = [0.9, 0.9, 0.2, 0.2, 0.2, 0.2, 0.2]
+    assert resolve_anchor_conflicts(times, confidences) == [
+        0.0, None, 90.0, 91.0, 92.0, 93.0, 94.0,
+    ]
+
+
+def test_a_lone_weak_anchor_loses_to_a_stronger_one():
+    # and the converse: nothing backs up the 0.2 outlier, so it goes
+    times = [0.0, 100.0, 90.0]
+    confidences = [0.9, 0.2, 0.9]
+    assert resolve_anchor_conflicts(times, confidences) == [0.0, None, 90.0]

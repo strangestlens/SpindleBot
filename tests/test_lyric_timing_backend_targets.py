@@ -6,7 +6,10 @@ characters after it, no word-separator token, star appended by us.
 
 import logging
 
-from lyric_timing.backends.torchaudio_backend import build_targets
+from lyric_timing.backends.torchaudio_backend import (
+    TorchaudioBackend,
+    build_targets,
+)
 
 LABELS = ("-", *"aienoutsrmkldghybpwcvjzf'qx")
 DICT = {c: i for i, c in enumerate(LABELS) if i > 0}
@@ -102,3 +105,38 @@ def test_a_few_unmappable_words_do_not_warn(caplog):
                          logger="lyric_timing.backends.torchaudio_backend"):
         build_targets("hey you run 1999 party on", DICT, star=STAR)
     assert caplog.text == ""
+
+
+class _FakeBundle:
+    """Stands in for a torchaudio bundle: only get_labels is consulted."""
+
+    def __init__(self, labels):
+        self._labels = labels
+
+    def get_labels(self, star=None, blank="-"):
+        return self._labels
+
+
+def test_vocabulary_for_the_english_model():
+    # ('-', '|', 'E', 'T'): blank at 0, word separator at 1, both reserved
+    d, separator, star = TorchaudioBackend(
+        model="wav2vec2_en")._vocabulary(_FakeBundle(("-", "|", "E", "T")))
+    assert separator == 1
+    assert d == {"e": 2, "t": 3}
+    assert star == 4
+
+
+def test_vocabulary_for_the_multilingual_model():
+    # MMS_FA has no word separator and its labels are already lowercase
+    d, separator, star = TorchaudioBackend(
+        model="mms_fa")._vocabulary(_FakeBundle(("-", "a", "i")))
+    assert separator is None
+    assert d == {"a": 1, "i": 2}
+    assert star == 3
+
+
+def test_an_unknown_model_is_refused():
+    import pytest
+
+    with pytest.raises(ValueError, match="unknown model"):
+        TorchaudioBackend(model="whisper")

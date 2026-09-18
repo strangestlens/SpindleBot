@@ -68,3 +68,12 @@ def test_sparse_vocals_are_still_detected():
     # has to come from the loud frames, or the track's own silence sets it
     intervals = intervals_from_rms(rms((0.5, 9), (0.0, 91)), HOP)
     assert intervals == [(0.0, 0.9)]
+
+
+def test_sustained_bleed_does_not_become_the_reference():
+    # a dense mix leaves the stem humming at 3% of the vocal's level for most
+    # of the track. If that run sets the reference, the threshold drops under
+    # it and the whole instrumental reads as singing.
+    intervals = intervals_from_rms(rms((0.03, 95), (1.0, 5)), HOP)
+    assert len(intervals) == 1
+    assert intervals[0][0] >= 9.5 - ONSET_LEAD_SECONDS

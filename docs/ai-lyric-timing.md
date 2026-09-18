@@ -83,7 +83,7 @@ It keeps the lyric *text* exactly as-is and only recomputes timestamps:
    confident anchors — over *sung* time, not wall-clock time: the backend
    reports where the vocal is actually active (RMS envelope of the stem), so an
    interpolated line lands on singing rather than in the middle of an eight-bar
-   instrumental. Confident lines never move. Times are then forced monotonic
+   instrumental. A confident line keeps its measured time — nothing downstream drags it — unless a run of mutually consistent matches contradicts it, in which case the outlier loses and is interpolated. Times are then forced monotonic
    and clamped to the track.
 
 `--model` picks the acoustic model. `wav2vec2_en` (the default) is the English

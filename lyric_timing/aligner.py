@@ -169,7 +169,14 @@ def interpolate_missing(
 
     first_i, first_x = anchors[0]
     last_i, last_x = anchors[-1]
-    if last_i > first_i:
+    # With two or more anchors stranded in the same silence there is no sung
+    # time between them, so a gap measured in it is zero and every extrapolated
+    # line would map onto the same vocal onset — past the anchors themselves.
+    # Wall clock is the only information available in that case.
+    degenerate = last_i > first_i and last_x <= first_x
+    if degenerate:
+        gap = (times[last_i] - times[first_i]) / (last_i - first_i)
+    elif last_i > first_i:
         gap = (last_x - first_x) / (last_i - first_i)
     else:
         gap = FALLBACK_LINE_GAP
@@ -181,8 +188,14 @@ def interpolate_missing(
             out[i] = t
             continue
         if i < first_i:
+            if degenerate:
+                out[i] = max(0.0, times[first_i] - (first_i - i) * gap)
+                continue
             x = first_x - (first_i - i) * gap
         elif i > last_i:
+            if degenerate:
+                out[i] = max(0.0, times[last_i] + (i - last_i) * gap)
+                continue
             x = last_x + (i - last_i) * gap
         else:
             prev = next(a for a in reversed(anchors) if a[0] < i)
@@ -213,8 +226,14 @@ def resolve_anchor_conflicts(
     forward to meet it — one weak anchor pinning everything after it. Keeps the
     set of anchors with the greatest total confidence whose times are
     non-decreasing in line order; the losers become None and are interpolated
-    like any other unmatched line. This is what makes "a confident line never
-    moves" true of the whole pipeline rather than of interpolation alone.
+    like any other unmatched line.
+
+    Note what this does and does not promise. A retained anchor keeps its
+    measured time exactly — nothing downstream, monotonicity included, drags it.
+    But an anchor is not retained merely for being confident: a lone strong
+    match that contradicts a run of mutually consistent weaker ones loses to the
+    run, because a line matched confidently onto the wrong chorus repetition
+    looks precisely like that and the run is the better evidence.
     """
     anchors = [i for i, t in enumerate(times) if t is not None]
     if len(anchors) < 2:
