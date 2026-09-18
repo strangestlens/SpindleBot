@@ -384,6 +384,16 @@ ADOPTED onto the real subject (`NoteSubjectRef.alt_keys` +
 to. Adoption only runs toward the MBID-backed key; a name-keyed ref cannot guess
 an id it has never seen.
 
+**No user input may reach a traceback.** `cmd_note` ends in a boundary that
+turns every user-causable failure — a bad `-F` path, non-UTF-8 bytes, a missing
+row, a foreign-key refusal, a failed conversion — into `fail()`. This was fixed
+four times as individual instances first (`note show nope`, `note tag 999`,
+`--session nope`, `-F /nope`) before being fixed as a class; specific checks
+still come first where a better message is possible, but the floor is there so
+the next one degrades to an error rather than a stack trace. Integer options are
+listed in `_NOTE_INT_OPTIONS` and validated in one place, so a new numeric flag
+cannot reintroduce a bare `int()` on user input.
+
 **Anything the CLI does not define is an error, PER SUBCOMMAND** (`_NOTE_SPECS`).
 Silently ignoring unknown options is not lenient, it is dangerous: `note list
 --artistt X` dropped the filter and listed the whole corpus, and `note export
@@ -394,7 +404,9 @@ and print a traceback.
 
 **Two export formats, and the split is deliberate.** Markdown carries PROSE for
 humans and nothing else; `note export --json` is the lossless one (tags, uuid,
-subject key, timestamps, sessions, every revision) and the one to back up.
+subject key, timestamps, sessions, every revision, INCLUDING soft-deleted notes)
+and the one to back up. Markdown stays active-only — it cannot record deletion
+state, so re-importing a deleted note would resurrect it.
 Encoding tags into the markdown was tried and reverted: tags are an open set, so
 no delimiter is safe inside one, and any marker can also begin a line of real
 writing. Do not re-add metadata to the markdown format.

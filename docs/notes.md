@@ -212,6 +212,12 @@ It holds every un-regenerable thing — tags, the device-stable uuid, subject
 keys, timestamps, sessions, and the full append-only revision chain. Nothing
 else in this system can rebuild those rows.
 
+It also includes notes you have removed, carrying `status: "deleted"`. `note rm`
+is a status change precisely because the writing survives it, so a backup that
+dropped those would not be one. The markdown export stays active-only: it has
+nowhere to record deletion state, and re-importing a deleted note would
+silently resurrect it.
+
 Tags deliberately do *not* appear in the markdown. They were briefly encoded in
 an HTML comment there and it was a mistake: tags are an open set, so no
 delimiter is safe inside one, and any marker chosen can also begin a line of

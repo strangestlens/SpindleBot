@@ -1088,6 +1088,10 @@ _NOTE_VALUE_FLAGS = {
 _NOTE_BOOL_FLAGS = {"--json", "--new", "--all", "--history", "-",
                     "--dry-run", "--skip-unresolved"}
 
+# Options whose value is parsed as an int. Checked in one place so a new
+# numeric option cannot reintroduce a bare int() on user input.
+_NOTE_INT_OPTIONS = ("--session", "--root-level")
+
 # What each subcommand actually accepts. A SHARED flag table was not enough:
 # `note list --new` and `note export --tag todo` were accepted and then silently
 # ignored, `note list typo` dropped its operand, and `note show nope` reached a
@@ -1203,6 +1207,10 @@ def _note_usage_error(sub: str, args: list[str]) -> str | None:
     starved = _note_missing_values(args)
     if starved:
         return f"note {sub}: {' '.join(starved)} needs a value"
+    for flag in _NOTE_INT_OPTIONS:
+        value = _note_opt(args, flag)
+        if value is not None and not value.lstrip("-").isdigit():
+            return f"note {sub}: {flag} wants a number, got {value!r}"
 
     operands = _note_positionals(args)
     low, high = spec["operands"]
@@ -1301,10 +1309,12 @@ def cmd_note(cfg, args: list[str]) -> int:
     change, and `note export` exists so the writing is never trapped in SQLite.
     """
     import json as _json
+    import sqlite3 as _sqlite3
 
     from spindlebot.core.enums import NoteSubjectKind
     from spindlebot.core.notes import canonicalize_body
     from spindlebot.db.connection import open_db
+    from spindlebot.db.repositories import note_repo
     from spindlebot.services import notes as svc
     from spindlebot.services.note_resolve import ResolutionStatus
 
@@ -1386,6 +1396,8 @@ def cmd_note(cfg, args: list[str]) -> int:
                 return fail("empty note, nothing written")
 
             session_raw = _note_opt(rest, "--session")
+            if session_raw and note_repo.get_session(conn, int(session_raw)) is None:
+                return fail(f"no session {session_raw} — `note session start` makes one")
             view = svc.add_note(
                 conn,
                 subject=resolution.subject,
@@ -1646,6 +1658,12 @@ def cmd_note(cfg, args: list[str]) -> int:
                 album=_note_opt(rest, "--album"),
                 track=_note_opt(rest, "--track"),
                 kind=kind, since_utc=since,
+                # A backup that drops what you deleted is not a backup. Soft
+                # deletes are recoverable precisely because the writing survives,
+                # and the payload carries `status` so a restore can tell. Markdown
+                # stays active-only: it has nowhere to put deletion state, and
+                # re-importing a deleted note would silently resurrect it.
+                include_deleted=want_json,
             )
             # Grouped for reading, not newest-first: an exported document is
             # meant to be read (and re-imported) as a document.
@@ -1763,6 +1781,23 @@ def cmd_note(cfg, args: list[str]) -> int:
             title = item.session.title or "(untitled)"
             print(f"{item.session.id:>5}  {when}  {title}  — {item.note_count} note(s)")
         return 0
+    # THE CLASS, not another instance. Unvalidated input has produced a
+    # traceback in every review round of this command — `note show nope`, then
+    # `note tag 999`, then `--session nope`, then `-F /nope` — because each was
+    # fixed where it was found. Everything below is a failure a USER can cause,
+    # and a CLI must answer those with an error and an exit code, never a stack
+    # trace. Specific validation still comes first where a better message is
+    # possible; this is the floor.
+    except (FileNotFoundError, IsADirectoryError, PermissionError) as e:
+        return fail(f"could not read that file: {e}")
+    except UnicodeDecodeError:
+        return fail("that file is not UTF-8 text")
+    except LookupError as e:
+        return fail(str(e))
+    except _sqlite3.IntegrityError as e:
+        return fail(f"refused by the database: {e}")
+    except ValueError as e:
+        return fail(str(e))
     finally:
         conn.close()
 
