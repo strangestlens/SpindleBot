@@ -390,3 +390,25 @@ def test_new_does_not_slip_past_an_uncertain_title():
 def test_new_still_creates_a_genuinely_absent_album():
     r = resolve(LIBRARY, artist="Old 97s", album="Wreck Your Life", allow_new=True)
     assert r.ok and r.subject.album_title == "Wreck Your Life"
+
+
+def test_mbid_must_agree_with_the_rest_of_the_query():
+    """An id names one release. With a mismatched artist, `--new` fired first and
+    produced a name-keyed subject with the requested id thrown away — a precise
+    claim answered with a guess."""
+    r = resolve(LIBRARY, artist="Wrong Artist", album="An Ancient Muse",
+                mb_albumid="mb-muse", allow_new=True)
+    assert not r.ok
+    assert "mb-muse" in r.reason
+
+
+def test_mbid_with_a_mismatched_album_is_also_refused():
+    r = resolve(LIBRARY, artist="Loreena McKennitt", album="Wrong Album",
+                mb_albumid="mb-muse", allow_new=True)
+    assert not r.ok
+
+
+def test_mbid_with_a_matching_query_still_resolves():
+    r = resolve(LIBRARY, artist="Loreena McKennitt", album="An Ancient Muse",
+                mb_albumid="mb-muse", allow_new=True)
+    assert r.ok and r.subject.mbid == "mb-muse"

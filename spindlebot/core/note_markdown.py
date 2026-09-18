@@ -38,12 +38,14 @@ scope above it, because no syntax unsets a level without also setting it. So a
 note that leaves a parent level empty, following a note that filled it, re-imports
 as a child of the one above.
 
-That is not silently accepted. `unrepresentable()` reports exactly which notes
-are affected by round-tripping them, so `note export` can warn instead of
-handing back a document that reads differently than it was written. The writing
-itself is never lost — the note lands on a neighbouring subject — and the
+That is not silently accepted, but nor is it warned about: `note export` makes
+the bad ordering UNREACHABLE instead, by sorting an empty level first within its
+prefix so a note that empties a level never follows one that fills it.
+`unrepresentable()` states the limit and is asserted to stay empty under that
+sort, which is what fails if the ordering is ever changed. The writing itself is
+never lost in any case — such a note lands on a neighbouring subject — and the
 situation only arises from hand-written input that names an album or track
-without ever naming its parents.
+without naming its parents.
 """
 from __future__ import annotations
 

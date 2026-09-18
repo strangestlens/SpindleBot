@@ -68,18 +68,40 @@ def find_adoptable_subject(conn, subject: NoteSubjectRef) -> NoteSubject | None:
         found = note_subject_repo.get(conn, subject.kind, previous_key)
         if found is not None and not found.mbid:
             return found
-    want = (
-        artist_key(subject.artist_name),
-        text_key(subject.album_title),
-        text_key(subject.track_title),
+    # A legacy subject may be MISSING fields the identified one has: an
+    # album-only wishlist (`note add --album X --new`) has artist_name=None, so
+    # requiring artist_key(None) to equal the real artist key could never match
+    # and the note was stranded. An absent legacy field is treated as "not yet
+    # known" — but only when the match is otherwise UNAMBIGUOUS, since a blank
+    # field could describe several works.
+    candidates = [
+        row for row in note_subject_repo.list_all(conn, subject.kind)
+        if not row.mbid and _same_work(row, subject)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _same_work(row: NoteSubject, subject: NoteSubjectRef) -> bool:
+    """Whether an unidentified subject names the same work, field by field.
+
+    A field the legacy row never recorded does not disqualify it; a field it
+    recorded DIFFERENTLY does.
+    """
+    pairs = (
+        (row.artist_name, subject.artist_name, artist_key),
+        (row.album_title, subject.album_title, text_key),
+        (row.track_title, subject.track_title, text_key),
     )
-    for row in note_subject_repo.list_all(conn, subject.kind):
-        if row.mbid:
+    known = 0
+    for legacy, incoming, fold in pairs:
+        if legacy is None:
             continue
-        if (artist_key(row.artist_name), text_key(row.album_title),
-                text_key(row.track_title)) == want:
-            return row
-    return None
+        if fold(legacy) != fold(incoming):
+            return False
+        known += 1
+    # At least one recorded field has to agree, or a subject with every field
+    # blank would match everything.
+    return known > 0
 
 
 def adopt_subject(conn, subject: NoteSubjectRef, now: int | None = None) -> NoteSubject:
@@ -220,23 +242,21 @@ def subject_ids_for(
     string equality, so a filter can never disagree with the key it filters on —
     the same reason resolution groups by `artist_key`.
     """
-    want_artist = artist_key(artist) if artist else None
-    want_album = text_key(album) if album else None
-    want_track = text_key(track) if track else None
+    # `is None` means "no filter given". An EMPTY normalized key is a filter
+    # that happens to normalize to nothing — `--album '!!!'` has no alphanumerics
+    # — and testing truthiness skipped the predicate entirely, returning every
+    # unrelated note. Such a name is creatable with --new, so it has to work.
+    want_artist = artist_key(artist) if artist is not None else None
+    want_album = text_key(album) if album is not None else None
+    want_track = text_key(track) if track is not None else None
 
     out = []
     for subject in note_subject_repo.list_all(conn):
-        if want_artist and (
-            not subject.artist_name or artist_key(subject.artist_name) != want_artist
-        ):
+        if want_artist is not None and artist_key(subject.artist_name) != want_artist:
             continue
-        if want_album and (
-            not subject.album_title or text_key(subject.album_title) != want_album
-        ):
+        if want_album is not None and text_key(subject.album_title) != want_album:
             continue
-        if want_track and (
-            not subject.track_title or text_key(subject.track_title) != want_track
-        ):
+        if want_track is not None and text_key(subject.track_title) != want_track:
             continue
         out.append(subject.id)
     return out

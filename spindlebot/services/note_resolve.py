@@ -173,7 +173,8 @@ def resolve(
             )
     if album is None:
         return _resolve_artist(library, artist, allow_new=allow_new)
-    return _resolve_album(library, artist, album, track, allow_new=allow_new)
+    return _resolve_album(library, artist, album, track,
+                          mb_albumid=mb_albumid, allow_new=allow_new)
 
 
 @dataclass(frozen=True)
@@ -271,6 +272,7 @@ def _resolve_album(
     album: str,
     track: str | None,
     *,
+    mb_albumid: str | None = None,
     allow_new: bool,
 ) -> Resolution:
     """Settle the ARTIST first, then the title inside that artist's albums.
@@ -280,6 +282,14 @@ def _resolve_album(
     `match_items` inherited its fuzzy artist candidates, which made a typo'd
     artist plus an exact album title come back OWNED.
     """
+    if mb_albumid:
+        # An explicit release id and --new are contradictory: `resolve` has
+        # already confirmed the id IS in the library, so there is nothing absent
+        # to create. Without this, the --new shortcut below fired on a
+        # mismatched artist and quietly produced a name-keyed subject with the
+        # requested id thrown away.
+        allow_new = False
+
     canonical_artist = artist
     scope = library
     if artist:
@@ -293,7 +303,10 @@ def _resolve_album(
                 ResolutionStatus.AMBIGUOUS if found.ambiguous
                 else ResolutionStatus.UNMATCHED,
                 candidates=found.candidates,
-                reason=found.reason,
+                reason=(
+                    f"MusicBrainz id {mb_albumid!r} is not by {artist!r}"
+                    if mb_albumid else found.reason
+                ),
             )
         canonical_artist, scope = found.canonical, list(found.albums)
 
