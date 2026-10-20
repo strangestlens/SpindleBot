@@ -397,6 +397,21 @@ distinction intact: never widen "definitive miss" to cover an errored attempt ju
 a marker written. Tests patch `spindlebot.pipeline.stages.fetch_lyrics.time.sleep` — the
 module calls `time.sleep` through its own namespace precisely so that patch point works.
 
+**7b. The miss/error distinction cuts BOTH ways — a permanent 4xx is not transient**
+Gotcha 7a guards one direction (don't call a blip a miss). The other direction stranded two
+albums: an "error" writes no terminal marker, so a *permanent* failure reported as transient
+retries a query that can never succeed, forever. Two concrete rules, both load-bearing:
+- **Never send lrclib a duration outside 1..3600.** It answers `400 ValidationError`, and a
+  long continuous track (a 64-minute album side ripped as one file) always exceeds it.
+  `_usable_duration` drops it; duration is a narrowing hint, never required.
+- **`_fetch_from_lrclib` only raises for a TRANSIENT failure.** It tries several
+  (artist, title, album) × (duration, no-duration) variants. A non-429 4xx means the server
+  rejected *that variant* as invalid — as definitive as a 404, hiding nothing — so it must not
+  suppress a clean miss from another variant. Only a retryable failure could have masked a hit.
+Letting a permanent error through also skipped the embedded-lyrics fallback in `_process_file`
+(it sits after the `except: return "error"`), so a file that already carried its lyrics still
+stranded. Guarded by `TestDurationCap` + `TestPermanentVsTransientFailure`.
+
 **8. fetch_art test fixtures**
 Tests that need controlled art-fetching behaviour must include `musicbrainz_albumid` in the
 FLAC fixture tags. Without it, `_fetch_from_caa` is skipped entirely (no MBID → `if mbid:`
