@@ -41,6 +41,7 @@ from spindlebot.core.models import Location
 from spindlebot.core.progress import ProgressCallback
 from spindlebot.db.repositories import action_repo, location_repo
 from spindlebot.services.inventory import InventoryResult, inventory_location
+from spindlebot.services.locations import PENDING_LOCATION_NAME, get_by_name
 from spindlebot.services.reconciler import ReconcileResult, reconcile_location
 from spindlebot.services.sync import CopyFn, SyncResult, execute_pending
 from spindlebot.services.volumes import resolve_root
@@ -97,13 +98,19 @@ def _progress(progress_for: ProgressFor | None, stage: str) -> ProgressCallback 
 
 
 def _authoring_location(conn) -> Location | None:
-    """The non-retention authoring library (Pending) — the source new music
-    arrives at. Content flows out of it toward retention, never back in."""
-    return next(
-        (loc for loc in location_repo.list_all(conn)
-         if loc.is_authoritative_audio and not loc.is_retention and loc.enabled),
-        None,
-    )
+    """The Pending library — the one place new music lands, looked up BY NAME.
+
+    Not "the first authoritative non-retention location": more than one of those
+    is a supported configuration (see
+    `test_copy_deduped_across_multiple_authoritative_locations`), and
+    `location_repo.list_all` orders by name, so an eligible location called
+    `Archive` would win and Pending would never be rescanned — silently
+    restoring the very bug this refresh exists to prevent.
+    """
+    pending = get_by_name(conn, PENDING_LOCATION_NAME)
+    if pending is None or not pending.enabled or pending.is_retention:
+        return None
+    return pending
 
 
 def push_location(

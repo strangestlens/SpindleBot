@@ -37,7 +37,11 @@ from spindlebot.db.repositories import (
     run_repo,
 )
 from spindlebot.services import volumes
-from spindlebot.services.locations import get_by_name, register_from_config
+from spindlebot.services.locations import (
+    get_by_name,
+    location_uuid,
+    register_from_config,
+)
 from spindlebot.services.push import push_location
 
 DAP = "PortablePlayer"
@@ -72,8 +76,11 @@ def conn(tmp_path):
     c.close()
 
 
-def _loc(conn, uuid, name, root, *, is_retention=False, authoritative=False):
+def _loc(conn, name, root, *, is_retention=False, authoritative=False):
+    """Register a location the way production does — uuid derived from the name,
+    so `locations.get_by_name` resolves it."""
     root.mkdir(parents=True, exist_ok=True)
+    uuid = location_uuid(name)
     volumes.ensure_marker(root, uuid=uuid, name=name, now=0)
     return location_repo.upsert(
         conn, uuid=uuid, name=name, kind=LocationKind.LOCAL_DRIVE,
@@ -87,9 +94,9 @@ REL = "Artist/Album/01.flac"
 
 def _seed(conn, tmp_path, *, n_tracks=1):
     """A Pending library holding `n_tracks`, and an empty retention DAP."""
-    pending = _loc(conn, "pending-uuid", "Pending", tmp_path / "Pending",
+    pending = _loc(conn, "Pending", tmp_path / "Pending",
                    authoritative=True)
-    dap = _loc(conn, "dap-uuid", DAP, tmp_path / "Dap", is_retention=True)
+    dap = _loc(conn, DAP, tmp_path / "Dap", is_retention=True)
     for i in range(n_tracks):
         _write_flac(
             Path(pending.root_path) / f"Artist/Album/{i + 1:02d}.flac",
@@ -174,9 +181,9 @@ def test_push_copies_an_album_the_db_has_never_seen(conn, tmp_path):
     writes to this DB, so a just-imported album exists on disk and in no table
     the reconciler reads. Push must rescan the authoring library itself, or it
     plans nothing and calls that success."""
-    pending = _loc(conn, "pending-uuid", "Pending", tmp_path / "Pending",
+    pending = _loc(conn, "Pending", tmp_path / "Pending",
                    authoritative=True)
-    dap = _loc(conn, "dap-uuid", DAP, tmp_path / "Dap", is_retention=True)
+    dap = _loc(conn, DAP, tmp_path / "Dap", is_retention=True)
     _write_flac(Path(pending.root_path) / REL, audio_md5_bytes=bytes([1] * 16),
                 tags={"artist": "Artist", "album": "Album", "title": "One"})
     # Deliberately NO inventory of Pending — this is a fresh import.
@@ -189,6 +196,26 @@ def test_push_copies_an_album_the_db_has_never_seen(conn, tmp_path):
     assert result.sync.copied == 1
     assert (Path(dap.root_path) / REL).is_file()
     assert result.ok is True
+
+
+def test_an_earlier_sorting_authoritative_location_does_not_displace_pending(conn, tmp_path):
+    """More than one authoritative non-retention location is supported, and
+    `location_repo.list_all` orders by name — so picking "the first eligible
+    one" hands the refresh to `Archive` and leaves Pending unscanned, which is
+    the original bug wearing a different hat. Pending is selected by name."""
+    pending = _loc(conn, "Pending", tmp_path / "Pending", authoritative=True)
+    archive = _loc(conn, "Archive", tmp_path / "Archive", authoritative=True)
+    dap = _loc(conn, DAP, tmp_path / "Dap", is_retention=True)
+    assert archive.name < pending.name          # Archive sorts first
+    _write_flac(Path(pending.root_path) / REL, audio_md5_bytes=bytes([1] * 16),
+                tags={"artist": "Artist", "album": "Album", "title": "One"})
+
+    result = push_location(conn, location=dap, root=Path(dap.root_path), copy_fn=_copy)
+
+    assert result.source_inventory is not None
+    assert result.source_inventory.location == "Pending"
+    assert result.sync.copied == 1
+    assert (Path(dap.root_path) / REL).is_file()
 
 
 def test_an_unmounted_source_is_recorded_not_fatal(conn, tmp_path):
@@ -220,7 +247,7 @@ def test_pushing_to_the_authoring_library_does_not_scan_it_twice(conn, tmp_path)
 
 def test_push_does_not_execute_another_destinations_work(conn, tmp_path):
     pending, dap = _seed(conn, tmp_path)
-    other = _loc(conn, "other-uuid", "OtherDrive", tmp_path / "Other",
+    other = _loc(conn, "OtherDrive", tmp_path / "Other",
                  is_retention=True)
     audio = audio_repo.get_by_identity(conn, bytes([1] * 16).hex())
     run_id = run_repo.start_run(conn, RunKind.RECONCILE, now=0)
