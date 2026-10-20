@@ -98,12 +98,14 @@ agent and no script. Fill it with one command, with the device mounted:
 
 ```bash
 python3 -m spindlebot push --location "MyDap" --dry-run   # what it would copy
-python3 -m spindlebot push --location "MyDap"             # inventory → review → ack → sync
+python3 -m spindlebot push --location "MyDap"             # rescan → inventory → review → ack → sync
 ```
 
-Inventory is the slow part: expect several minutes for a few thousand files over
-USB, almost all of it the per-file tag read, not hashing (the DB's mtime skip
-means unchanged files are never re-hashed).
+It rescans the Pending library before planning, the same way `music-sync.sh`
+does, so albums imported since the last scan are actually seen. Inventory is the
+slow part: expect several minutes for a few thousand files over USB, almost all
+of it the per-file tag read, not hashing (the DB's mtime skip means unchanged
+files are never re-hashed).
 
 `push` stops at sync and never prunes — see
 [the command reference](commands.md#push--one-location-one-pass) for why that

@@ -68,7 +68,7 @@ next:
 | `inventory` | No | Hashes what's actually on disk at a location; upserts content, albums, sidecars, presence |
 | `review` | No | Diffs the DB against what was observed and writes `pending_action` rows — a plan, nothing more |
 | `sync` | Yes (writes) | Executes *acknowledged* copy actions: copy → verify dest sha256 → record presence |
-| `push` | Yes (writes) | The three above, for one location, in one pass. Stops there — never prunes |
+| `push` | Yes (writes) | The three above, for one location, in one pass (plus a rescan of the authoring library first). Stops there — never prunes |
 | `prune` | Yes (deletes) | Releases the non-retention authoring copy once retention is verified |
 | `delete` | Yes (deletes) | Removes a *retention* copy — the gated one |
 
@@ -82,8 +82,8 @@ action that hasn't been acknowledged.
 python3 -m spindlebot push --location <name> [--dry-run] [--rehash] [--json]
 ```
 
-`push` is `inventory` → `review` → acknowledge → `sync`, all scoped to one
-location. It exists for destinations that `music-sync.sh` can't reach:
+`push` is a rescan of the authoring library → `inventory` of the target →
+`review` → acknowledge → `sync`, the last of these scoped to the one location. It exists for destinations that `music-sync.sh` can't reach:
 `music-sync.sh` reads the single enabled `[[destinations]]` entry, so it only
 ever targets the retention drive, while a DAP configured only as a
 `[[locations]]` entry had no automation at all and had to be filled by hand.
@@ -103,9 +103,18 @@ the authoring copy on the strength of the DAP alone. Stopping at `sync` is what
 makes `push` safe to run against a retention DAP today. If you do want to
 release Pending, run `prune` separately and deliberately.
 
-`--dry-run` still inventories the target — a plan built on a stale scan is
-worthless — but acknowledges nothing and copies nothing. The exit code is 0 only
-when every stage ran cleanly, so it is safe to chain.
+The authoring library is rescanned first for the same reason `music-sync.sh`
+opens with an unscoped `spindlebot inventory`: nothing in the import pipeline
+writes to the SpindleBot DB, so an album ripped since the last scan exists on
+disk but in no table the reconciler reads. Without that step a push run straight
+after a rip plans nothing and calls it success. If the authoring library isn't
+mounted — a legitimate state after a prune — the step is skipped, said so in the
+output, and planning continues from recorded state.
+
+`--dry-run` still inventories — a plan built on a stale scan is worthless — but
+acknowledges nothing and copies nothing. The exit code is 0 only when every
+stage ran cleanly; a dry run that stops before the copies is a success, but a
+planner *refusal* under `--dry-run` is not.
 
 Note that the `sync` stage executes every acknowledged-but-unexecuted copy for
 that destination, not just the ones this pass planned. A copy an earlier push

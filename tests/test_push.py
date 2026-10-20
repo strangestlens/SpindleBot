@@ -96,7 +96,6 @@ def _seed(conn, tmp_path, *, n_tracks=1):
             audio_md5_bytes=bytes([i + 1] * 16),
             tags={"artist": "Artist", "album": "Album", "title": f"Track {i + 1}"},
         )
-    # Pending has been inventoried already — push only scans its target.
     from spindlebot.services.inventory import inventory_location
     inventory_location(conn, location=pending, root=Path(pending.root_path), now=100)
     return pending, dap
@@ -166,6 +165,55 @@ def test_dry_run_still_inventories_the_target(conn, tmp_path):
     assert result.inventory.scanned == 1
     # The track is already there, so nothing is planned to copy.
     assert result.reconcile.copies == 0
+
+
+# ── the source is refreshed, not assumed ──────────────────────────────────────
+
+def test_push_copies_an_album_the_db_has_never_seen(conn, tmp_path):
+    """The headline case: rip a CD, then push. Nothing in the import pipeline
+    writes to this DB, so a just-imported album exists on disk and in no table
+    the reconciler reads. Push must rescan the authoring library itself, or it
+    plans nothing and calls that success."""
+    pending = _loc(conn, "pending-uuid", "Pending", tmp_path / "Pending",
+                   authoritative=True)
+    dap = _loc(conn, "dap-uuid", DAP, tmp_path / "Dap", is_retention=True)
+    _write_flac(Path(pending.root_path) / REL, audio_md5_bytes=bytes([1] * 16),
+                tags={"artist": "Artist", "album": "Album", "title": "One"})
+    # Deliberately NO inventory of Pending — this is a fresh import.
+
+    result = push_location(conn, location=dap, root=Path(dap.root_path), copy_fn=_copy)
+
+    assert result.source_inventory is not None
+    assert result.source_inventory.scanned == 1
+    assert result.reconcile.copies == 1
+    assert result.sync.copied == 1
+    assert (Path(dap.root_path) / REL).is_file()
+    assert result.ok is True
+
+
+def test_an_unmounted_source_is_recorded_not_fatal(conn, tmp_path):
+    """A push from an already-pruned or absent authoring library is legitimate —
+    the target scan is what the planner needs — but it must not look like a
+    normal pass that happened to plan nothing."""
+    pending, dap = _seed(conn, tmp_path)
+    shutil.rmtree(pending.root_path)
+
+    result = push_location(conn, location=dap, root=Path(dap.root_path), copy_fn=_copy)
+
+    assert result.source_inventory is None
+    assert result.source_scan_skipped is not None
+    assert "not mounted" in result.source_scan_skipped
+    # Still plans from recorded state, so the earlier-seen track is copied.
+    assert result.reconcile.copies == 1
+
+
+def test_pushing_to_the_authoring_library_does_not_scan_it_twice(conn, tmp_path):
+    pending, _ = _seed(conn, tmp_path)
+    result = push_location(conn, location=pending, root=Path(pending.root_path),
+                           copy_fn=_copy)
+    assert result.source_inventory is None
+    assert result.source_scan_skipped is None
+    assert result.inventory.scanned == 1
 
 
 # ── scoping ───────────────────────────────────────────────────────────────────
@@ -259,6 +307,22 @@ def test_an_abnormal_early_stop_is_not_ok(conn, tmp_path, monkeypatch):
     assert result.sync is None
     assert result.ok is False
     assert not (Path(dap.root_path) / REL).exists()
+
+
+def test_a_planner_refusal_under_dry_run_is_still_not_ok(conn, tmp_path, monkeypatch):
+    """--dry-run exempts its OWN stop before the copies, nothing else. A refusal
+    to plan is not a completed preview, so it must not exit 0."""
+    from spindlebot.services import push as push_mod
+    from spindlebot.services.inventory import InventoryResult
+
+    _, dap = _seed(conn, tmp_path)
+    monkeypatch.setattr(push_mod, "inventory_location",
+                        lambda *a, **k: InventoryResult(location=DAP))
+
+    result = push_location(conn, location=dap, root=Path(dap.root_path),
+                           dry_run=True, copy_fn=_copy)
+    assert result.stopped_at == "review"
+    assert result.ok is False
 
 
 def test_a_failed_copy_makes_the_push_not_ok(conn, tmp_path):

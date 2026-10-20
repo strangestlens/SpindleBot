@@ -59,7 +59,7 @@ Replacing "library = whatever is at known paths" with a **SpindleBot-owned SQLit
 **Layering (keep consistent):**
 - `spindlebot/core/` — pure, no DB/IO side effects, no `print`: `identity.py` (hashing), `enums.py`, `models.py` (frozen dataclasses + `from_row`), `errors.py`.
 - `spindlebot/db/` — `connection.py` (`open_db` = WAL + `foreign_keys=ON` + migrate); `schema.sql`=v1 … `schema_v7.sql`=v7; `migrations.py` (append-only `[(version, file)]`, forward-only, `user_version`-keyed). `repositories/` is the **only** layer that issues SQL; the caller owns the transaction (repos don't commit).
-- `spindlebot/services/` — orchestration over repos+core; side-effect-free re `print`; returns typed results. `inventory.py`, `locations.py` (registry + deterministic `location_uuid`), `volumes.py` (marker files), `reconciler.py` (planner: diff DB vs observed → `pending_action`; never touches bytes/FS), `promote.py` (promote a lyric-complete album out of Processing into Pending via a beets-native `beet move path:<dir>/`; `finalize_processing` sweeps the whole area), `push.py` (one-pass fill of ONE location: inventory → reconcile → acknowledge → scoped sync, and **never prune** — see gotcha 14), `lyrics_sync.py` (per-doc lyric lineage: fold each location's observed `.lrc` sha into current/behind/concurrent against the head; pure DB reasoning, no bytes).
+- `spindlebot/services/` — orchestration over repos+core; side-effect-free re `print`; returns typed results. `inventory.py`, `locations.py` (registry + deterministic `location_uuid`), `volumes.py` (marker files), `reconciler.py` (planner: diff DB vs observed → `pending_action`; never touches bytes/FS), `promote.py` (promote a lyric-complete album out of Processing into Pending via a beets-native `beet move path:<dir>/`; `finalize_processing` sweeps the whole area), `push.py` (one-pass fill of ONE location: rescan the authoring library → inventory the target → reconcile → acknowledge → scoped sync, and **never prune** — see gotcha 14), `lyrics_sync.py` (per-doc lyric lineage: fold each location's observed `.lrc` sha into current/behind/concurrent against the head; pure DB reasoning, no bytes).
 - `cli.py` — thin client; `print` only here; every command supports `--json`.
 
 **Conventions:**
@@ -155,9 +155,11 @@ spindlebot/
                                      into Pending (beet move path:<dir>/); finalize_processing()
                                      sweeps the whole Processing area (retry lyrics + promote)
     push.py                      — push_location(): fill ONE location in a single pass
-                                     (inventory → reconcile → acknowledge → sync scoped to that
-                                     dest). Stops before prune, deliberately; --dry-run stops
-                                     after planning
+                                     (rescan Pending → inventory the target → reconcile →
+                                     acknowledge → sync scoped to that dest). The Pending rescan
+                                     is NOT optional: import writes nothing to this DB, so a push
+                                     after a rip would otherwise plan nothing. Stops before
+                                     prune, deliberately; --dry-run stops after planning
     lyrics_sync.py               — reconcile_doc(): per-doc lyric causal lineage — classify each
                                      location's observed .lrc as current/behind/concurrent vs the
                                      head via core.vclock + scan history; no bytes, no files

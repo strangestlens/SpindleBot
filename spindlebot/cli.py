@@ -689,6 +689,14 @@ def cmd_push(cfg, args: list[str]) -> int:
 
     inv, rec, syn = result.inventory, result.reconcile, result.sync
     print(f"{'[dry-run] ' if dry_run else ''}Push → {result.location} ({root})")
+    if result.source_inventory is not None:
+        src = result.source_inventory
+        print(f"  source ({src.location}): {src.scanned} scanned, {src.new} new, "
+              f"{src.updated} updated, {src.errors} error(s)")
+        for ep in src.error_paths:
+            print(f"    ! {ep}", file=sys.stderr)
+    if result.source_scan_skipped is not None:
+        print(f"  source: {result.source_scan_skipped}")
     if inv is not None:
         print(f"  inventory: {inv.scanned} scanned, {inv.new} new, "
               f"{inv.updated} updated, {inv.errors} error(s)")
