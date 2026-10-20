@@ -401,6 +401,12 @@ module calls `time.sleep` through its own namespace precisely so that patch poin
 Tests that need controlled art-fetching behaviour must include `musicbrainz_albumid` in the
 FLAC fixture tags. Without it, `_fetch_from_caa` is skipped entirely (no MBID → `if mbid:`
 not entered), so `_fetch_from_itunes` runs for real against the network.
+This is not theoretical: `test_dry_run_does_not_embed` shipped without the MBID and was the
+one test in the suite that needed the network. It took ~2 minutes and failed intermittently
+on commits that had passed minutes earlier — a CI failure that looks like the PR under
+review and isn't. Any test reaching `fetch_art()` must therefore ALSO patch
+`_fetch_from_itunes` and `assert_not_called()` it, so a future fixture losing its MBID fails
+loudly instead of quietly dialling out.
 
 **9. `lyric_timing retime` runs from the repo root, in the AI venv**
 The AI venv doesn't have `lyric_timing` installed — it resolves off the CWD. Any caller

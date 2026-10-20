@@ -332,12 +332,25 @@ class TestFetchArt:
 
     def test_dry_run_does_not_embed(self, tmp_path):
         f = tmp_path / "track.flac"
-        _write_minimal_flac(f, {"artist": "Band", "title": "Song", "album": "Rec"})
+        # musicbrainz_albumid is load-bearing (gotcha 8): without it `fetch_art`
+        # never enters the `if mbid:` branch, so the patched _fetch_from_caa is
+        # not reached and _fetch_from_itunes runs against the REAL iTunes
+        # endpoint. That made this the one test in the suite that needed the
+        # network — it took two minutes and failed whenever iTunes returned
+        # nothing, on commits that had passed moments earlier.
+        _write_minimal_flac(f, {
+            "artist": "Band", "title": "Song", "album": "Rec",
+            "musicbrainz_albumid": "mbid-abc",
+        })
 
         with patch("spindlebot.pipeline.stages.fetch_art._fetch_from_caa",
-                   return_value=_FAKE_JPEG):
+                   return_value=_FAKE_JPEG), \
+             patch("spindlebot.pipeline.stages.fetch_art._fetch_from_itunes") as itunes:
             result = fetch_art(tmp_path, _cfg(), dry_run=True)
 
+        # Asserted, not assumed: if a future edit drops the mbid again, this
+        # fails loudly instead of quietly going back out to the network.
+        itunes.assert_not_called()
         assert result.embedded == 1
         assert not _has_art(str(f))
         assert not (tmp_path / "cover.jpg").exists()
