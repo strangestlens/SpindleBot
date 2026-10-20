@@ -120,14 +120,33 @@ def from_db(cfg) -> list[LibraryAlbum]:
 
 
 def _dedupe(albums: list[LibraryAlbum]) -> list[LibraryAlbum]:
-    """Collapse albums both indexes report, preferring the entry with an MBID."""
-    merged: dict[tuple[str, str], LibraryAlbum] = {}
+    """Collapse the SAME album reported by both indexes, keeping distinct releases.
+
+    The point of this function is that beets and the SpindleBot DB both know an
+    album and it should appear once. Keying on artist+title alone overshot: two
+    genuinely different releases — an original and a reissue, same artist, same
+    title, different `mb_albumid` — collapsed into whichever row came first.
+
+    That silently disabled `note add`'s release disambiguation downstream, which
+    can only refuse to guess between editions it can actually SEE. The audit has
+    the same interest: reporting one row for two owned pressings understates the
+    collection.
+
+    So: group by artist+title, and within a group keep one row per distinct
+    MBID. A row with no MBID is only kept when the group has no identified
+    release at all — that is the beets-vs-DB overlap this exists to collapse.
+    """
+    groups: dict[tuple[str, str], dict[str, LibraryAlbum]] = {}
     for album in albums:
         key = (album.albumartist.casefold(), album.album.casefold())
-        existing = merged.get(key)
-        if existing is None or (album.mb_albumid and not existing.mb_albumid):
-            merged[key] = album
-    return list(merged.values())
+        by_release = groups.setdefault(key, {})
+        by_release.setdefault(album.mb_albumid or "", album)
+
+    out: list[LibraryAlbum] = []
+    for by_release in groups.values():
+        identified = [a for mbid, a in by_release.items() if mbid]
+        out.extend(identified or list(by_release.values()))
+    return out
 
 
 LOADERS = {"beets": from_beets, "db": from_db}

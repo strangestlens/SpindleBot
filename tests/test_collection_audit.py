@@ -358,3 +358,40 @@ def test_audit_carries_the_index_breakdown(tmp_path, monkeypatch):
     # The DB-only album resolves as owned — the exact case that was reported
     # missing when beets was the sole default.
     assert [m.item.title for m in report.owned] == ["Tidal"]
+
+
+# ── index de-duplication (PR #74) ────────────────────────────────────────────
+
+def test_dedupe_collapses_the_same_album_from_both_indexes():
+    """The reason _dedupe exists: beets and the SpindleBot DB both know an album
+    and it should count once."""
+    from spindlebot.core.collection import LibraryAlbum
+    from spindlebot.services.library_index import _dedupe
+    rows = [
+        LibraryAlbum("Old 97's", "Fight Songs", 1999, "mb-fight"),
+        LibraryAlbum("Old 97's", "Fight Songs", 1999, None),
+    ]
+    assert [a.mb_albumid for a in _dedupe(rows)] == ["mb-fight"]
+
+
+def test_dedupe_keeps_two_genuinely_different_releases():
+    """An original and a reissue share artist and title but are two records.
+    Collapsing them understated the collection AND disabled note resolution's
+    release disambiguation, which can only refuse between editions it sees."""
+    from spindlebot.core.collection import LibraryAlbum
+    from spindlebot.services.library_index import _dedupe
+    rows = [
+        LibraryAlbum("Old 97's", "Fight Songs", 1999, "mb-original"),
+        LibraryAlbum("Old 97's", "Fight Songs", 2019, "mb-deluxe"),
+    ]
+    assert {a.mb_albumid for a in _dedupe(rows)} == {"mb-original", "mb-deluxe"}
+
+
+def test_dedupe_collapses_unidentified_duplicates():
+    from spindlebot.core.collection import LibraryAlbum
+    from spindlebot.services.library_index import _dedupe
+    rows = [
+        LibraryAlbum("Old 97's", "Fight Songs", 1999, None),
+        LibraryAlbum("Old 97's", "Fight Songs", 1999, None),
+    ]
+    assert len(_dedupe(rows)) == 1

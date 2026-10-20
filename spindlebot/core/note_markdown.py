@@ -24,8 +24,12 @@ the split survives a round trip.
 `# Old 97's` above `## Fight Songs` says where the album sits, it is not an
 empty note about the artist.
 
-`parse(render(notes)) == notes` is the contract, and it is what makes
-`note export` a real escape hatch rather than a lossy pretty-printer.
+`parse(render(notes)) == notes` is the contract for the PROSE — which is what
+this format carries and all it carries. Tags, ids, timestamps and revision
+history live in `note export --json`; they were briefly encoded in an HTML
+comment here and it was a mistake. Tags are an open set, so no delimiter is safe
+inside one, and any marker chosen can also open a line of someone's actual
+writing. A format for humans should not be asked to be lossless.
 
 It holds for every chain shape including gapped ones — an album with no artist,
 an artist with a track and no album — with one inherent exception: heading
@@ -34,12 +38,14 @@ scope above it, because no syntax unsets a level without also setting it. So a
 note that leaves a parent level empty, following a note that filled it, re-imports
 as a child of the one above.
 
-That is not silently accepted. `unrepresentable()` reports exactly which notes
-are affected by round-tripping them, so `note export` can warn instead of
-handing back a document that reads differently than it was written. The writing
-itself is never lost — the note lands on a neighbouring subject — and the
+That is not silently accepted, but nor is it warned about: `note export` makes
+the bad ordering UNREACHABLE instead, by sorting an empty level first within its
+prefix so a note that empties a level never follows one that fills it.
+`unrepresentable()` states the limit and is asserted to stay empty under that
+sort, which is what fails if the ordering is ever changed. The writing itself is
+never lost in any case — such a note lands on a neighbouring subject — and the
 situation only arises from hand-written input that names an album or track
-without ever naming its parents.
+without naming its parents.
 """
 from __future__ import annotations
 
@@ -51,11 +57,14 @@ from spindlebot.core.notes import canonicalize_body
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 # A body line that *looks* like a heading is escaped on the way out and
-# unescaped on the way in. Counting the backslashes keeps it reversible, so an
-# author who genuinely wrote `\# not a heading` gets that text back verbatim.
-_ESCAPABLE = re.compile(r"^(\\*)(#{1,6}\s)")
+# unescaped on the way in, so an author who genuinely wrote `\# not a heading`
+# gets that text back verbatim.
+_ESCAPABLE = re.compile(r"^\\*#{1,6}\s")
 
 MAX_DEPTH = 3  # artist, album, track
+# `#{1,6}` is all markdown has, and a track sits two levels below the root, so a
+# root deeper than 4 renders track headings nothing can parse back.
+MAX_ROOT_LEVEL = 6 - (MAX_DEPTH - 1)
 
 
 @dataclass(frozen=True)
@@ -93,9 +102,19 @@ class ParsedDocument:
     skipped: tuple[SkippedHeading, ...] = ()
 
 
+def _check_root_level(root_level: int) -> None:
+    if not 1 <= root_level <= MAX_ROOT_LEVEL:
+        raise ValueError(
+            f"root level must be 1-{MAX_ROOT_LEVEL} (a track sits two levels "
+            f"below it, and markdown stops at 6 '#'), got {root_level}"
+        )
+
+
 def _unescape(line: str) -> str:
-    m = _ESCAPABLE.match(line)
-    return line[1:] if m and m.group(1) else line
+    """Drop exactly one escaping backslash, if that is what it is."""
+    if line.startswith("\\") and _ESCAPABLE.match(line[1:]):
+        return line[1:]
+    return line
 
 
 def _escape(line: str) -> str:
@@ -106,8 +125,9 @@ def parse(text: str, *, root_level: int = 1) -> ParsedDocument:
     """Read a markdown document into notes plus the headings it could not use.
 
     `root_level` is the heading level that means "artist"; album and track are
-    the two levels below it.
+    the two levels below it, so it must leave room for both.
     """
+    _check_root_level(root_level)
     artist_level = root_level
     album_level = root_level + 1
     track_level = root_level + 2
@@ -175,6 +195,7 @@ def render(notes, *, root_level: int = 1) -> str:
     re-emit the deepest heading — that is what keeps them two notes instead of
     merging into one body on the way back in.
     """
+    _check_root_level(root_level)
     out: list[str] = []
     prev: tuple[str | None, ...] = (None, None, None)
 
