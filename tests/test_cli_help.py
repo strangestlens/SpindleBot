@@ -15,7 +15,7 @@ from spindlebot.cli import main
 # Every subcommand that takes flags and does real work.
 SUBCOMMANDS = [
     "check", "import-staging", "finalize", "inventory", "review",
-    "sync", "prune", "delete", "collection-audit", "collection-ignore",
+    "sync", "push", "prune", "delete", "collection-audit", "collection-ignore",
     "fetch-lyrics", "fetch-art", "notify", "restart",
 ]
 
