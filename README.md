@@ -78,6 +78,7 @@ python3 -m spindlebot finalize [--dry-run]           # retry lyrics + promote ly
 python3 -m spindlebot inventory [--location <name>]  # scan a location into the DB
 python3 -m spindlebot review --location <name>       # plan reconciliation (no bytes moved)
 python3 -m spindlebot sync [--location <name>]       # execute acknowledged copies
+python3 -m spindlebot push --location <name>         # fill one location in one pass (never prunes)
 python3 -m spindlebot prune [--execute]              # release Pending copies verified on retention
 python3 -m spindlebot delete [--execute]             # remove a retention copy (gated on min_copies)
 python3 -m spindlebot fetch-art  <dir> [--dry-run] [--force]

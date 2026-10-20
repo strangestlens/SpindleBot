@@ -9,8 +9,8 @@ this often, alias it:
 alias spindlebot='python3 -m spindlebot'
 ```
 
-The DB and sync commands (`finalize`, `inventory`, `review`, `sync`, `prune`,
-`delete`) support `--json` for structured output. The others print
+The DB and sync commands (`finalize`, `inventory`, `review`, `sync`, `push`,
+`prune`, `delete`) support `--json` for structured output. The others print
 human-readable text only.
 
 > **Destructive ops default to dry-run.** `prune` and `delete` only touch bytes
@@ -50,6 +50,7 @@ python3 -m spindlebot review --location <name> [--yes]           # plan reconcil
 python3 -m spindlebot review --acknowledge-run <run_id>          # acknowledge every action in a run
 python3 -m spindlebot review --acknowledge <id[,id...]>          # acknowledge specific actions
 python3 -m spindlebot sync [--location <name>]                   # execute acknowledged copies
+python3 -m spindlebot push --location <name> [--dry-run]         # inventory→review→ack→sync, one location
 python3 -m spindlebot prune [--execute]                          # release Pending copies verified on retention
 python3 -m spindlebot delete [--execute]                         # execute acknowledged retention-copy deletes
 ```
@@ -67,12 +68,49 @@ next:
 | `inventory` | No | Hashes what's actually on disk at a location; upserts content, albums, sidecars, presence |
 | `review` | No | Diffs the DB against what was observed and writes `pending_action` rows — a plan, nothing more |
 | `sync` | Yes (writes) | Executes *acknowledged* copy actions: copy → verify dest sha256 → record presence |
+| `push` | Yes (writes) | The three above, for one location, in one pass. Stops there — never prunes |
 | `prune` | Yes (deletes) | Releases the non-retention authoring copy once retention is verified |
 | `delete` | Yes (deletes) | Removes a *retention* copy — the gated one |
 
 `review` requires a fresh scan of the target location; it refuses to plan
 against stale observations. Nothing in `sync`, `prune`, or `delete` acts on an
 action that hasn't been acknowledged.
+
+### `push` — one location, one pass
+
+```bash
+python3 -m spindlebot push --location <name> [--dry-run] [--rehash] [--json]
+```
+
+`push` is `inventory` → `review` → acknowledge → `sync`, all scoped to one
+location. It exists for destinations that `music-sync.sh` can't reach:
+`music-sync.sh` reads the single enabled `[[destinations]]` entry, so it only
+ever targets the retention drive, while a DAP configured only as a
+`[[locations]]` entry had no automation at all and had to be filled by hand.
+
+```bash
+# fill a DAP mounted at its configured root
+python3 -m spindlebot push --location MyDap
+
+# see what it would copy first — plans, acknowledges nothing, copies nothing
+python3 -m spindlebot push --location MyDap --dry-run
+```
+
+**`push` never prunes, by design.** `prune` has no per-location scope: it
+releases every Pending file verified on *any* retention location. A DAP
+configured `is_retention = true` would therefore make a post-push prune release
+the authoring copy on the strength of the DAP alone. Stopping at `sync` is what
+makes `push` safe to run against a retention DAP today. If you do want to
+release Pending, run `prune` separately and deliberately.
+
+`--dry-run` still inventories the target — a plan built on a stale scan is
+worthless — but acknowledges nothing and copies nothing. The exit code is 0 only
+when every stage ran cleanly, so it is safe to chain.
+
+Note that the `sync` stage executes every acknowledged-but-unexecuted copy for
+that destination, not just the ones this pass planned. A copy an earlier push
+never finished (the DAP was unplugged mid-run) is still owed to the location,
+and the next push completes it.
 
 ### Destructive op gates
 

@@ -13,6 +13,8 @@ Usage:
     python -m spindlebot review --acknowledge-run <run_id>        Acknowledge every proposed action in a run
     python -m spindlebot review --acknowledge <id[,id...]>        Acknowledge specific proposed actions
     python -m spindlebot sync [--location <name>] [--json] [-v|--quiet]   Execute acknowledged copies (copy→verify→presence); --location scopes to one dest
+    python -m spindlebot push --location <name> [--dry-run] [--rehash] [--json] [-v|--quiet]
+                                                      Fill one location in one pass: inventory → review → acknowledge → sync (scoped). Never prunes
     python -m spindlebot prune [--execute] [--json] [-v|--quiet]  Release Pending files verified on retention (DRY-RUN unless --execute)
     python -m spindlebot delete [--execute] [--json] [-v|--quiet]  Execute acknowledged retention-copy deletes, gated on min_copies (DRY-RUN unless --execute)
     python -m spindlebot collection-audit [--handle <name>] [--source discogs|fixture] [--media cd,vinyl] [--index auto|beets|db] [--refresh] [--strict] [--all] [--show-ignored] [--html <file>] [--json]
@@ -611,6 +613,106 @@ def cmd_sync(cfg, args: list[str]) -> int:
     return 0 if (result.failed == 0 and not result.errors) else 1
 
 
+# ── push ──────────────────────────────────────────────────────────────────────
+
+def cmd_push(cfg, args: list[str]) -> int:
+    """
+    Fill one location in a single pass: inventory → review → acknowledge → sync,
+    all scoped to that location. NEVER prunes (see services/push.py for why that
+    matters for a retention DAP). --dry-run stops after planning.
+    """
+    import json as _json
+    import time
+    from dataclasses import asdict
+
+    from spindlebot.db.connection import open_db
+    from spindlebot.services.locations import get_by_name, register_from_config
+    from spindlebot.services.push import push_location
+    from spindlebot.services.volumes import resolve_root
+
+    want_json = "--json" in args
+    dry_run = "--dry-run" in args
+    rehash = "--rehash" in args
+
+    def fail(msg: str) -> int:
+        if want_json:
+            print(_json.dumps({"error": msg}))
+        else:
+            print(msg, file=sys.stderr)
+        return 1
+
+    if "--location" not in args:
+        return fail("Usage: spindlebot push --location <name> [--dry-run] [--json]")
+    idx = args.index("--location")
+    # A bare --location must never fall back to some default destination: push
+    # copies bytes, and guessing where is exactly the mistake worth refusing.
+    if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+        return fail("--location requires a location name")
+    location_name = args[idx + 1]
+
+    # One reporter per stage, each with its own label; closed together at the end.
+    reporters = []
+
+    def progress_for(stage: str):
+        cb, reporter = _make_progress(args, f"{stage} {location_name}")
+        if reporter is not None:
+            reporters.append(reporter)
+        return cb
+
+    now = int(time.time())
+    conn = open_db(cfg.core.db_path)
+    try:
+        register_from_config(conn, cfg, now)
+        location = get_by_name(conn, location_name)
+        if location is None:
+            return fail(f"Unknown location: {location_name}")
+        root = resolve_root(location)
+        if root is None:
+            return fail(
+                f"Location '{location_name}' is not mounted or not identified "
+                f"(expected at {location.root_path})"
+            )
+        result = push_location(
+            conn, location=location, root=root, min_copies=cfg.core.min_copies,
+            now=now, beets_db=cfg.tools.beets_db, dry_run=dry_run, rehash=rehash,
+            progress_for=progress_for, checkpoint=conn.commit,
+        )
+        for reporter in reporters:
+            reporter.close()
+        conn.commit()
+    finally:
+        conn.close()
+
+    if want_json:
+        print(_json.dumps({**asdict(result), "ok": result.ok}))
+        return 0 if result.ok else 1
+
+    inv, rec, syn = result.inventory, result.reconcile, result.sync
+    print(f"{'[dry-run] ' if dry_run else ''}Push → {result.location} ({root})")
+    if inv is not None:
+        print(f"  inventory: {inv.scanned} scanned, {inv.new} new, "
+              f"{inv.updated} updated, {inv.errors} error(s)")
+        for ep in inv.error_paths:
+            print(f"    ! {ep}", file=sys.stderr)
+    if rec is not None:
+        print(f"  review (run {rec.run_id}): {rec.copies} to copy, "
+              f"{rec.missing} missing, {rec.conflicts} lyric conflict(s), "
+              f"{rec.below_floor} below min_copies={cfg.core.min_copies}")
+    if result.stopped_at is not None:
+        print(f"  stopped before {result.stopped_at}: {result.stopped_reason}")
+        if dry_run and rec is not None and rec.copies:
+            print(f"\nRe-run without --dry-run to copy {rec.copies} item(s) "
+                  f"to {result.location}.")
+    else:
+        print(f"  acknowledged: {result.acknowledged} action(s)")
+    if syn is not None:
+        print(f"  sync: {syn.copied} copied, {syn.failed} failed, "
+              f"{syn.skipped} skipped")
+        for e in syn.errors:
+            print(f"    ! {e}", file=sys.stderr)
+    return 0 if result.ok else 1
+
+
 # ── prune ─────────────────────────────────────────────────────────────────────
 
 def cmd_prune(cfg, args: list[str]) -> int:
@@ -1143,6 +1245,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "sync":
         return cmd_sync(cfg, args[1:])
+
+    if command == "push":
+        return cmd_push(cfg, args[1:])
 
     if command == "prune":
         return cmd_prune(cfg, args[1:])
