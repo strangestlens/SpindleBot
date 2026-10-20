@@ -13,13 +13,16 @@ import mutagen.flac
 import pytest
 
 from spindlebot.pipeline.stages.fetch_lyrics import (
+    LRCLIB_MAX_DURATION,
     LRCLIB_RETRY_ATTEMPTS,
     LRCLIB_RETRY_BACKOFF,
     _get_tags,
     _plain_to_lrc,
     _process_file,
+    _fetch_from_lrclib,
     _query_lrclib,
     _strip_cjk,
+    _usable_duration,
     _title_from_filename,
     album_lyrics_complete,
     fetch_lyrics,
@@ -301,6 +304,109 @@ class TestQueryLrclibMissVsError:
                    side_effect=urllib.error.URLError("refused")):
             with pytest.raises(urllib.error.URLError):
                 _query_lrclib("a", "t", "al", 100, 0.0)
+
+
+# ── unit: the lrclib duration cap ────────────────────────────────────────────
+
+
+class TestDurationCap:
+    """lrclib validates `1 <= duration <= 3600` and 400s anything else.
+
+    A 64-minute single-track rip (Brian Eno & Beatie Wolfe — Lateral, 3840s)
+    therefore got a 400 on every attempt that carried its duration. The 400 was
+    re-raised as an error, no terminal marker was written, and the album sat in
+    Processing forever while `finalize` re-ran the identical failing query.
+    """
+
+    def test_over_cap_duration_is_dropped(self):
+        assert _usable_duration(LRCLIB_MAX_DURATION + 1) is None
+        assert _usable_duration(3840) is None
+
+    def test_usable_durations_pass_through(self):
+        assert _usable_duration(364) == 364
+        assert _usable_duration(LRCLIB_MAX_DURATION) == LRCLIB_MAX_DURATION
+
+    def test_absent_or_nonsense_duration_is_dropped(self):
+        assert _usable_duration(0) is None
+        assert _usable_duration(None) is None
+        assert _usable_duration(-5) is None
+
+    def test_an_over_cap_duration_never_reaches_the_url(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   return_value=_lrclib_response(synced=None, plain=None)) as urlopen:
+            _query_lrclib("a", "t", "al", 3840, 0.0)
+        url = urlopen.call_args.args[0].full_url
+        assert "duration" not in url
+
+    def test_a_usable_duration_does_reach_the_url(self):
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   return_value=_lrclib_response(synced=None, plain=None)) as urlopen:
+            _query_lrclib("a", "t", "al", 364, 0.0)
+        assert "duration=364" in urlopen.call_args.args[0].full_url
+
+    def test_an_over_cap_track_is_queried_once_not_twice(self, tmp_path):
+        """The with-duration and without-duration variants collapse into one
+        query rather than sending the identical request twice."""
+        audio = tmp_path / "01. Long One.flac"
+        audio.touch()
+        with patch("spindlebot.pipeline.stages.fetch_lyrics._query_lrclib",
+                   return_value=(None, None)) as q:
+            _fetch_from_lrclib("Artist", "Long One", "Album", 3840, str(audio), 0.0)
+        durations = [c.args[3] for c in q.call_args_list]
+        assert durations == [None]
+
+
+# ── unit: a permanent rejection is not a transient error ─────────────────────
+
+
+class TestPermanentVsTransientFailure:
+    """An "error" writes no terminal marker, so a PERMANENT failure reported as
+    transient strands the album forever. Only a failure that could have hidden a
+    hit may turn the whole lookup into an error."""
+
+    def _http_error(self, code):
+        return urllib.error.HTTPError(url="u", code=code, msg="x", hdrs=None, fp=None)
+
+    def test_a_permanent_4xx_does_not_mask_a_clean_miss(self, tmp_path):
+        audio = tmp_path / "01. Track.flac"
+        audio.touch()
+        # First variant is rejected outright; the next answers definitively.
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"),              patch("spindlebot.pipeline.stages.fetch_lyrics._query_lrclib",
+                   side_effect=[self._http_error(400), (None, None)]):
+            assert _fetch_from_lrclib(
+                "Artist", "Track", "Album", 100, str(audio), 0.0) == (None, None)
+
+    def test_a_transient_failure_still_raises(self, tmp_path):
+        """Gotcha 7a intact: a blip must NOT be swept into a "no lyrics" marker,
+        even when another variant came back a clean miss."""
+        audio = tmp_path / "01. Track.flac"
+        audio.touch()
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"),              patch("spindlebot.pipeline.stages.fetch_lyrics._query_lrclib",
+                   side_effect=[self._http_error(503), (None, None)]):
+            with pytest.raises(urllib.error.HTTPError):
+                _fetch_from_lrclib("Artist", "Track", "Album", 100, str(audio), 0.0)
+
+    def test_a_permanent_rejection_leaves_a_terminal_marker(self, tmp_path):
+        """End to end: the stranding stops. A permanently rejected lookup with
+        no lyrics anywhere writes `.nolrc`, so the album can complete."""
+        audio = tmp_path / "01. Track.flac"
+        _write_minimal_flac(audio, {"artist": "Artist", "title": "Track"})
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"),              patch("spindlebot.pipeline.stages.fetch_lyrics._query_lrclib",
+                   side_effect=self._http_error(400)):
+            assert _process_file(str(audio), 0.0) == "missing"
+        assert (tmp_path / "01. Track.nolrc").exists()
+
+    def test_embedded_lyrics_survive_a_permanent_rejection(self, tmp_path):
+        """The Lateral case exactly: the file HAD embedded lyrics, and the
+        raise skipped the fallback that would have completed the album."""
+        audio = tmp_path / "01. Big Empty Country.flac"
+        _write_minimal_flac(audio, {"artist": "Artist", "title": "Big Empty Country",
+                                    "lyrics": "a line\nanother line"})
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"),              patch("spindlebot.pipeline.stages.fetch_lyrics._query_lrclib",
+                   side_effect=self._http_error(400)):
+            assert _process_file(str(audio), 0.0) == "plain"
+        lrc = tmp_path / "01. Big Empty Country.lrc"
+        assert lrc.exists() and "a line" in lrc.read_text()
 
 
 # ── unit: per-track terminal markers (miss vs error) ─────────────────────────

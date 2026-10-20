@@ -10,11 +10,15 @@ Per-track terminal state: every track ends in one of two terminal states, or
 stays incomplete (to be retried). A `<track>.lrc` means lyrics were found; a
 `<track>.nolrc` sibling means lrclib definitively has no lyrics for it (a
 successful response with no synced/plain lyrics, including a 404). A *transient*
-failure (connection error, timeout, 5xx, or any other exception) writes NOTHING
-— the track stays incomplete so a later run retries it.
+failure (connection error, timeout, 5xx, 429) writes NOTHING — the track stays
+incomplete so a later run retries it.
 
-This miss/error distinction is what makes completion reliable: a transient
-network blip must not be swept into a permanent "no lyrics" marker.
+This miss/error distinction is what makes completion reliable, and it cuts both
+ways: a transient network blip must not be swept into a permanent "no lyrics"
+marker, and a PERMANENT rejection (a non-429 4xx) must not masquerade as a
+transient one. The second half matters just as much — an "error" writes no
+terminal marker, so a permanent failure reported as transient strands the album
+in Processing forever, retrying a query that can never succeed.
 
 Per-album .nolrc marker: retained for backward compatibility and written only
 when EVERY track reached a definitive-miss terminal state (no finds AND no
@@ -52,6 +56,10 @@ LRCLIB_API = "https://lrclib.net/api/get"
 # genuinely have no lyrics (instrumentals, skits) are the most exposed, because
 # they exhaust every attempt variant instead of short-circuiting on a hit.
 # Bounded so a service that is actually down still fails fast.
+# lrclib validates `1 <= duration <= 3600` and answers anything else with a 400
+# ValidationError. A long single-track rip (a 64-minute continuous album side)
+# exceeds it, so the duration must be dropped rather than sent and rejected.
+LRCLIB_MAX_DURATION = 3600
 LRCLIB_RETRY_ATTEMPTS = 3
 LRCLIB_RETRY_BACKOFF = 0.5
 
@@ -163,6 +171,19 @@ def _title_from_filename(path: str) -> str | None:
 # ── lrclib API ────────────────────────────────────────────────────────────────
 
 
+def _usable_duration(duration: int | None) -> int | None:
+    """The duration lrclib will accept, or None to omit the parameter.
+
+    lrclib rejects anything outside 1..3600 with a 400 ValidationError, so a
+    long continuous track (one 64-minute rip of an album side) must be queried
+    WITHOUT a duration rather than with one the server refuses. Omitting it only
+    widens the match — duration is a narrowing hint, never required.
+    """
+    if not duration or duration < 1 or duration > LRCLIB_MAX_DURATION:
+        return None
+    return duration
+
+
 def _is_retryable(exc: BaseException) -> bool:
     """True for failures worth another go: server-side 5xx, rate limiting, and
     connection/timeout errors. A 4xx other than 429 is the server answering
@@ -190,8 +211,9 @@ def _query_lrclib(
     re-raised.
     """
     params: dict = {"artist_name": artist, "track_name": title, "album_name": album}
-    if duration:
-        params["duration"] = duration
+    usable = _usable_duration(duration)
+    if usable:
+        params["duration"] = usable
 
     url = LRCLIB_API + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": "SpindleBot/2.0"})
@@ -273,20 +295,33 @@ def _fetch_from_lrclib(
         for t in title_variants:
             attempts.append((fallback_artist, t, fallback_album))
 
-    last_exc = None
+    # With-duration then without. An unusable duration collapses the two into
+    # one query instead of sending the same request twice.
+    dur_variants = list(dict.fromkeys([_usable_duration(duration), None]))
+
+    # Only a TRANSIENT failure may mask a hit, so only a transient failure is
+    # allowed to turn the whole lookup into an error. A permanent one (a non-429
+    # 4xx — the server rejecting this query as invalid, not failing to serve it)
+    # is that variant's final answer, exactly as definitive as a 404: it can
+    # never succeed, so it is hiding nothing and must not suppress a clean miss
+    # from another variant. Letting it through was what stranded albums in
+    # Processing forever — no terminal marker is ever written for an "error",
+    # and the same permanent rejection recurs on every retry.
+    last_transient_exc: BaseException | None = None
     for i, (a, t, alb) in enumerate(attempts):
         if i > 0:
             time.sleep(request_delay)
-        for dur in [duration, None]:
+        for dur in dur_variants:
             try:
                 synced, plain = _query_lrclib(a, t, alb, dur, request_delay)
                 if synced or plain:
                     return synced, plain
             except Exception as exc:
-                last_exc = exc
+                if _is_retryable(exc):
+                    last_transient_exc = exc
 
-    if last_exc:
-        raise last_exc
+    if last_transient_exc:
+        raise last_transient_exc
 
     return None, None
 
