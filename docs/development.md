@@ -58,10 +58,11 @@ A test written alongside a fix isn't known to cover the bug until it has failed
 against the unfixed code:
 
 ```bash
-cp spindlebot/<module>.py /tmp/fixed.py                     # keep the fix
+backup=$(mktemp)                                             # per-run: agents run this concurrently
+cp spindlebot/<module>.py "$backup"                          # keep the fix
 git show origin/main:spindlebot/<module>.py > spindlebot/<module>.py
 python3 -m pytest tests/<new_tests>.py -q                    # expect failures
-cp /tmp/fixed.py spindlebot/<module>.py                      # restore
+cp "$backup" spindlebot/<module>.py && rm "$backup"          # restore
 python3 -m pytest tests/<new_tests>.py -q                    # expect green
 ```
 
