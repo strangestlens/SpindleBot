@@ -6,6 +6,13 @@ refactor epic is complete.
 
 ## [Unreleased]
 
+### Fixed
+- Sync now checks audio and sidecar source bytes against the checksum captured
+  in their COPY plan before copying, and verifies the destination against that
+  same checksum before recording presence. Replacements and plans with no
+  checksum fail without executing the action. Schema v9 adds `expected_sha256`;
+  older queued copies are left without a checksum and must be replanned.
+
 ### Added
 - Optional collection audit: `spindlebot collection-audit` compares an external collection
   against the digital library and lists what you own but haven't ripped. Purely assistive —

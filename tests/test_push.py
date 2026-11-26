@@ -275,7 +275,8 @@ def test_push_finishes_an_earlier_unexecuted_copy_for_this_target(conn, tmp_path
         conn, run_id=run_id, action_kind=ActionKind.COPY,
         content_kind=ContentKind.AUDIO, content_id=audio.id,
         source_location_id=pending.id, dest_location_id=dap.id,
-        rel_path=rel2, now=0)
+        rel_path=rel2, now=0,
+        expected_sha256=presence_repo.get(conn, audio.id, pending.id).file_sha256)
     action_repo.acknowledge(conn, [stranded.id], now=0)
 
     push_location(conn, location=dap, root=Path(dap.root_path), copy_fn=_copy)

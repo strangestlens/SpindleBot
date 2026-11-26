@@ -34,7 +34,7 @@ music-sync.sh
     ├─ inventory   scan the location into the DB
     ├─ review      diff DB vs observed → a plan of pending actions
     ├─ acknowledge
-    ├─ sync        copy → verify dest sha256 → record presence
+    ├─ sync        verify source vs plan → copy → verify dest → record presence
     ├─ prune       release Pending copies verified on retention
     ├─ reconcile   fix up beets DB paths
     └─ notify
@@ -98,8 +98,11 @@ copy lives at.
 falling back to a whole-file sha256 when there isn't one. Decoded audio is the
 right identity because re-tagging a file changes its bytes but not its music;
 two copies that differ only in metadata are the same content. Per-copy file
-sha256 exists too, but it is **integrity**, never identity — it's what `sync`
-verifies at the destination after a copy.
+sha256 exists too, but it is **integrity**, never identity. `review` freezes
+the source presence checksum into each COPY action. `sync` verifies the source
+against that planned checksum before copying, then verifies the destination
+against the same checksum before recording presence. Refreshing inventory after
+planning cannot change what an acknowledged action is allowed to copy.
 
 **Locations are first-class**, not paths in a config file. Each is identified by
 a marker file `.spindlebot-location-<uuid>` at its root, and a root may be a

@@ -3,9 +3,9 @@ Sync executor: the ONLY code that moves bytes. It runs acknowledged
 `pending_action` rows and nothing else — the reconciler proposes, a human
 acknowledges, this executes.
 
-`execute_pending` covers COPY and is NON-destructive: copy → verify destination
-hash matches source → record presence → mark executed. A hash mismatch fails
-loudly (no presence, retried); per-action errors are isolated.
+`execute_pending` covers COPY and is NON-destructive: verify source against plan
+→ copy → verify destination against plan → record presence → mark executed.
+A hash mismatch fails loudly (no presence, retried); per-action errors are isolated.
 
 `prune_released` is the destructive counterpart, and is safe by construction: it
 releases a file from the non-retention authoring library (Pending) ONLY once the
@@ -72,7 +72,7 @@ def execute_pending(
     checkpoint: Callable[[], None] | None = None,
     commit_every: int = 1,
 ) -> SyncResult:
-    """Execute acknowledged COPY actions (copy → verify → record presence).
+    """Execute acknowledged COPY actions (verify source → copy → verify → record).
 
     Reads only acknowledged, not-yet-executed rows. `dest_location_id` scopes to
     a single destination — so the retention mount agent only executes the work
@@ -116,13 +116,22 @@ def execute_pending(
                     result.errors.append(f"action {action.id}: source missing ({src})")
                     continue
 
-                expected = file_sha256(src)
+                expected = action.expected_sha256
+                if not expected:
+                    raise IntegrityMismatch(
+                        f"action {action.id}: missing planned source sha256; "
+                        "run inventory and review to create a new COPY plan")
+                source_sha = file_sha256(src)
+                if source_sha != expected:
+                    raise IntegrityMismatch(
+                        f"action {action.id}: source {src} hash {source_sha[:12]} != "
+                        f"planned {expected[:12]}; source changed since inventory/plan")
                 copy_fn(src, dst)
                 actual = file_sha256(dst)
                 if actual != expected:
                     raise IntegrityMismatch(
                         f"action {action.id}: {dst} hash {actual[:12]} != "
-                        f"source {expected[:12]}")
+                        f"planned {expected[:12]}")
 
                 # Record the DESTINATION's mtime alongside size and hash.
                 # inventory's incremental rescan skips a file only when its
