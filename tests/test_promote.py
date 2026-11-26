@@ -11,15 +11,29 @@ from __future__ import annotations
 
 import shutil
 import struct
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import mutagen.flac
+import pytest
 
 from spindlebot.services.promote import (
     finalize_processing,
     promote_album,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_guard_configuration(monkeypatch):
+    """These orchestration tests stub beet; native guard tests use real beets."""
+
+    @contextmanager
+    def prepared(beet, command):
+        yield [str(beet), command], {}
+
+    monkeypatch.setattr("spindlebot.services.promote.guarded_beet", prepared)
+
 
 _SUBPROCESS = "spindlebot.services.promote.subprocess.run"
 _FETCH = "spindlebot.pipeline.stages.fetch_lyrics.fetch_lyrics"

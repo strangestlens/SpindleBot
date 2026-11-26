@@ -1,0 +1,341 @@
+"""Album identity guards, including native beets against isolated fixtures."""
+
+from __future__ import annotations
+
+import json
+import struct
+import subprocess
+import sys
+from pathlib import Path
+
+import mutagen.flac
+import pytest
+
+from spindlebot.services.beets_guard import guarded_beet
+from spindlebot.services.directory_collision import (
+    DirectoryCollision,
+    check_album_destinations,
+)
+
+
+def _flac(path: Path, identity: int, *, album="MAYA", title="Track"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    streaminfo = (
+        struct.pack(">HH", 4096, 4096)
+        + b"\x00" * 6
+        + struct.pack(">Q", (44100 << 44) | (15 << 36))
+        + bytes([identity]) * 16
+    )
+    path.write_bytes(b"fLaC" + bytes([0x80, 0, 0, 0x22]) + streaminfo)
+    audio = mutagen.flac.FLAC(path)
+    audio.add_tags()
+    for key, value in {
+        "artist": "Artist",
+        "albumartist": "Artist",
+        "album": album,
+        "title": title,
+        "tracknumber": "1",
+    }.items():
+        audio[key] = [value]
+    audio.save()
+
+
+def _case_insensitive(path):
+    probe = path / "CaseProbe"
+    probe.write_text("probe")
+    supported = (path / "caseprobe").exists()
+    probe.unlink()
+    if not supported:
+        pytest.skip(
+            "requires a case-insensitive filesystem to reproduce Maya/MAYA aliasing"
+        )
+
+
+def test_foreign_audio_refuses_the_whole_album_before_writes(tmp_path):
+    source = tmp_path / "Import/new.flac"
+    dest = tmp_path / "Pending/Artist/Album/new.flac"
+    _flac(source, 2)
+    _flac(dest.parent / "old.flac", 1)
+    before = source.read_bytes(), (dest.parent / "old.flac").read_bytes()
+    with pytest.raises(DirectoryCollision, match="different audio"):
+        check_album_destinations([source], [dest])
+    assert before == (source.read_bytes(), (dest.parent / "old.flac").read_bytes())
+    assert not dest.exists()
+
+
+def test_same_audio_with_changed_tags_is_safe(tmp_path):
+    source = tmp_path / "Import/new.flac"
+    dest = tmp_path / "Pending/Artist/Album/new.flac"
+    _flac(source, 1, title="New tags")
+    _flac(dest, 1, title="Old tags")
+    assert source.read_bytes() != dest.read_bytes()
+    check_album_destinations([source], [dest])
+
+
+def test_existing_incoming_subset_is_safe_but_a_foreign_track_is_not(tmp_path):
+    first, second = tmp_path / "Import/first.flac", tmp_path / "Import/second.flac"
+    dest = tmp_path / "Processing/Artist/Album"
+    _flac(first, 1)
+    _flac(second, 2)
+    _flac(dest / "first.flac", 1)
+    check_album_destinations([first, second], [dest / first.name, dest / second.name])
+    _flac(dest / "foreign.flac", 3)
+    with pytest.raises(DirectoryCollision):
+        check_album_destinations(
+            [first, second], [dest / first.name, dest / second.name]
+        )
+
+
+def test_case_alias_is_decided_by_filesystem_and_identity(tmp_path):
+    _case_insensitive(tmp_path)
+    source = tmp_path / "Import/new.flac"
+    _flac(source, 2)
+    old = tmp_path / "Pending/Artist/Maya/old.flac"
+    _flac(old, 1)
+    with pytest.raises(DirectoryCollision):
+        check_album_destinations([source], [old.parent.with_name("MAYA") / source.name])
+
+
+@pytest.fixture
+def native(tmp_path, monkeypatch):
+    pytest.importorskip(
+        "beets", reason="native adapter tests need beets (installed in CI)"
+    )
+    configdir = tmp_path / "BeetsConfig"
+    configdir.mkdir()
+    pending = tmp_path / "Pending"
+    pending.mkdir()
+    config = {
+        "directory": str(pending),
+        "library": str(tmp_path / "beets.db"),
+        "plugins": [],
+        "pluginpath": [],
+        "musicbrainz": {"enabled": False},
+        "threaded": False,
+        "paths": {"default": "$albumartist/$album/$track $title"},
+        "import": {
+            "autotag": False,
+            "move": True,
+            "copy": False,
+            "write": False,
+            "resume": False,
+            "incremental": False,
+            "quiet": True,
+            "duplicate_action": "skip",
+        },
+    }
+    (configdir / "config.yaml").write_text(json.dumps(config))
+    monkeypatch.setenv("BEETSDIR", str(configdir))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "EmptyConfig"))
+    beet = tmp_path / "beet"
+    beet.write_text(
+        f"#!{sys.executable}\n"
+        "import socket\n"
+        "def refused(*a, **kw): raise OSError('network disabled in native guard tests')\n"
+        "socket.socket.connect = refused\n"
+        "socket.create_connection = refused\n"
+        "from beets.ui import main\nmain()\n"
+    )
+    beet.chmod(0o755)
+    return beet, pending, config
+
+
+def _run(beet, *args):
+    with guarded_beet(beet, args[0]) as (prefix, env):
+        return subprocess.run(
+            [*prefix, *args[1:]], env=env, capture_output=True, text=True
+        )
+
+
+@pytest.mark.parametrize("case_alias", [False, True])
+def test_native_as_is_import_refuses_before_first_canonical_write(
+    native, tmp_path, case_alias
+):
+    beet, pending, _ = native
+    if case_alias:
+        _case_insensitive(tmp_path)
+    old = pending / "Artist" / ("Maya" if case_alias else "MAYA") / "old.flac"
+    _flac(old, 1)
+    source = tmp_path / "Import/new.flac"
+    _flac(source, 2)
+    before = source.read_bytes(), old.read_bytes()
+    result = _run(beet, "import", "-A", "-q", str(source.parent))
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "collision" in result.stderr.lower()
+    assert source.exists() and (source.read_bytes(), old.read_bytes()) == before
+    assert sorted(p.name for p in old.parent.iterdir()) == [old.name]
+
+
+def test_native_import_and_same_album_duplicate_remain_supported(native, tmp_path):
+    beet, pending, _ = native
+    source = tmp_path / "Import/first.flac"
+    _flac(source, 1)
+    first = _run(beet, "import", "-A", "-q", str(source.parent))
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert not source.exists()
+    duplicate = tmp_path / "ImportAgain/second.flac"
+    _flac(duplicate, 1)
+    result = _run(beet, "import", "-A", "-q", str(duplicate.parent))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert duplicate.exists(), (
+        "beets duplicate skip leaves the incoming rip for the existing Duplicates flow"
+    )
+    assert len(list(pending.rglob("*.flac"))) == 1
+
+
+@pytest.mark.parametrize("area", ["Processing", "Pending"])
+def test_native_move_refuses_a_foreign_album_directory(native, tmp_path, area):
+    beet, pending, _ = native
+    source = tmp_path / "Import/first.flac"
+    _flac(source, 2)
+    assert _run(beet, "import", "-A", "-q", str(source.parent)).returncode == 0
+    current = next(pending.rglob("*.flac"))
+    destination = tmp_path / area if area != "Pending" else tmp_path / "OtherPending"
+    old = destination / "Artist/MAYA/old.flac"
+    _flac(old, 1)
+    before = current.read_bytes(), old.read_bytes()
+    result = _run(beet, "move", "-d", str(destination), f"path:{current.parent}/")
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert (current.read_bytes(), old.read_bytes()) == before
+    assert sorted(p.name for p in old.parent.iterdir()) == [old.name]
+
+
+def test_native_matched_import_checks_the_post_autotag_destination(native, tmp_path):
+    beet, pending, config = native
+    plugins = tmp_path / "FixturePlugins"
+    plugins.mkdir()
+    marker = tmp_path / "metadata-applied"
+    (plugins / "fixture_tagger.py").write_text("""
+from pathlib import Path
+from beets import config
+from beets.plugins import BeetsPlugin
+from beets.autotag.hooks import AlbumInfo, TrackInfo
+class FixtureTaggerPlugin(BeetsPlugin):
+    data_source = "Fixture"
+    def __init__(self):
+        super().__init__()
+        self.config.add({"source_weight": 0.0})
+        self.register_listener("import_task_apply", self.applied)
+    def applied(self, session, task):
+        Path(config["fixture_marker"].get()).write_text("matched metadata applied")
+    def candidates(self, items, artist, album, va_likely):
+        yield AlbumInfo(album="MAYA", album_id="fixture-album", artist="Artist",
+            artist_id="fixture-artist", data_source="Fixture", mediums=1, tracks=[
+            TrackInfo(title="Track", track_id="fixture-track", artist="Artist",
+                length=0, index=1, medium=1, medium_index=1)])
+    def item_candidates(self, item, artist, title):
+        return []
+    def album_for_id(self, album_id):
+        return None
+    def track_for_id(self, track_id):
+        return None
+""")
+    config["plugins"] = ["fixture_tagger"]
+    config["pluginpath"] = [str(plugins)]
+    config["fixture_marker"] = str(marker)
+    config["import"]["autotag"] = True
+    config["match"] = {"strong_rec_thresh": 1.0, "medium_rec_thresh": 1.0}
+    config_path = tmp_path / "BeetsConfig/config.yaml"
+    config_path.write_text(json.dumps(config))
+    old = pending / "Artist/MAYA/old.flac"
+    _flac(old, 1)
+    source = tmp_path / "Import/new.flac"
+    _flac(source, 2, album="BeforeTagging")
+    before = source.read_bytes(), old.read_bytes()
+    result = _run(beet, "import", "-q", str(source.parent))
+    assert marker.exists(), result.stdout + result.stderr
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "collision" in result.stderr.lower()
+    assert (source.read_bytes(), old.read_bytes()) == before
+    assert sorted(p.name for p in old.parent.iterdir()) == [old.name]
+
+
+def test_missing_adapter_refuses_the_guarded_command_before_writing(native, tmp_path):
+    beet, pending, _ = native
+    source = tmp_path / "Import/new.flac"
+    _flac(source, 2)
+    before = source.read_bytes()
+    with guarded_beet(beet, "import") as (prefix, env):
+        overlay = Path(prefix[2])
+        config = json.loads(overlay.read_text())
+        config["plugins"] = []
+        overlay.write_text(json.dumps(config))
+        result = subprocess.run(
+            [*prefix, "-A", "-q", str(source.parent)],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    assert result.returncode != 0
+    assert source.read_bytes() == before
+    assert list(pending.rglob("*.flac")) == []
+
+
+@pytest.mark.parametrize("case_alias", [False, True])
+def test_runner_refuses_before_import_first_writes_a_canonical_directory(
+    native, tmp_path, case_alias
+):
+    from spindlebot.pipeline.runner import (
+        ImportConfig,
+        ImportResult,
+        ImportRunner,
+        _AlbumBatch,
+    )
+
+    beet, pending, _ = native
+    if case_alias:
+        _case_insensitive(tmp_path)
+    old = pending / "Artist" / ("Maya" if case_alias else "MAYA") / "old.flac"
+    _flac(old, 1)
+    source = tmp_path / "Import/new.flac"
+    _flac(source, 2)
+    before = source.read_bytes(), old.read_bytes()
+    cfg = ImportConfig(
+        trigger=source.parent,
+        force=True,
+        beet=beet,
+        python=Path(sys.executable),
+        db=tmp_path / "beets.db",
+        pending_dir=pending,
+        processing_dir=tmp_path / "Processing",
+        import_dir=source.parent,
+        archive=tmp_path / "Archive",
+        duplicates_dir=tmp_path / "Duplicates",
+        pipeline_dir=tmp_path,
+        log_file=tmp_path / "watcher.log",
+    )
+    batch = _AlbumBatch("Artist - MAYA", [str(source.parent)], source.parent, [source])
+    result = ImportResult(success=False)
+    assert ImportRunner(cfg)._import_one_album(batch, result) is False
+    assert (source.read_bytes(), old.read_bytes()) == before
+    assert sorted(p.name for p in old.parent.iterdir()) == [old.name]
+
+
+@pytest.mark.parametrize("case_alias", [False, True])
+def test_promote_refuses_the_native_pending_collision(native, tmp_path, case_alias):
+    from spindlebot.services.promote import promote_album
+
+    beet, pending, config = native
+    if case_alias:
+        _case_insensitive(tmp_path)
+    processing = tmp_path / "Processing"
+    processing.mkdir()
+    config["directory"] = str(processing)
+    config_path = tmp_path / "BeetsConfig/config.yaml"
+    config_path.write_text(json.dumps(config))
+    source = tmp_path / "Import/new.flac"
+    _flac(source, 2)
+    seeded = _run(beet, "import", "-A", "-q", str(source.parent))
+    assert seeded.returncode == 0, seeded.stdout + seeded.stderr
+    current = next(processing.rglob("*.flac"))
+    current.with_suffix(".nolrc").write_text("")
+    old = pending / "Artist" / ("Maya" if case_alias else "MAYA") / "old.flac"
+    _flac(old, 1)
+    config["directory"] = str(pending)
+    config_path.write_text(json.dumps(config))
+    before = current.read_bytes(), old.read_bytes()
+    result = promote_album(current.parent, beet)
+    assert result.promoted is False
+    assert "collision" in result.move_error.lower()
+    assert (current.read_bytes(), old.read_bytes()) == before
+    assert current.with_suffix(".nolrc").exists()

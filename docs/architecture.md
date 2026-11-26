@@ -161,6 +161,34 @@ fallback could false-match an unrelated release).
   handling entirely and leave the files in place, rather than risk moving a real
   import.
 
+### Canonical directory collisions
+
+Before import or relocation writes audio into a canonical directory, the
+pipeline loads a small beets guard through a private temporary configuration
+overlay. It preserves the effective configured plugins and path rules, and uses
+beets' own destination calculation after metadata matching. This protects the
+first `beet import` write as well as the later Processing move and Pending
+promotion; checking only the explicit moves would be too late because import
+can already have written into Pending.
+
+The guard compares decoded-audio identity (with the normal sha256 fallback).
+An existing directory may hold a subset of the incoming album, allowing an
+interrupted move to resume. A directory containing any foreign audio identity
+is refused before copying or moving audio. Same-album imports still follow
+beets' duplicate decision and the runner's existing Duplicates handling.
+
+Guard-owned command aliases make a missing or broken adapter fail closed rather
+than letting beets log a plugin-load error and continue unprotected. Neither the
+installed beets configuration nor its secrets are copied to the overlay; only
+plugin names/search paths and disabled-plugin settings are carried over. The
+temporary overlay is removed after the command, including on failure.
+
+This is a pre-write check, not a cross-process filesystem lock. Independent
+imports or external edits racing between verification and movement remain a
+time-of-check/time-of-use limitation. Beets can record incoming items in its
+database before an import-stage refusal; the source files remain intact at
+their recorded paths. The guard does not attempt destructive database cleanup.
+
 ## Path template
 
 ```

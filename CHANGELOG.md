@@ -7,6 +7,10 @@ refactor epic is complete.
 ## [Unreleased]
 
 ### Fixed
+- Import, Processing moves, and Pending promotion now refuse canonical album
+  directories containing another album's audio identity, including filesystem
+  case aliases. A mandatory beets adapter checks actual post-metadata paths;
+  matching audio and the existing duplicate workflow remain supported.
 - Sync now checks audio and sidecar source bytes against the checksum captured
   in their COPY plan before copying, and verifies the destination against that
   same checksum before recording presence. Replacements and plans with no
