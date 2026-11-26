@@ -70,10 +70,16 @@ def _restore_absent(
     presence. Failed publication may leave an unverified partial file, which is
     never removed by pathname because that could unlink a concurrent replacement.
     """
-    root = Path(os.path.abspath(dst.parent if root is None else root))
+    root = dst.parent if root is None else root
+    if ".." in root.parts or ".." in dst.parts or "\x00" in str(root) + str(dst):
+        raise IntegrityMismatch(f"action {action_id}: invalid restoration path: {dst}")
+    root = Path(os.path.abspath(root))
     dst = Path(os.path.abspath(dst))
-    relative = dst.relative_to(root)
-    if not relative.parts or any(part in (".", "..") for part in relative.parts):
+    try:
+        relative = dst.relative_to(root)
+    except ValueError as exc:
+        raise IntegrityMismatch(f"action {action_id}: restoration path outside root: {dst}") from exc
+    if not relative.parts:
         raise IntegrityMismatch(f"action {action_id}: invalid restoration path: {dst}")
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     with ExitStack() as stack:
@@ -223,6 +229,13 @@ def execute_pending(
                     result.errors.append(
                         f"action {action.id}: source/dest not mounted or identified")
                     continue
+
+                if action.dest_must_be_absent:
+                    for relative in (action.rel_path, action.source_rel_path or action.rel_path):
+                        path = Path(relative)
+                        if path.is_absolute() or ".." in path.parts or "\x00" in relative:
+                            raise IntegrityMismatch(
+                                f"action {action.id}: invalid relative restoration path: {relative!r}")
 
                 src = Path(src_root) / (action.source_rel_path or action.rel_path)
                 dst = Path(dst_root) / action.rel_path

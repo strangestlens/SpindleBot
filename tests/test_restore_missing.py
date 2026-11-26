@@ -463,3 +463,29 @@ def test_restoration_refuses_any_foreign_marker_even_when_expected_sorts_first(s
         sync._restore_absent(src, dst, expected=file_sha256(src), copy_fn=_copy,
                              action_id=1, root=Path(target.root_path), location_uuid=target.uuid)
     assert not dst.exists()
+
+
+@pytest.mark.parametrize("mode", ["parent", "absolute", "nul"])
+@pytest.mark.parametrize("field", ["rel_path", "source_rel_path"])
+def test_an_invalid_restoration_path_fails_only_its_own_action(seeded, mode, field):
+    conn, source, target = seeded
+    audio = Path(target.root_path) / 'Artist/Album/01.flac'
+    audio.unlink()
+    audio.with_suffix('.lrc').unlink()
+    inventory.inventory_location(conn, location=target, root=target.root_path, now=200)
+    plan = reconcile_location(conn, target=target, source_locations=[source], now=300)
+    action_repo.acknowledge_run(conn, plan.run_id, now=300)
+    outside = Path(target.root_path).parent / "outside.flac"
+    if field == "source_rel_path":
+        _copy(Path(source.root_path) / "Artist/Album/01.flac", outside)
+    invalid = {"parent": "../outside.flac", "absolute": str(outside), "nul": "invalid\x00.flac"}[mode]
+    conn.execute(f"UPDATE pending_action SET {field}=? WHERE run_id=? AND content_kind='audio'",
+                 (invalid, plan.run_id))
+    result = execute_pending(conn, copy_fn=_copy, now=400)
+    assert result.failed == 1 and result.copied == 1
+    assert audio.with_suffix('.lrc').exists()
+    if field == "rel_path":
+        assert not outside.exists()
+    else:
+        assert outside.read_bytes() == (Path(source.root_path) / "Artist/Album/01.flac").read_bytes()
+    assert len(action_repo.list_pending_execution(conn)) == 1

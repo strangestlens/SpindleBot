@@ -119,7 +119,9 @@ claims without authorizing a restoration. Scans also checkpoint their running
 marker before preparation, so an interrupted scan cannot revive older absence
 evidence when its connection closes.
 
-Restoration plans freeze source and destination paths separately. Sync verifies
+Restoration plans freeze source and destination paths separately. Absolute or
+parent-traversing queued paths are refused before source access; an invalid
+action fails independently while valid queued work continues. Sync verifies
 a staged copy, exclusively creates the absent destination, and writes through
 that file descriptor. Directory descriptors anchored to the location root reject
 symlinked parents and prevent concurrent parent replacement from redirecting writes.
