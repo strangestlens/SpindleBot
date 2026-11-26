@@ -116,6 +116,18 @@ def test_appledouble_resource_forks_are_not_foreign_audio(tmp_path):
     check_album_destinations([source], [old.parent / source.name])
 
 
+def test_nested_directory_symlink_refuses_incomplete_destination_inspection(tmp_path):
+    source = tmp_path / "Import/new.flac"
+    old = tmp_path / "Elsewhere/old.flac"
+    destination = tmp_path / "Pending/Album"
+    _flac(source, 2)
+    _flac(old, 1)
+    destination.mkdir(parents=True)
+    (destination / "Disc2").symlink_to(old.parent, target_is_directory=True)
+    with pytest.raises(DirectoryCollision, match="directory symlink"):
+        check_album_destinations([source], [destination / source.name])
+
+
 def test_operation_identity_cache_reuses_reads_and_invalidates_changed_files(
     tmp_path, monkeypatch
 ):
@@ -519,3 +531,47 @@ def test_native_multidisc_move_resumes_with_a_selected_disc_already_in_place(
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     assert len(list(pending.rglob("*.flac"))) == 2
     assert not any(p.exists() for p in tracks)
+
+
+@pytest.mark.parametrize("case_alias", [False, True])
+def test_native_move_refuses_conflicting_planned_albums_before_any_write(
+    native, tmp_path, case_alias
+):
+    from beets.library import Library
+
+    beet, pending, config = native
+    if case_alias:
+        _case_insensitive(tmp_path)
+    processing = tmp_path / "Processing"
+    processing.mkdir()
+    config["directory"] = str(processing)
+    config_path = tmp_path / "BeetsConfig/config.yaml"
+    config_path.write_text(json.dumps(config))
+    for n, album in enumerate(("One", "Two"), 1):
+        source = tmp_path / f"Import{n}/source.flac"
+        _flac(source, n, album=album)
+        result = _run(beet, "import", "-A", "-q", str(source.parent))
+        assert result.returncode == 0, result.stdout + result.stderr
+    tracks = sorted(processing.rglob("*.flac"))
+    assert len(tracks) == 2
+    before = [p.read_bytes() for p in tracks]
+    if case_alias:
+        # Different, already imported albums now resolve to Maya/MAYA without
+        # triggering beets' metadata duplicate decision during fixture setup.
+        library = Library(str(tmp_path / "beets.db"))
+        for item, album in zip(library.items(), ("Maya", "MAYA")):
+            item.album = album
+            item.store()
+            record = item.get_album()
+            record.album = album
+            record.store()
+        library._close()
+    else:
+        config["paths"]["default"] = "$albumartist/Shared/$track $title"
+        config_path.write_text(json.dumps(config))
+    result = _run(beet, "move", "-d", str(pending), f"path:{processing}/")
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert all(p.exists() for p in tracks)
+    assert [p.read_bytes() for p in tracks] == before
+    assert list(pending.rglob("*.flac")) == []
+    assert "planned album directory collision" in result.stderr.lower()

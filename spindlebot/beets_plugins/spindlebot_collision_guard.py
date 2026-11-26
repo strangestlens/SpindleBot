@@ -7,13 +7,14 @@ configuration overlay. The core pipeline does not import beets.
 from __future__ import annotations
 
 import os
+import unicodedata
 from copy import copy
 from pathlib import Path
 from collections import defaultdict
 
 from beets import ui
 from beets.plugins import BeetsPlugin
-from beets.util import normpath
+from beets.util import case_sensitive, normpath
 
 from spindlebot.core.errors import SpindleBotError
 from spindlebot.services.directory_collision import (
@@ -82,6 +83,7 @@ class SpindlebotCollisionGuardPlugin(BeetsPlugin):
         identities = self._check(sources, destinations)
         for item, source in zip(items, sources):
             self._participants[item.id] = self._identity(source), identities
+        return identities
 
     def preflight_move(self, lib, opts, args):
         """Check the complete native query before any selected item is moved."""
@@ -96,6 +98,7 @@ class SpindlebotCollisionGuardPlugin(BeetsPlugin):
                 item.album_id if item.album_id is not None else ("item", item.id)
             ].append(item)
         self._participants.clear()
+        reservations = []
         for selected in groups.values():
             if not any(i.path != i.destination(basedir=basedir) for i in selected):
                 continue
@@ -106,9 +109,22 @@ class SpindlebotCollisionGuardPlugin(BeetsPlugin):
                 for i in selected
                 if _path(i.path).exists() or i.path != i.destination(basedir=basedir)
             ]
-            self._check_items(
-                selected, [_path(i.destination(basedir=basedir)) for i in selected]
-            )
+            destinations = [_path(i.destination(basedir=basedir)) for i in selected]
+            identities = self._check_items(selected, destinations)
+            for directory in {d.parent for d in destinations}:
+                resolved = directory.resolve()
+                key = str(resolved)
+                if not case_sensitive(os.fsencode(resolved)):
+                    key = unicodedata.normalize("NFC", key).casefold()
+                parts = Path(key).parts
+                for previous, allowed in reservations:
+                    length = min(len(parts), len(previous))
+                    if parts[:length] == previous[:length] and identities != allowed:
+                        raise ui.UserError(
+                            f"SpindleBot refused planned album directory collision: {directory}; "
+                            "selected albums contain different audio"
+                        )
+                reservations.append((parts, identities))
 
     def check_import(self, session, task):
         items = list(task.imported_items())

@@ -76,7 +76,12 @@ def check_album_destinations(
             )
         # os.walk with onerror refuses unreadable subdirectories rather than
         # silently treating an incomplete traversal as an empty safe directory.
-        for root, _, files in os.walk(directory, onerror=_raise_walk_error):
+        for root, directories, files in os.walk(directory, onerror=_raise_walk_error):
+            for name in directories:
+                if (Path(root) / name).is_symlink():
+                    raise DirectoryCollision(
+                        f"cannot verify album directory containing a directory symlink: {Path(root) / name}"
+                    )
             for name in files:
                 existing = Path(root) / name
                 if (

@@ -179,7 +179,11 @@ AppleDouble `._` resource files are ignored. Same-album imports still follow
 beets' duplicate decision and the runner's existing Duplicates handling.
 
 Relocation preflights every selected item's native destination before any item
-moves, including multidisc destinations and `move -d` overrides. Source identity
+moves, including multidisc destinations and `move -d` overrides. Different
+selected albums cannot reserve overlapping destination trees, including case
+aliases on the actual filesystem, even when those directories start empty.
+Nested directory symlinks refuse verification rather than hiding uninspected
+audio behind a link. Source identity
 is scoped to the selected items, so an offline, unselected sibling disc does not
 block local promotion. An operation-local identity cache avoids repeated full
 file reads and invalidates on device/inode/size/mtime/ctime changes. Per-item move
