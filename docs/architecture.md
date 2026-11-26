@@ -191,6 +191,14 @@ hooks recheck destination contents and refuse changed source identity.
 Native post-move tag writes refresh the participating destination's identity,
 so formats using whole-file SHA fallback still import multiple matched tracks.
 
+The validation unit is each actual audio destination directory and its
+descendants. It does not infer a broader album root from arbitrary templates:
+the shipped `Artist/Album [Disk N]` layout has `Artist` as its common parent,
+which also contains unrelated albums. With a custom `Album/Disc 1/track` layout,
+audio in the ancestor `Album` or an unselected sibling `Disc 2` is outside that
+destination's check. Templates needing that broader boundary require an explicit
+album-root contract; guessing from path names would falsely refuse other albums.
+
 Guard-owned command aliases make a missing or broken adapter fail closed rather
 than letting beets log a plugin-load error and continue unprotected. Neither the
 installed beets configuration nor its secrets are copied to the overlay; only

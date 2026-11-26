@@ -279,6 +279,20 @@ def test_native_import_and_same_album_duplicate_remain_supported(native, tmp_pat
     assert len(list(pending.rglob("*.flac"))) == 1
 
 
+def test_native_import_does_not_treat_a_sibling_album_as_a_collision(native, tmp_path):
+    beet, pending, _ = native
+    sibling = pending / "Artist/OtherAlbum/old.flac"
+    _flac(sibling, 1, album="OtherAlbum")
+    before = sibling.read_bytes()
+    source = tmp_path / "Import/new.flac"
+    _flac(source, 2)
+    result = _run(beet, "import", "-A", "-q", str(source.parent))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not source.exists()
+    assert sibling.read_bytes() == before
+    assert len(list(pending.rglob("*.flac"))) == 2
+
+
 @pytest.mark.parametrize("area", ["Processing", "Pending"])
 def test_native_move_refuses_a_foreign_album_directory(native, tmp_path, area):
     beet, pending, _ = native

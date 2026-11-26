@@ -70,3 +70,4 @@ def test_failed_configuration_command_does_not_leak_its_output(monkeypatch):
         with guarded_beet("beet", "import"):
             pytest.fail("failed configuration must not yield a runnable import")
     assert "sensitive" not in str(error.value) and "secret" not in str(error.value)
+    assert "exit 1" in str(error.value)

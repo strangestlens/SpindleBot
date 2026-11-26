@@ -39,7 +39,7 @@ def guarded_beet(beet: str | Path, command: str):
     )
     if proc.returncode:
         raise SpindleBotError(
-            "could not read effective beets configuration for collision protection"
+            f"could not read effective beets configuration for collision protection (exit {proc.returncode})"
         )
     try:
         config = yaml.safe_load(proc.stdout)
