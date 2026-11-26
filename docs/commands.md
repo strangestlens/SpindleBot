@@ -170,6 +170,40 @@ python3 -m spindlebot collection-ignore --list | --remove <id...> | --clear --ye
 
 Full reference in [collection audit](collection-audit.md).
 
+## Listening notes
+
+```bash
+python3 -m spindlebot note add [--artist <a>] [--album <b>] [--track <t>] [--mbid <id>] [--new]
+                          [-m <text> | -F <file> | -] [--tag <t>] [--session <id>]
+                          [--index auto|beets|db] [--json]
+python3 -m spindlebot note list [--artist <a>] [--album <b>] [--track <t>]
+                          [--kind artist|album|track] [--tag <t>] [--session <id>]
+                          [--since <date>] [--all] [--json]
+python3 -m spindlebot note show <id> [--history] [--json]
+python3 -m spindlebot note edit <id> [-m <text> | -F <file> | -] [--json]
+python3 -m spindlebot note rm <id> [--json]
+python3 -m spindlebot note restore <id> [--json]
+python3 -m spindlebot note tag <id> [--json] [--] <tag>...
+python3 -m spindlebot note untag <id> [--json] [--] <tag>
+python3 -m spindlebot note session start [--title <text>] [--json]
+python3 -m spindlebot note sessions [--since <date>] [--json]
+python3 -m spindlebot note import <file> [--dry-run] [--root-level N] [--new] [--skip-unresolved]
+                             [--index auto|beets|db] [--session <id>] [--title <text>] [--json]
+python3 -m spindlebot note export [--artist <a>] [--album <b>] [--track <t>]
+                             [--kind <k>] [--since <d>] [--root-level N] [-o <file>] [--json]
+python3 -m spindlebot note export --json [-o <file>]     # archival: tags, uuids, revisions; no JSON restore
+```
+
+`add` refuses an ambiguous subject rather than guessing; `--new` writes about
+something the library does not have. `import` is atomic and idempotent, and
+`--dry-run` prints the resolution table without writing. Full reference in
+[listening notes](notes.md).
+
+`-m/--message` and `--tag` are repeatable. Inline values such as
+`--message=--message` or `--tag=--json` preserve literal option names. `--`
+ends option parsing for positional tags; put output flags before it. Tags are
+case-sensitive and surrounding whitespace is trimmed on add, filter, and removal.
+
 ## lyric_timing (optional peer package)
 
 ```bash

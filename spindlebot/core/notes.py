@@ -136,6 +136,9 @@ class NoteSubjectRef:
     album_title: str | None = None
     track_title: str | None = None
     mbid: str | None = None
+    # Transient lookup evidence from the resolver, never a persisted identity.
+    # Default strict: a caller without the library cannot rule out another artist.
+    allow_loose_artist: bool = False
 
     @staticmethod
     def for_artist(name: str, mb_artistid: str | None = None) -> "NoteSubjectRef":
@@ -171,7 +174,31 @@ class NoteSubjectRef:
             artist_name=artist,
             album_title=album,
             track_title=title,
+            mbid=mb_albumid,
         )
+
+    @property
+    def alt_keys(self) -> tuple[str, ...]:
+        """Keys this same work could already be filed under.
+
+        `album_key` prefers a MusicBrainz id, so the key for a record CHANGES the
+        day you rip it and learn its MBID. A note written before then — "look for
+        this album" — would fork into a second subject, and its history and
+        filters would stop following the work.
+
+        So an MBID-backed ref reports the name-derived key it would have had
+        beforehand, and the service adopts that subject instead of creating a new
+        one. Nothing is reported in the other direction: a name-keyed ref cannot
+        guess an MBID it has never seen.
+        """
+        if not self.mbid:
+            return ()
+        if self.kind is NoteSubjectKind.ARTIST:
+            return (artist_key(self.artist_name),)
+        nameless_album = album_key(self.artist_name, self.album_title or "", None)
+        if self.kind is NoteSubjectKind.ALBUM:
+            return (nameless_album,)
+        return (track_key(nameless_album, self.track_title),)
 
     @property
     def label(self) -> str:

@@ -71,3 +71,22 @@ def list_all(
     sql += (" ORDER BY artist_name COLLATE NOCASE, album_title COLLATE NOCASE, "
             "track_title COLLATE NOCASE")
     return [NoteSubject.from_row(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def rekey(conn: sqlite3.Connection, subject_id: int, subject_key: str) -> NoteSubject:
+    """Re-point an existing subject at a new key, keeping its notes.
+
+    Used when a work's identity sharpens — a record noted before it was ripped is
+    keyed by name, and gains a MusicBrainz-backed key once it is in the library.
+    Re-keying the subject keeps the earlier notes attached to the work instead of
+    leaving them stranded on a subject nothing resolves to any more.
+
+    The caller must have established that `subject_key` is free; UNIQUE(kind,
+    subject_key) fails loudly rather than silently merging two subjects.
+    """
+    conn.execute(
+        "UPDATE note_subject SET subject_key = ? WHERE id = ?", (subject_key, subject_id)
+    )
+    found = get_by_id(conn, subject_id)
+    assert found is not None
+    return found
