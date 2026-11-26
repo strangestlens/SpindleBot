@@ -174,8 +174,16 @@ can already have written into Pending.
 The guard compares decoded-audio identity (with the normal sha256 fallback).
 An existing directory may hold a subset of the incoming album, allowing an
 interrupted move to resume. A directory containing any foreign audio identity
-is refused before copying or moving audio. Same-album imports still follow
+is refused before copying or moving audio, including audio in nested directories.
+AppleDouble `._` resource files are ignored. Same-album imports still follow
 beets' duplicate decision and the runner's existing Duplicates handling.
+
+Relocation preflights every selected item's native destination before any item
+moves, including multidisc destinations and `move -d` overrides. Source identity
+is scoped to the selected items, so an offline, unselected sibling disc does not
+block local promotion. An operation-local identity cache avoids repeated full
+file reads and invalidates on device/inode/size/mtime/ctime changes. Per-item move
+hooks recheck destination contents and refuse changed source identity.
 
 Guard-owned command aliases make a missing or broken adapter fail closed rather
 than letting beets log a plugin-load error and continue unprotected. Neither the

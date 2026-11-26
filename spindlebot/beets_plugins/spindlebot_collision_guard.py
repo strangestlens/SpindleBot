@@ -9,12 +9,17 @@ from __future__ import annotations
 import os
 from copy import copy
 from pathlib import Path
+from collections import defaultdict
 
 from beets import ui
 from beets.plugins import BeetsPlugin
+from beets.util import normpath
 
 from spindlebot.core.errors import SpindleBotError
-from spindlebot.services.directory_collision import check_album_destinations
+from spindlebot.services.directory_collision import (
+    IdentityCache,
+    check_album_destinations,
+)
 
 
 def _path(value) -> Path:
@@ -29,6 +34,8 @@ class SpindlebotCollisionGuardPlugin(BeetsPlugin):
         self.early_import_stages = [self.check_import]
         self.import_stages = [self.check_import]
         self.register_listener("before_item_moved", self.check_move)
+        self._identity = IdentityCache()
+        self._participants = {}
 
     def commands(self):
         # A missing/broken plugin must not silently turn protection off. Beets
@@ -42,26 +49,82 @@ class SpindlebotCollisionGuardPlugin(BeetsPlugin):
                 guarded = copy(command)
                 guarded.name = f"spindlebot-guarded-{command.name}"
                 guarded.aliases = []
+                if command.name == "move":
+                    native_move = command.func
+
+                    def move(lib, opts, args):
+                        if not opts.pretend:
+                            self.preflight_move(lib, opts, args)
+                        return native_move(lib, opts, args)
+
+                    guarded.func = move
                 commands.append(guarded)
         return commands
 
-    def _check(self, sources, destinations):
+    def _check(self, sources, destinations, identities=None):
         try:
-            check_album_destinations(sources, destinations)
+            return check_album_destinations(
+                sources,
+                destinations,
+                identity=self._identity,
+                identities=identities,
+            )
         except (SpindleBotError, OSError) as exc:
             raise ui.UserError(
                 f"SpindleBot refused an unsafe album move: {exc}"
             ) from exc
 
+    def _check_items(self, items, destinations):
+        sources = [_path(item.path) for item in items]
+        identities = self._check(sources, destinations)
+        for item, source in zip(items, sources):
+            self._participants[item.id] = self._identity(source), identities
+
+    def preflight_move(self, lib, opts, args):
+        """Check the complete native query before any selected item is moved."""
+        basedir = normpath(opts.dest) if opts.dest is not None else None
+        if opts.album:
+            items = [item for album in lib.albums(args) for item in album.items()]
+        else:
+            items = list(lib.items(args))
+        groups = defaultdict(list)
+        for item in items:
+            groups[
+                item.album_id if item.album_id is not None else ("item", item.id)
+            ].append(item)
+        self._participants.clear()
+        for selected in groups.values():
+            if not any(i.path != i.destination(basedir=basedir) for i in selected):
+                continue
+            # Selected items already in place can be the safe existing subset.
+            # A missing, unmoved item contributes no audio to that directory.
+            selected = [
+                i
+                for i in selected
+                if _path(i.path).exists() or i.path != i.destination(basedir=basedir)
+            ]
+            self._check_items(
+                selected, [_path(i.destination(basedir=basedir)) for i in selected]
+            )
+
     def check_import(self, session, task):
         items = list(task.imported_items())
         if items:
-            self._check(
-                [_path(item.path) for item in items],
-                [_path(item.destination()) for item in items],
-            )
+            self._check_items(items, [_path(item.destination()) for item in items])
 
     def check_move(self, item, source, destination):
-        album = item.get_album()
-        items = list(album.items()) if album else [item]
-        self._check([_path(i.path) for i in items], [_path(destination)] * len(items))
+        source = _path(source)
+        participant = self._participants.get(item.id)
+        if participant is None:
+            raise ui.UserError("SpindleBot refused a move outside the checked batch")
+        expected, identities = participant
+        try:
+            if self._identity(source) != expected:
+                raise ui.UserError(
+                    "SpindleBot refused a source changed after preflight"
+                )
+        except OSError as exc:
+            raise ui.UserError(
+                f"SpindleBot could not verify move source: {exc}"
+            ) from exc
+        self._check([source], [_path(destination)], identities)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import pytest
 from spindlebot.services.beets_guard import guarded_beet
 from spindlebot.services.directory_collision import (
     DirectoryCollision,
+    IdentityCache,
     check_album_destinations,
 )
 
@@ -94,6 +96,87 @@ def test_case_alias_is_decided_by_filesystem_and_identity(tmp_path):
     _flac(old, 1)
     with pytest.raises(DirectoryCollision):
         check_album_destinations([source], [old.parent.with_name("MAYA") / source.name])
+
+
+def test_nested_foreign_audio_is_part_of_the_existing_directory(tmp_path):
+    source = tmp_path / "Import/new.flac"
+    old = tmp_path / "Pending/Album/Disc1/old.flac"
+    _flac(source, 2)
+    _flac(old, 1)
+    with pytest.raises(DirectoryCollision):
+        check_album_destinations([source], [old.parent.parent / source.name])
+
+
+def test_appledouble_resource_forks_are_not_foreign_audio(tmp_path):
+    source = tmp_path / "Import/new.flac"
+    old = tmp_path / "Pending/Album/old.flac"
+    _flac(source, 1)
+    _flac(old, 1)
+    (old.parent / "._old.flac").write_bytes(b"AppleDouble resource fork")
+    check_album_destinations([source], [old.parent / source.name])
+
+
+def test_operation_identity_cache_reuses_reads_and_invalidates_changed_files(
+    tmp_path, monkeypatch
+):
+    import spindlebot.services.directory_collision as guard
+
+    source = tmp_path / "source.flac"
+    _flac(source, 1)
+    calls = []
+    original = guard.audio_content_id
+
+    def counted(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(guard, "audio_content_id", counted)
+    cache = IdentityCache()
+    first = cache(source)
+    for _ in range(10):
+        assert cache(source) == first
+    assert calls == [source]
+    _flac(source, 2, title="changed source bytes and tags")
+    assert cache(source) != first
+    assert calls == [source, source]
+
+
+def test_unreadable_destination_traversal_refuses_verification(tmp_path, monkeypatch):
+    import spindlebot.services.directory_collision as guard
+
+    source = tmp_path / "source.flac"
+    directory = tmp_path / "Album"
+    directory.mkdir()
+    _flac(source, 1)
+
+    def unreadable(directory, onerror):
+        onerror(PermissionError("fixture unreadable album subdirectory"))
+
+    monkeypatch.setattr(guard.os, "walk", unreadable)
+    with pytest.raises(PermissionError):
+        check_album_destinations([source], [directory / source.name])
+
+
+def test_adapter_refuses_a_changed_source_after_preflight(tmp_path):
+    from types import SimpleNamespace
+
+    pytest.importorskip(
+        "beets", reason="native adapter tests need beets (installed in CI)"
+    )
+    from beets import ui
+    from spindlebot.beets_plugins.spindlebot_collision_guard import (
+        SpindlebotCollisionGuardPlugin,
+    )
+
+    source = tmp_path / "Import/source.flac"
+    destination = tmp_path / "Pending/Album/source.flac"
+    _flac(source, 1)
+    item = SimpleNamespace(id=1, path=os.fsencode(source))
+    plugin = SpindlebotCollisionGuardPlugin()
+    plugin._check_items([item], [destination])
+    _flac(source, 2)
+    with pytest.raises(ui.UserError, match="changed after preflight"):
+        plugin.check_move(item, os.fsencode(source), os.fsencode(destination))
 
 
 @pytest.fixture
@@ -339,3 +422,72 @@ def test_promote_refuses_the_native_pending_collision(native, tmp_path, case_ali
     assert "collision" in result.move_error.lower()
     assert (current.read_bytes(), old.read_bytes()) == before
     assert current.with_suffix(".nolrc").exists()
+
+
+def _seed_two_discs(native, tmp_path):
+    beet, pending, config = native
+    processing = tmp_path / "Processing"
+    processing.mkdir()
+    config["directory"] = str(processing)
+    config["paths"]["default"] = "$albumartist/$album [Disk $disc]/$track $title"
+    (tmp_path / "BeetsConfig/config.yaml").write_text(json.dumps(config))
+    for disc in (1, 2):
+        path = tmp_path / f"Import/disc{disc}.flac"
+        _flac(path, disc)
+        audio = mutagen.flac.FLAC(path)
+        audio["discnumber"] = [str(disc)]
+        audio["disctotal"] = ["2"]
+        audio.save()
+    imported = _run(beet, "import", "-A", "-q", str(tmp_path / "Import"))
+    assert imported.returncode == 0, imported.stdout + imported.stderr
+    tracks = sorted(processing.rglob("*.flac"))
+    assert len(tracks) == 2
+    return beet, pending, config, tracks
+
+
+def test_native_multidisc_move_preflights_later_collision_before_any_write(
+    native, tmp_path
+):
+    beet, pending, _, tracks = _seed_two_discs(native, tmp_path)
+    old = (
+        pending / tracks[1].parent.relative_to(tmp_path / "Processing") / "foreign.flac"
+    )
+    _flac(old, 3)
+    before = [p.read_bytes() for p in tracks], old.read_bytes()
+    result = _run(beet, "move", "-d", str(pending), f"path:{tmp_path / 'Processing'}/")
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "collision" in result.stderr.lower()
+    assert all(p.exists() for p in tracks)
+    assert ([p.read_bytes() for p in tracks], old.read_bytes()) == before
+    assert list(pending.rglob("*.flac")) == [old]
+
+
+def test_native_promotion_ignores_an_unselected_offline_sibling_disc(native, tmp_path):
+    from spindlebot.services.promote import promote_album
+
+    beet, pending, config, tracks = _seed_two_discs(native, tmp_path)
+    first, offline = tracks
+    before = first.read_bytes()
+    offline.unlink()  # Its beets row remains, as with a pruned/offline sibling.
+    first.with_suffix(".nolrc").write_text("")
+    config["directory"] = str(pending)
+    (tmp_path / "BeetsConfig/config.yaml").write_text(json.dumps(config))
+    result = promote_album(first.parent, beet)
+    assert result.promoted, result.move_error
+    assert not first.exists()
+    moved = list(pending.rglob("*.flac"))
+    assert len(moved) == 1 and moved[0].read_bytes() == before
+    assert not offline.exists()
+
+
+def test_native_multidisc_move_resumes_with_a_selected_disc_already_in_place(
+    native, tmp_path
+):
+    beet, pending, _, tracks = _seed_two_discs(native, tmp_path)
+    first = _run(beet, "move", "-d", str(pending), f"path:{tracks[0].parent}/")
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert not tracks[0].exists() and tracks[1].exists()
+    resumed = _run(beet, "move", "-d", str(pending), "album:MAYA")
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert len(list(pending.rglob("*.flac"))) == 2
+    assert not any(p.exists() for p in tracks)
