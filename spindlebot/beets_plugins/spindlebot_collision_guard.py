@@ -34,8 +34,11 @@ class SpindlebotCollisionGuardPlugin(BeetsPlugin):
         self.early_import_stages = [self.check_import]
         self.import_stages = [self.check_import]
         self.register_listener("before_item_moved", self.check_move)
+        self.register_listener("item_moved", self.record_move)
+        self.register_listener("after_write", self.record_tag_write)
         self._identity = IdentityCache()
         self._participants = {}
+        self._relocated = {}
 
     def commands(self):
         # A missing/broken plugin must not silently turn protection off. Beets
@@ -128,3 +131,25 @@ class SpindlebotCollisionGuardPlugin(BeetsPlugin):
                 f"SpindleBot could not verify move source: {exc}"
             ) from exc
         self._check([source], [_path(destination)], identities)
+
+    def record_move(self, item, source, destination):
+        if item.id in self._participants:
+            self._relocated[item.id] = _path(destination)
+
+    def record_tag_write(self, item, path=None):
+        # Native import moves each track, then writes matched metadata to it.
+        # With whole-file SHA fallback that legitimate write changes identity.
+        # Accept it only at a participant's successfully moved destination;
+        # changed sources before movement still fail the preflight snapshot.
+        path = _path(path if path is not None else item.path)
+        if self._relocated.get(item.id) != path:
+            return
+        _, identities = self._participants[item.id]
+        try:
+            written = self._identity(path)
+        except OSError as exc:
+            raise ui.UserError(
+                f"SpindleBot could not verify tagged destination: {exc}"
+            ) from exc
+        identities.add(written)
+        self._participants[item.id] = written, identities

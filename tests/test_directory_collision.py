@@ -175,6 +175,7 @@ def test_adapter_refuses_a_changed_source_after_preflight(tmp_path):
     plugin = SpindlebotCollisionGuardPlugin()
     plugin._check_items([item], [destination])
     _flac(source, 2)
+    plugin.record_tag_write(item)  # A source write cannot bless changed input.
     with pytest.raises(ui.UserError, match="changed after preflight"):
         plugin.check_move(item, os.fsencode(source), os.fsencode(destination))
 
@@ -283,8 +284,8 @@ def test_native_move_refuses_a_foreign_album_directory(native, tmp_path, area):
     assert sorted(p.name for p in old.parent.iterdir()) == [old.name]
 
 
-def test_native_matched_import_checks_the_post_autotag_destination(native, tmp_path):
-    beet, pending, config = native
+def _configure_offline_tagger(native, tmp_path):
+    _, _, config = native
     plugins = tmp_path / "FixturePlugins"
     plugins.mkdir()
     marker = tmp_path / "metadata-applied"
@@ -304,8 +305,9 @@ class FixtureTaggerPlugin(BeetsPlugin):
     def candidates(self, items, artist, album, va_likely):
         yield AlbumInfo(album="MAYA", album_id="fixture-album", artist="Artist",
             artist_id="fixture-artist", data_source="Fixture", mediums=1, tracks=[
-            TrackInfo(title="Track", track_id="fixture-track", artist="Artist",
-                length=0, index=1, medium=1, medium_index=1)])
+            TrackInfo(title=f"Track {n}", track_id=f"fixture-track-{n}", artist="Artist",
+                length=0, index=n, medium=1, medium_index=n)
+            for n, item in enumerate(items, 1)])
     def item_candidates(self, item, artist, title):
         return []
     def album_for_id(self, album_id):
@@ -317,9 +319,16 @@ class FixtureTaggerPlugin(BeetsPlugin):
     config["pluginpath"] = [str(plugins)]
     config["fixture_marker"] = str(marker)
     config["import"]["autotag"] = True
+    config["import"]["write"] = True
     config["match"] = {"strong_rec_thresh": 1.0, "medium_rec_thresh": 1.0}
     config_path = tmp_path / "BeetsConfig/config.yaml"
     config_path.write_text(json.dumps(config))
+    return marker
+
+
+def test_native_matched_import_checks_the_post_autotag_destination(native, tmp_path):
+    beet, pending, _ = native
+    marker = _configure_offline_tagger(native, tmp_path)
     old = pending / "Artist/MAYA/old.flac"
     _flac(old, 1)
     source = tmp_path / "Import/new.flac"
@@ -331,6 +340,25 @@ class FixtureTaggerPlugin(BeetsPlugin):
     assert "collision" in result.stderr.lower()
     assert (source.read_bytes(), old.read_bytes()) == before
     assert sorted(p.name for p in old.parent.iterdir()) == [old.name]
+
+
+def test_native_matched_import_supports_tag_writes_with_sha_fallback(native, tmp_path):
+    beet, pending, _ = native
+    marker = _configure_offline_tagger(native, tmp_path)
+    for n in (1, 2):
+        source = tmp_path / f"Import/track{n}.flac"
+        _flac(source, 0, album="BeforeTagging", title=f"Source {n}")
+        audio = mutagen.flac.FLAC(source)
+        audio["tracknumber"] = [str(n)]
+        audio.save()
+    result = _run(beet, "import", "-q", str(tmp_path / "Import"))
+    assert marker.exists(), result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(list(pending.rglob("*.flac"))) == 2
+    assert not list((tmp_path / "Import").rglob("*.flac"))
+    assert all(
+        mutagen.flac.FLAC(p)["album"] == ["MAYA"] for p in pending.rglob("*.flac")
+    )
 
 
 def test_missing_adapter_refuses_the_guarded_command_before_writing(native, tmp_path):

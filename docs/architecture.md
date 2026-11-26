@@ -184,6 +184,8 @@ is scoped to the selected items, so an offline, unselected sibling disc does not
 block local promotion. An operation-local identity cache avoids repeated full
 file reads and invalidates on device/inode/size/mtime/ctime changes. Per-item move
 hooks recheck destination contents and refuse changed source identity.
+Native post-move tag writes refresh the participating destination's identity,
+so formats using whole-file SHA fallback still import multiple matched tracks.
 
 Guard-owned command aliases make a missing or broken adapter fail closed rather
 than letting beets log a plugin-load error and continue unprotected. Neither the
