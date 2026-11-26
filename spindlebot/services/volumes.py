@@ -45,6 +45,15 @@ def read_marker(root: str | Path) -> str | None:
     return None
 
 
+def _foreign_marker(root: str | Path, uuid: str) -> str | None:
+    """Return any conflicting marker, even when our own marker sorts first."""
+    for path in sorted(Path(root).glob(f"{MARKER_PREFIX}*")):
+        existing = path.name[len(MARKER_PREFIX):]
+        if existing != uuid:
+            return existing
+    return None
+
+
 def write_marker(root: str | Path, *, uuid: str, name: str, now: int | None = None) -> Path:
     """Write/refresh the marker for a location at ``root``.
 
@@ -63,11 +72,11 @@ def write_marker(root: str | Path, *, uuid: str, name: str, now: int | None = No
 def ensure_marker(root: str | Path, *, uuid: str, name: str, now: int | None = None) -> Path:
     """Ensure ``root`` carries this location's marker.
 
-    Raises MarkerMismatch if ``root`` already carries a *different* location's
-    marker. Idempotent when the marker is ours (it is refreshed).
+    Raises MarkerMismatch if ``root`` carries any *different* location's marker,
+    including alongside our own. Idempotent when only ours exists (refreshed).
     """
-    existing = read_marker(root)
-    if existing is not None and existing != uuid:
+    existing = _foreign_marker(root, uuid)
+    if existing is not None:
         raise MarkerMismatch(f"{root} carries marker for {existing!r}, expected {uuid!r}")
     return write_marker(root, uuid=uuid, name=name, now=now)
 
@@ -84,7 +93,6 @@ def resolve_root(location: Location) -> Path | None:
     root = Path(location.root_path)
     if not root.is_dir():
         return None
-    existing = read_marker(root)
-    if existing is not None and existing != location.uuid:
+    if _foreign_marker(root, location.uuid) is not None:
         return None
     return root

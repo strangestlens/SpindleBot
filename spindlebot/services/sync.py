@@ -95,7 +95,9 @@ def _restore_absent(
 
         def validate_location():
             markers = sorted(name for name in os.listdir(root_fd) if name.startswith(MARKER_PREFIX))
-            if location_uuid is not None and markers and markers[0] != MARKER_PREFIX + location_uuid:
+            if location_uuid is not None and any(
+                marker != MARKER_PREFIX + location_uuid for marker in markers
+            ):
                 raise IntegrityMismatch(f"action {action_id}: restoration location marker changed")
 
         # Apply resolve_root's marker policy to the actual pinned root, rather

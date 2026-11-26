@@ -449,3 +449,17 @@ def test_restoration_rejects_an_ancestor_swap_above_the_configured_root(seeded, 
     assert redirected
     assert not (outside / 'Library/Artist/Album/01.flac').exists()
     assert result.copied == 0 and result.failed == 1
+
+
+def test_restoration_refuses_any_foreign_marker_even_when_expected_sorts_first(seeded):
+    from spindlebot.core.errors import IntegrityMismatch
+    from spindlebot.services import sync
+    conn, source, target = seeded
+    src = Path(source.root_path) / 'Artist/Album/01.flac'
+    dst = Path(target.root_path) / 'Artist/Album/01.flac'
+    dst.unlink()
+    (Path(target.root_path) / '.spindlebot-location-z-foreign').write_text('{}')
+    with pytest.raises(IntegrityMismatch, match='marker changed'):
+        sync._restore_absent(src, dst, expected=file_sha256(src), copy_fn=_copy,
+                             action_id=1, root=Path(target.root_path), location_uuid=target.uuid)
+    assert not dst.exists()

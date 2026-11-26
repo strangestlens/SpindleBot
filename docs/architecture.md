@@ -125,13 +125,18 @@ that file descriptor. Directory descriptors anchored to the location root reject
 symlinked parents and prevent concurrent parent replacement from redirecting writes.
 This includes ancestors above the configured root: restoration requires a path
 without symlink components. The location marker policy is rechecked on the pinned
-root descriptor before copying and after verification.
+root descriptor before copying and after verification; any foreign marker
+refuses an ambiguous root, even when the expected marker is also present.
 Final verification hashes a no-follow file descriptor and checks that the directory
 chain and final path still identify the verified inodes. A symlink or different
 bytes that reappear are preserved and the action fails; an already-correct regular file is verified without writing.
 Only the final verified path is recorded present. Failed or interrupted
 publication can leave an unverified partial file requiring inspection and
-cleanup before retry. Normal copies retain their existing copy path.
+cleanup before retry. Presence records describe bytes verified during the operation;
+external writers can change a path afterward. Open descriptors or an advisory
+lock cannot prevent non-cooperating external pathname changes. Prune retains
+its independent path-and-hash verification gate. Normal copies retain their
+existing copy path.
 
 **Locations are first-class**, not paths in a config file. Each is identified by
 a marker file `.spindlebot-location-<uuid>` at its root, and a root may be a
