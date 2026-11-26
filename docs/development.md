@@ -12,7 +12,19 @@ bats tests/shell/                                 # shellcheck + shell integrati
 python3 -m ruff check .                           # lint
 ```
 
-Both suites must be green before anything lands.
+Both suites must be green before anything lands. Before every commit, run all
+of these plus the floor syntax gate:
+
+```bash
+python3 -m pytest tests/ --ignore=tests/shell -q
+python3 -m ruff check .
+shellcheck ./*.sh
+bats tests/shell/
+/opt/homebrew/bin/python3.10 -m compileall -q spindlebot/ tests/ lyric_timing/
+```
+
+If ruff fails on code your change didn't touch, suspect version drift first
+(check which ruff CI downloaded) before "fixing" the code.
 
 ## Testing philosophy
 
@@ -35,6 +47,37 @@ Practical consequences:
 - `tests/test_lyric_timing_torchaudio.py` is the one exception — it exercises
   the real model stack and is skipped unless `LYRIC_TIMING_IT_AUDIO` and
   `LYRIC_TIMING_IT_LRC` point at a real track. It never runs in CI.
+- Patch `time.sleep` through the module's own namespace (e.g.
+  `spindlebot.pipeline.stages.fetch_lyrics.time.sleep`), so retries run instantly.
+- Fixture names describe the role a location plays in the test
+  (`RetentionDrive`, `PortablePlayer`), never a real device.
+
+### Proving a regression test
+
+A test written alongside a fix isn't known to cover the bug until it has failed
+against the unfixed code:
+
+```bash
+backup=$(mktemp)                                             # per-run: agents run this concurrently
+cp spindlebot/<module>.py "$backup"                          # keep the fix
+git show origin/main:spindlebot/<module>.py > spindlebot/<module>.py
+python3 -m pytest tests/<new_tests>.py -q                    # expect failures
+cp "$backup" spindlebot/<module>.py && rm "$backup"          # restore
+python3 -m pytest tests/<new_tests>.py -q                    # expect green
+```
+
+Say in the commit or PR which tests failed without the fix and which pass either
+way. Guard assertions that hold in both directions are fine; they just aren't
+regression tests.
+
+### Filesystem-sensitive bugs
+
+The retention drive is case-insensitive HFS+, and CI runs on a case-sensitive
+Linux filesystem, where two directories differing only in case never collide.
+A test for a case-collision bug has to run on a case-insensitive path (a default
+macOS temp dir is one) and skip with a stated reason elsewhere. The same applies
+to storage-class bugs in SQLite: gotcha 4a's fix is only covered by asserting
+`typeof(path)='blob'`, not the value.
 
 ## CI
 
@@ -79,7 +122,73 @@ One feature branch per phase off the latest `main`; sub-tasks are ordered
 commits on that branch, each one green. Push and open a PR only when asked. PRs
 squash-merge to `main`; pull `main` before starting the next branch.
 
-Branch names follow conventional prefixes — `feat/`, `fix/`, `docs/`.
+Branch names follow conventional prefixes — `feat/`, `fix/`, `docs/`, `chore/`,
+`ci/`, `refactor/` — plus a description of the work. Commit messages are
+conventional too (`fix(lyrics): …`, `feat(cli): …`), with a body that says why.
+
+### Worktrees
+
+Every task gets its own worktree off a freshly fetched `main`:
+
+```bash
+git -C ~/Music/music-pipeline fetch
+git -C ~/Music/music-pipeline worktree add .claude/worktrees/<short-name> -b <type>/<what> origin/main
+cd ~/Music/music-pipeline/.claude/worktrees/<short-name>
+git branch --show-current        # before the first commit, every time
+```
+
+Never run `git checkout -b` in the main checkout while editing in a worktree:
+the edits stay on the worktree's branch, and commits have landed on the wrong
+branch that way twice. The main checkout stays on `main` because production
+runs from it.
+
+### Review loop
+
+Copilot reviews every push to an open PR. After each push, wait about six
+minutes, then read both places it writes:
+
+```bash
+gh api repos/strangestlens/SpindleBot/pulls/<N>/comments \
+  --jq '.[] | {path, line, original_commit_id, body}'
+gh pr view <N> --json reviews --jq '.reviews[] | {author: .author.login, state, body}'
+```
+
+Low-confidence findings are folded into the **review body**, not posted inline,
+and several real bugs have turned up there. Comments often refer to an earlier
+commit (`original_commit_id`); one already fixed is stale. Verify each finding
+against the code, then fix it with a test or reply on it with the reason it
+doesn't apply, push, and repeat until nothing is left open.
+
+PR descriptions say what changed, why, how it was verified (including the
+fail-without-the-fix split), and what was deliberately left out.
+
+### Working alongside other agents
+
+Several agents may have branches open at once.
+
+- Pick work whose files no open branch is already changing, or say in your PR
+  that you stacked on that branch.
+- Only one open branch may add a schema migration. Claim the version in the PR
+  title (`… (schema v9)`) and renumber if `main` gets one first.
+- `cli.py`, `CLAUDE.md`, `CHANGELOG.md`, and `migrations.py` are shared; keep
+  your edits to your own lines and expect to resolve conflicts on rebase.
+- A ruff version bump rewrites every file; do it only when nothing else is open.
+
+## Environment quirks
+
+- **TCC on external volumes.** Reading `/Volumes/*` from an agent process fails
+  with `Operation not permitted` unless that process's own signed binary has
+  Full Disk Access. Claude Code, for example, is signed separately from the
+  Claude desktop app, so a grant on the desktop app does nothing for it. The
+  owner has to grant it and relaunch; don't try to work around it.
+- **The installed beets config isn't the template.** `beets-config.yaml` in the
+  repo is what `setup.sh` installs on a fresh machine. The live
+  `~/.config/beets/config.yaml` has since diverged; read it before reasoning
+  about paths or track numbering.
+- **AI venv.** `lyric_timing` heavy work runs in `~/.local/share/spindlebot/ai-venv`
+  (Python 3.13), from the repo root (gotcha 9). Demucs on MPS isn't
+  reproducible run to run; see [AI lyric timing](ai-lyric-timing.md) before
+  benchmarking.
 
 ## Repo layout
 

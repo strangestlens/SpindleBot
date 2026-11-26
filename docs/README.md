@@ -31,6 +31,7 @@ diagram. These are the topic guides.
 
 - [`CLAUDE.md`](../CLAUDE.md) — the contract for anyone (human or agent) changing
   the code: layering rules, conventions, the active epic, the full gotcha list.
+- [`AGENTS.md`](../AGENTS.md) — entry point for non-Claude coding agents.
 - [`ROADMAP.md`](../ROADMAP.md) — where it's going.
 - [`CHANGELOG.md`](../CHANGELOG.md) — what's shipped.
 - [`archive/original-roadmap.md`](archive/original-roadmap.md) — the superseded
