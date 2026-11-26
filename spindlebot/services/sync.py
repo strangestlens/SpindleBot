@@ -45,7 +45,7 @@ from spindlebot.db.repositories import (
     run_repo,
     sidecar_presence_repo,
 )
-from spindlebot.services.volumes import resolve_root
+from spindlebot.services.volumes import MARKER_PREFIX, resolve_root
 
 CopyFn = Callable[[Path, Path], None]
 
@@ -61,7 +61,7 @@ def _rsync_copy(src: Path, dst: Path) -> None:
 
 def _restore_absent(
     src: Path, dst: Path, *, expected: str, copy_fn: CopyFn, action_id: int,
-    root: Path | None = None,
+    root: Path | None = None, location_uuid: str | None = None,
 ) -> os.stat_result:
     """Publish and verify through no-follow descriptors anchored to the root.
 
@@ -70,7 +70,8 @@ def _restore_absent(
     presence. Failed publication may leave an unverified partial file, which is
     never removed by pathname because that could unlink a concurrent replacement.
     """
-    root = dst.parent if root is None else root
+    root = Path(os.path.abspath(dst.parent if root is None else root))
+    dst = Path(os.path.abspath(dst))
     relative = dst.relative_to(root)
     if not relative.parts or any(part in (".", "..") for part in relative.parts):
         raise IntegrityMismatch(f"action {action_id}: invalid restoration path: {dst}")
@@ -81,9 +82,25 @@ def _restore_absent(
             stack.callback(os.close, fd)
             return fd
 
-        root_fd = open_directory(root)
-        parent_fd = root_fd
+        # O_NOFOLLOW on a whole root pathname protects only its final
+        # component. Acquire every component from / so even an ancestor above
+        # the configured root cannot redirect the operation after resolution.
+        parent_fd = open_directory(root.anchor)
         chain = []
+        for part in root.parts[1:]:
+            child = open_directory(part, parent_fd)
+            chain.append((parent_fd, part, os.fstat(child)))
+            parent_fd = child
+        root_fd = parent_fd
+
+        def validate_location():
+            markers = sorted(name for name in os.listdir(root_fd) if name.startswith(MARKER_PREFIX))
+            if location_uuid is not None and markers and markers[0] != MARKER_PREFIX + location_uuid:
+                raise IntegrityMismatch(f"action {action_id}: restoration location marker changed")
+
+        # Apply resolve_root's marker policy to the actual pinned root, rather
+        # than trusting a pathname checked before its descriptors were acquired.
+        validate_location()
         for part in relative.parts[:-1]:
             try:
                 child = open_directory(part, parent_fd)
@@ -116,12 +133,11 @@ def _restore_absent(
                 current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
                 if not same_inode(current, after) or not stat.S_ISREG(current.st_mode):
                     raise IntegrityMismatch(f"action {action_id}: restoration destination replaced")
-                if not same_inode(root.lstat(), os.fstat(root_fd)):
-                    raise IntegrityMismatch(f"action {action_id}: restoration root replaced")
                 for parent, part, entry in chain:
                     current = os.stat(part, dir_fd=parent, follow_symlinks=False)
                     if not same_inode(current, entry) or not stat.S_ISDIR(current.st_mode):
                         raise IntegrityMismatch(f"action {action_id}: restoration parent replaced")
+                validate_location()
                 return after
 
         try:
@@ -225,7 +241,8 @@ def execute_pending(
                         f"planned {expected[:12]}; source changed since inventory/plan")
                 if action.dest_must_be_absent:
                     st = _restore_absent(src, dst, expected=expected, copy_fn=copy_fn,
-                                         action_id=action.id, root=Path(dst_root))
+                                         action_id=action.id, root=Path(dst_root),
+                                         location_uuid=dst_loc.uuid)
                     actual = expected
                 else:
                     copy_fn(src, dst)

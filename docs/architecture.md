@@ -123,6 +123,9 @@ Restoration plans freeze source and destination paths separately. Sync verifies
 a staged copy, exclusively creates the absent destination, and writes through
 that file descriptor. Directory descriptors anchored to the location root reject
 symlinked parents and prevent concurrent parent replacement from redirecting writes.
+This includes ancestors above the configured root: restoration requires a path
+without symlink components. The location marker policy is rechecked on the pinned
+root descriptor before copying and after verification.
 Final verification hashes a no-follow file descriptor and checks that the directory
 chain and final path still identify the verified inodes. A symlink or different
 bytes that reappear are preserved and the action fails; an already-correct regular file is verified without writing.

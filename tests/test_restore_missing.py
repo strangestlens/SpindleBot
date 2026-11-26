@@ -415,3 +415,37 @@ def test_restoration_never_writes_through_a_symlinked_parent(seeded, during_copy
     result = execute_pending(conn, copy_fn=racing_copy if during_copy else _copy, now=400)
     assert not (outside / dst.name).exists()
     assert result.copied == 0 and result.failed == 1
+
+
+def test_restoration_rejects_an_ancestor_swap_above_the_configured_root(seeded, monkeypatch):
+    from spindlebot.services import sync
+    conn, source, target = seeded
+    original_root = Path(target.root_path)
+    configured_root = original_root / 'Music/Library'
+    configured_root.mkdir(parents=True)
+    for path in list(original_root.iterdir()):
+        if path.name != 'Music':
+            path.rename(configured_root / path.name)
+    target = location_repo.upsert(
+        conn, uuid=target.uuid, name=target.name, kind=target.kind,
+        root_path=str(configured_root), is_retention=True,
+    )
+    _acknowledged_restore(conn, source, target)
+    outside = original_root / 'outside'
+    (outside / 'Library').mkdir(parents=True)
+    real_resolve = sync.resolve_root
+    redirected = []
+
+    def resolve_then_swap(location):
+        root = real_resolve(location)
+        if location.id == target.id and not redirected:
+            configured_root.parent.rename(original_root / 'saved')
+            configured_root.parent.symlink_to(outside, target_is_directory=True)
+            redirected.append(True)
+        return root
+
+    monkeypatch.setattr(sync, 'resolve_root', resolve_then_swap)
+    result = execute_pending(conn, copy_fn=_copy, now=400)
+    assert redirected
+    assert not (outside / 'Library/Artist/Album/01.flac').exists()
+    assert result.copied == 0 and result.failed == 1
