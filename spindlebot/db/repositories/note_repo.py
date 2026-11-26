@@ -218,7 +218,7 @@ def list_notes(
     if tag is not None:
         sql += " JOIN note_tag t ON t.note_id = n.id"
         where.append("t.tag = ?")
-        params.append(tag)
+        params.append(tag.strip())
     if subject_ids is not None:
         where.append(f"n.subject_id IN ({','.join('?' * len(subject_ids))})")
         params.extend(subject_ids)
@@ -250,7 +250,7 @@ def add_tags(conn: sqlite3.Connection, note_id: int, tags: list[str]) -> None:
 
 def remove_tag(conn: sqlite3.Connection, note_id: int, tag: str) -> None:
     conn.execute(
-        "DELETE FROM note_tag WHERE note_id = ? AND tag = ?", (note_id, tag)
+        "DELETE FROM note_tag WHERE note_id = ? AND tag = ?", (note_id, tag.strip())
     )
 
 

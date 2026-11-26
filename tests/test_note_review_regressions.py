@@ -224,3 +224,16 @@ def test_unknown_options_outside_a_text_value_are_refused_without_writes(cfg, ca
     assert "unknown option" in json.loads(capsys.readouterr().out)["error"]
     assert cmd_note(cfg, ["list", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["count"] == 0
+
+
+def test_tag_removal_uses_the_same_whitespace_normalization_as_add(cfg, capsys):
+    assert cmd_note(cfg, ["add", "--artist", "Beatles", "-m", "body", "--tag", " todo ", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tags"] == ["todo"]
+    assert cmd_note(cfg, ["untag", str(payload["id"]), " todo ", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["tags"] == []
+
+
+def test_tag_filters_use_the_same_whitespace_normalization_as_add(conn):
+    view = notes.add_note(conn, subject=NoteSubjectRef.for_artist("Artist"), body="body", tags=[" todo "])
+    assert [v.id for v in notes.list_notes(conn, tag=" todo ")] == [view.id]
