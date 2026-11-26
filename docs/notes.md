@@ -35,6 +35,9 @@ When text equals an option name, use an inline value: `--message=--message`
 or `--tag=--json`. Ordinary dash-prefixed text such as `-m "- an observation"`
 also works. A separate declared option still reports a missing value rather
 than being silently consumed.
+Structural flags such as `--artist` reject option-looking values, including
+misspelled options. To name a literal dash-prefixed artist, use an explicit
+inline value such as `--artist=-Name`.
 
 The editor buffer is deliberately empty rather than carrying a commented header
 the way `git commit` does: `#` is a markdown heading here, so stripping comments

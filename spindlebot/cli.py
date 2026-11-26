@@ -1348,7 +1348,11 @@ def _note_missing_values(args: list[str]) -> list[str]:
         if arg not in _NOTE_VALUE_FLAGS:
             continue
         nxt = next(tokens, None)
-        if nxt is None or nxt == "--" or nxt in (_NOTE_VALUE_FLAGS | _NOTE_BOOL_FLAGS) - {"-"}:
+        text_value = arg in {"-m", "--message", "--tag"}
+        structural_option = (not text_value and nxt is not None
+                             and nxt.startswith("-") and nxt != "-")
+        if (nxt is None or structural_option or nxt == "--"
+                or nxt in (_NOTE_VALUE_FLAGS | _NOTE_BOOL_FLAGS) - {"-"}):
             missing.append(arg)
     return missing
 

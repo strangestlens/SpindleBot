@@ -208,3 +208,19 @@ def test_inline_values_preserve_literal_option_names(cfg, capsys, literal):
 def test_inline_value_cannot_enable_json_output(cfg, capsys):
     assert cmd_note(cfg, ["add", "--artist", "Beatles", "--message=--json"]) == 0
     assert not capsys.readouterr().out.startswith("{")
+
+
+@pytest.mark.parametrize("flag", ["--artist", "--album", "--track"])
+def test_structural_value_flags_cannot_conceal_mistyped_options(cfg, capsys, flag):
+    context = ["--artist", "Beatles", "--album", "Revolver"] if flag == "--track" else []
+    assert cmd_note(cfg, ["add", "--new", *context, flag, "--artisst", "-m", "body", "--json"]) == 1
+    assert "needs a value" in json.loads(capsys.readouterr().out)["error"]
+    assert cmd_note(cfg, ["list", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["count"] == 0
+
+
+def test_unknown_options_outside_a_text_value_are_refused_without_writes(cfg, capsys):
+    assert cmd_note(cfg, ["add", "--artist", "Beatles", "--artisst", "-m", "body", "--json"]) == 1
+    assert "unknown option" in json.loads(capsys.readouterr().out)["error"]
+    assert cmd_note(cfg, ["list", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["count"] == 0
