@@ -22,12 +22,14 @@ REFUSED (never touched); it also defaults to a dry run.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import stat
 import subprocess
 import tempfile
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Callable
@@ -57,46 +59,95 @@ def _rsync_copy(src: Path, dst: Path) -> None:
     )
 
 
-def _restore_absent(src: Path, dst: Path, *, expected: str, copy_fn: CopyFn, action_id: int) -> None:
-    """Verify staged bytes, then publish through an exclusively created fd.
+def _restore_absent(
+    src: Path, dst: Path, *, expected: str, copy_fn: CopyFn, action_id: int,
+    root: Path | None = None,
+) -> os.stat_result:
+    """Publish and verify through no-follow descriptors anchored to the root.
 
-    O_EXCL rejects entries that appear during transfer, including dangling
-    symlinks. Writing through our own fd cannot overwrite a replacement inode.
-    Failed or interrupted publication can leave an unverified partial file;
-    no presence is recorded until the caller verifies the final path.
+    Every directory component stays open through verification. Replacing a
+    parent cannot redirect a write, and a replaced chain cannot become verified
+    presence. Failed publication may leave an unverified partial file, which is
+    never removed by pathname because that could unlink a concurrent replacement.
     """
-    try:
-        entry = dst.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        # A previous acknowledged action or another actor may already have
-        # restored the exact planned bytes. Verify without writing, so a retried
-        # queue can finish instead of failing forever on its own correct copy.
-        if stat.S_ISREG(entry.st_mode) and file_sha256(dst) == expected:
-            return
-        raise IntegrityMismatch(f"action {action_id}: restoration destination reappeared: {dst}")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".spindlebot-restore-", dir=dst.parent) as scratch:
-        staged = Path(scratch) / "payload"
-        copy_fn(src, staged)
-        if file_sha256(staged) != expected:
-            raise IntegrityMismatch(f"action {action_id}: staged restoration hash differs from plan")
-        metadata = staged.stat()
-        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                     stat.S_IMODE(metadata.st_mode))
-        owned = os.fstat(fd)
-        # Never unlink the final pathname on failure: even an inode check and
-        # a subsequent unlink race with a replacement arriving between them.
-        with os.fdopen(fd, "wb") as out, staged.open("rb") as inp:
-            shutil.copyfileobj(inp, out)
-            out.flush()
-            os.fchmod(out.fileno(), stat.S_IMODE(metadata.st_mode))
-            if os.utime in os.supports_fd:
-                os.utime(out.fileno(), ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
-        current = dst.lstat()
-        if (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
-            raise IntegrityMismatch(f"action {action_id}: restoration destination replaced: {dst}")
+    root = dst.parent if root is None else root
+    relative = dst.relative_to(root)
+    if not relative.parts or any(part in (".", "..") for part in relative.parts):
+        raise IntegrityMismatch(f"action {action_id}: invalid restoration path: {dst}")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with ExitStack() as stack:
+        def open_directory(name, parent=None):
+            fd = os.open(name, directory_flags, dir_fd=parent)
+            stack.callback(os.close, fd)
+            return fd
+
+        root_fd = open_directory(root)
+        parent_fd = root_fd
+        chain = []
+        for part in relative.parts[:-1]:
+            try:
+                child = open_directory(part, parent_fd)
+            except FileNotFoundError:
+                os.mkdir(part, dir_fd=parent_fd)
+                child = open_directory(part, parent_fd)
+            chain.append((parent_fd, part, os.fstat(child)))
+            parent_fd = child
+        name = relative.name
+
+        def same_inode(left, right):
+            return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+        def verify():
+            # O_NOFOLLOW rejects both an existing symlink and a link swapped in
+            # between the existence check and this open. Hash that same fd.
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+            with os.fdopen(fd, "rb") as stream:
+                before = os.fstat(stream.fileno())
+                if not stat.S_ISREG(before.st_mode):
+                    raise IntegrityMismatch(f"action {action_id}: destination is not a regular file")
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    digest.update(chunk)
+                after = os.fstat(stream.fileno())
+                def signature(st):
+                    return st.st_size, st.st_mtime_ns, st.st_ctime_ns
+                if digest.hexdigest() != expected or signature(before) != signature(after):
+                    raise IntegrityMismatch(f"action {action_id}: restoration hash changed from plan")
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if not same_inode(current, after) or not stat.S_ISREG(current.st_mode):
+                    raise IntegrityMismatch(f"action {action_id}: restoration destination replaced")
+                if not same_inode(root.lstat(), os.fstat(root_fd)):
+                    raise IntegrityMismatch(f"action {action_id}: restoration root replaced")
+                for parent, part, entry in chain:
+                    current = os.stat(part, dir_fd=parent, follow_symlinks=False)
+                    if not same_inode(current, entry) or not stat.S_ISDIR(current.st_mode):
+                        raise IntegrityMismatch(f"action {action_id}: restoration parent replaced")
+                return after
+
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            # Accept an already-correct regular file without rewriting it.
+            return verify()
+        # Staging does not use a pathname under the destination: parent swaps
+        # cannot redirect the transfer or its temporary-directory cleanup.
+        with tempfile.TemporaryDirectory(prefix=".spindlebot-restore-") as scratch:
+            staged = Path(scratch) / "payload"
+            copy_fn(src, staged)
+            if file_sha256(staged) != expected:
+                raise IntegrityMismatch(f"action {action_id}: staged restoration hash differs from plan")
+            metadata = staged.stat()
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         stat.S_IMODE(metadata.st_mode), dir_fd=parent_fd)
+            with os.fdopen(fd, "wb") as out, staged.open("rb") as inp:
+                shutil.copyfileobj(inp, out)
+                out.flush()
+                os.fchmod(out.fileno(), stat.S_IMODE(metadata.st_mode))
+                if os.utime in os.supports_fd:
+                    os.utime(out.fileno(), ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+            return verify()
 
 
 @dataclass
@@ -173,25 +224,19 @@ def execute_pending(
                         f"action {action.id}: source {src} hash {source_sha[:12]} != "
                         f"planned {expected[:12]}; source changed since inventory/plan")
                 if action.dest_must_be_absent:
-                    _restore_absent(src, dst, expected=expected, copy_fn=copy_fn,
-                                    action_id=action.id)
+                    st = _restore_absent(src, dst, expected=expected, copy_fn=copy_fn,
+                                         action_id=action.id, root=Path(dst_root))
+                    actual = expected
                 else:
                     copy_fn(src, dst)
-                actual = file_sha256(dst)
-                if actual != expected:
-                    raise IntegrityMismatch(
-                        f"action {action.id}: {dst} hash {actual[:12]} != "
-                        f"planned {expected[:12]}")
+                    actual = file_sha256(dst)
+                    if actual != expected:
+                        raise IntegrityMismatch(
+                            f"action {action.id}: {dst} hash {actual[:12]} != "
+                            f"planned {expected[:12]}")
+                    st = dst.stat()
 
-                # Record the DESTINATION's mtime alongside size and hash.
-                # inventory's incremental rescan skips a file only when its
-                # stored mtime is non-NULL and still matches on disk, so a
-                # presence row written without one condemns that file to a full
-                # re-hash on every future scan. Sync copies are precisely the
-                # files most likely to be inventoried next, and omitting it
-                # scales backwards: the more you sync, the slower inventory
-                # gets. One stat() serves both fields.
-                st = dst.stat()
+                # Keep the verified destination mtime for incremental inventory.
                 if action.content_kind == ContentKind.AUDIO:
                     presence_repo.set_presence(
                         conn, audio_id=action.content_id, location_id=dst_loc.id,

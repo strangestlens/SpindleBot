@@ -348,3 +348,70 @@ def test_a_correct_file_restored_elsewhere_completes_without_overwriting_it(seed
     assert result.copied == 1 and result.failed == 0
     assert calls == [] and dst.stat().st_ino == inode
     assert action_repo.list_pending_execution(conn) == []
+
+
+def _acknowledged_restore(conn, source, target):
+    dst = Path(target.root_path) / 'Artist/Album/01.flac'
+    dst.unlink()
+    inventory.inventory_location(conn, location=target, root=target.root_path, now=200)
+    plan = reconcile_location(conn, target=target, source_locations=[source], now=300)
+    action_repo.acknowledge_run(conn, plan.run_id, now=300)
+    return dst
+
+
+def test_already_restored_file_swapped_to_source_symlink_is_never_verified(seeded, monkeypatch):
+    import builtins
+    import os
+    from spindlebot.services import sync
+    conn, source, target = seeded
+    dst = _acknowledged_restore(conn, source, target)
+    src = Path(source.root_path) / 'Artist/Album/01.flac'
+    _copy(src, dst)
+    real_open, real_os_open = builtins.open, os.open
+    swapped = []
+
+    def replace():
+        if not swapped:
+            dst.unlink()
+            dst.symlink_to(src)
+            swapped.append(True)
+
+    def path_open(path, *args, **kwargs):
+        if Path(path) == dst:
+            replace()
+        return real_open(path, *args, **kwargs)
+
+    def fd_open(path, flags, *args, **kwargs):
+        if str(path) == dst.name and kwargs.get('dir_fd') is not None and not flags & os.O_CREAT:
+            replace()
+        return real_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, 'open', path_open)
+    monkeypatch.setattr(sync.os, 'open', fd_open)
+    result = execute_pending(conn, copy_fn=_copy, now=400)
+    assert swapped
+    assert result.copied == 0 and result.failed == 1
+    assert not presence_repo.list_for_location(conn, target.id)[0].present
+
+
+@pytest.mark.parametrize('during_copy', [False, True])
+def test_restoration_never_writes_through_a_symlinked_parent(seeded, during_copy):
+    conn, source, target = seeded
+    dst = _acknowledged_restore(conn, source, target)
+    album = dst.parent
+    outside = Path(target.root_path).parent / 'outside'
+    outside.mkdir()
+
+    def redirect():
+        album.rename(album.with_name('saved'))
+        album.symlink_to(outside, target_is_directory=True)
+
+    def racing_copy(src, staged):
+        _copy(src, staged)
+        redirect()
+
+    if not during_copy:
+        redirect()
+    result = execute_pending(conn, copy_fn=racing_copy if during_copy else _copy, now=400)
+    assert not (outside / dst.name).exists()
+    assert result.copied == 0 and result.failed == 1

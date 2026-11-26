@@ -599,8 +599,8 @@ def test_inventory_checkpoints_every_n_files(conn, tmp_path):
     loc = ensure_pending_location(conn, 1000)
     inventory_location(conn, location=loc, root=root, now=1000,
                        checkpoint=lambda: calls.append(1), commit_every=2)
-    # 4 audio files, commit every 2 → checkpoints at done=2 and done=4
-    assert len(calls) == 2
+    # Persist the running marker first, then checkpoint at done=2 and done=4.
+    assert len(calls) == 3
 
 
 def test_inventory_partial_progress_survives_interrupt(tmp_path, monkeypatch):
