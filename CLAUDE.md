@@ -380,6 +380,9 @@ Article-insensitivity belongs in **lookup**, which prefers strict keys before
 accepting a unique loose match. Resolution keys off the library's spelling;
 filters and wishlist adoption use the same preference without merging distinct
 identified releases or choosing among ambiguous loose candidates.
+Loose adoption requires the resolver's transient `allow_loose_artist` evidence
+that the full library contains only one matching artist identity; `--mbid`
+does not narrow that safety check. Callers without library context stay strict.
 
 **`note export` sorts by artist → album → track for a reason beyond
 readability.** Heading nesting cannot express an empty parent level once one is

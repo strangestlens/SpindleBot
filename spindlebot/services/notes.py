@@ -77,7 +77,8 @@ def find_adoptable_subject(conn, subject: NoteSubjectRef) -> NoteSubject | None:
     # field could describe several works.
     unidentified = [row for row in note_subject_repo.list_all(conn, subject.kind)
                     if not row.mbid]
-    for loose_artist in (False, True):
+    matching_modes = (False, True) if subject.allow_loose_artist else (False,)
+    for loose_artist in matching_modes:
         candidates = [row for row in unidentified
                       if _same_work(row, subject, loose_artist=loose_artist)]
         if candidates:

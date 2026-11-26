@@ -1238,6 +1238,8 @@ def _note_opts(args: list[str], *flags: str) -> list[str]:
     values = []
     tokens = iter(args)
     for arg in tokens:
+        if arg == "--":
+            break
         if arg in _NOTE_VALUE_FLAGS:
             value = next(tokens, None)
             if arg in flags and value is not None:
@@ -1250,13 +1252,37 @@ def _note_opt(args: list[str], *flags: str) -> str | None:
     return values[0] if values else None
 
 
+def _note_has_flag(args: list[str], flag: str) -> bool:
+    """An actual boolean option, excluding consumed values and escaped operands."""
+    index = 0
+    declared = (_NOTE_VALUE_FLAGS | _NOTE_BOOL_FLAGS | {"--"}) - {"-"}
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            break
+        if arg == flag:
+            return True
+        if (arg in _NOTE_VALUE_FLAGS and index + 1 < len(args)
+                and args[index + 1] not in declared):
+            index += 2
+        else:
+            # A declared option after a starved value flag still controls error
+            # rendering: --tag --json must report its missing value as JSON.
+            index += 1
+    return False
+
+
 def _note_positionals(args: list[str]) -> list[str]:
     """Bare tokens, excluding flags and the values they consume."""
     out, skip = [], False
-    for arg in args:
+    tokens = iter(args)
+    for arg in tokens:
         if skip:
             skip = False
             continue
+        if arg == "--":
+            out.extend(tokens)
+            break
         if arg in _NOTE_VALUE_FLAGS:
             skip = True
             continue
@@ -1281,6 +1307,8 @@ def _note_unknown_flags(args: list[str], allowed: set[str] | None = None) -> lis
         if skip:
             skip = False
             continue
+        if arg == "--":
+            break
         if arg in _NOTE_VALUE_FLAGS:
             skip = True
             if allowed is not None and arg not in allowed:
@@ -1305,10 +1333,12 @@ def _note_missing_values(args: list[str]) -> list[str]:
     missing = []
     tokens = iter(args)
     for arg in tokens:
+        if arg == "--":
+            break
         if arg not in _NOTE_VALUE_FLAGS:
             continue
         nxt = next(tokens, None)
-        if nxt is None or nxt in (_NOTE_VALUE_FLAGS | _NOTE_BOOL_FLAGS) - {"-"}:
+        if nxt is None or nxt == "--" or nxt in (_NOTE_VALUE_FLAGS | _NOTE_BOOL_FLAGS) - {"-"}:
             missing.append(arg)
     return missing
 
@@ -1447,7 +1477,7 @@ def cmd_note(cfg, args: list[str]) -> int:
     from spindlebot.services import notes as svc
     from spindlebot.services.note_resolve import ResolutionStatus
 
-    want_json = "--json" in args
+    want_json = _note_has_flag(args[1:], "--json")
     sub = args[0] if args and not args[0].startswith("-") else None
 
     def fail(msg: str, *, hints: list[str] | None = None) -> int:
@@ -1499,7 +1529,7 @@ def cmd_note(cfg, args: list[str]) -> int:
             artist = _note_opt(rest, "--artist")
             album = _note_opt(rest, "--album")
             track = _note_opt(rest, "--track")
-            allow_new = "--new" in rest
+            allow_new = _note_has_flag(rest, "--new")
 
             library = []
             try:
@@ -1575,7 +1605,7 @@ def cmd_note(cfg, args: list[str]) -> int:
                 tag=_note_opt(rest, "--tag"),
                 session_id=int(session_raw) if session_raw else None,
                 since_utc=since,
-                include_deleted="--all" in rest,
+                include_deleted=_note_has_flag(rest, "--all"),
             )
             if want_json:
                 print(_json.dumps({"count": len(views),
@@ -1599,7 +1629,7 @@ def cmd_note(cfg, args: list[str]) -> int:
             view = svc.get_note(conn, int(positionals[0]))
             if view is None:
                 return fail(f"no note {positionals[0]}")
-            revisions = svc.history(conn, view.id) if "--history" in rest else []
+            revisions = svc.history(conn, view.id) if _note_has_flag(rest, "--history") else []
             if want_json:
                 payload = view_payload(view)
                 payload["history"] = [
@@ -1708,7 +1738,7 @@ def cmd_note(cfg, args: list[str]) -> int:
                     "try --root-level 2 if the file opens with a grouping heading"
                 )
 
-            allow_new = "--new" in rest
+            allow_new = _note_has_flag(rest, "--new")
             library = []
             try:
                 from spindlebot.services import library_index
@@ -1722,8 +1752,8 @@ def cmd_note(cfg, args: list[str]) -> int:
                 return fail(missing_session)
 
             plan = plan_import(conn, library, list(document.notes), allow_new=allow_new)
-            dry_run = "--dry-run" in rest
-            skipping = "--skip-unresolved" in rest
+            dry_run = _note_has_flag(rest, "--dry-run")
+            skipping = _note_has_flag(rest, "--skip-unresolved")
 
             # Atomic unless told otherwise: an import that files most of a
             # document and silently drops the rest is the failure this whole

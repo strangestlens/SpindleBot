@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import difflib
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from spindlebot.core.collection import CollectionItem, LibraryAlbum
@@ -158,6 +158,7 @@ def resolve(
     if album is None and artist is None:
         raise ValueError("nothing to resolve: pass --artist, --album or --track")
 
+    all_library = library
     if mb_albumid:
         # An mbid names one release, so it is meaningless without an album, and
         # a typo must not mint a subject keyed on a release that does not exist.
@@ -172,9 +173,19 @@ def resolve(
                 reason=f"no album with MusicBrainz id {mb_albumid!r} in the library",
             )
     if album is None:
-        return _resolve_artist(library, artist, allow_new=allow_new)
-    return _resolve_album(library, artist, album, track,
-                          mb_albumid=mb_albumid, allow_new=allow_new)
+        result = _resolve_artist(library, artist, allow_new=allow_new)
+    else:
+        result = _resolve_album(library, artist, album, track,
+                                mb_albumid=mb_albumid, allow_new=allow_new)
+    if result.subject is not None and result.subject.artist_name:
+        # Check the FULL library, even when --mbid scoped resolution to one
+        # release. A unique legacy note is not proof that Band and The Band
+        # name one artist; both may exist in the library with distinct ids.
+        scope = _albums_by_loose_artist(all_library, result.subject.artist_name)
+        keys = {artist_key(a.albumartist) for a in scope}
+        if len(keys) == 1:
+            result = replace(result, subject=replace(result.subject, allow_loose_artist=True))
+    return result
 
 
 @dataclass(frozen=True)

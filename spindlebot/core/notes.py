@@ -136,6 +136,9 @@ class NoteSubjectRef:
     album_title: str | None = None
     track_title: str | None = None
     mbid: str | None = None
+    # Transient lookup evidence from the resolver, never a persisted identity.
+    # Default strict: a caller without the library cannot rule out another artist.
+    allow_loose_artist: bool = False
 
     @staticmethod
     def for_artist(name: str, mb_artistid: str | None = None) -> "NoteSubjectRef":

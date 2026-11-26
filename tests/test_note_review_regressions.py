@@ -38,10 +38,13 @@ def cfg(tmp_path, monkeypatch):
 @pytest.mark.parametrize("kind", [NoteSubjectKind.ALBUM, NoteSubjectKind.TRACK])
 @pytest.mark.parametrize("legacy_artist", ["Beatles", ""])
 def test_adopts_article_variant_or_unknown_artist(conn, kind, legacy_artist):
+    from spindlebot.services.note_resolve import resolve
     factory = NoteSubjectRef.for_album if kind == NoteSubjectKind.ALBUM else NoteSubjectRef.for_track
     args = ("Revolver",) if kind == NoteSubjectKind.ALBUM else ("Revolver", "Taxman")
     legacy = notes.add_note(conn, subject=factory(legacy_artist, *args), body="wishlist")
-    identified = notes.add_note(conn, subject=factory("The Beatles", *args, "mb-revolver"), body="owned")
+    subject = resolve(LIBRARY, artist="The Beatles", album="Revolver",
+                      track="Taxman" if kind == NoteSubjectKind.TRACK else None).subject
+    identified = notes.add_note(conn, subject=subject, body="owned")
     assert identified.subject.id == legacy.subject.id
     assert len(note_subject_repo.list_all(conn)) == 1
 
@@ -58,6 +61,12 @@ def test_article_adoption_refuses_multiple_loose_candidates(conn):
     for artist in ("Band", "The Band"):
         notes.add_note(conn, subject=NoteSubjectRef.for_album(artist, "Album"), body=artist)
     assert notes.find_adoptable_subject(conn, NoteSubjectRef.for_album("Band (3)", "Album", "mb")) is None
+
+
+def test_adoption_without_library_evidence_keeps_article_identities_distinct(conn):
+    legacy = notes.add_note(conn, subject=NoteSubjectRef.for_album("Band", "Album"), body="a")
+    identified = notes.add_note(conn, subject=NoteSubjectRef.for_album("The Band", "Album", "mb"), body="b")
+    assert identified.subject.id != legacy.subject.id
 
 
 @pytest.mark.parametrize("field", ["artist", "album", "track"])
@@ -142,3 +151,41 @@ def test_ambiguous_or_explicit_id_failure_does_not_suggest_new(cfg, monkeypatch,
         args += ["--mbid", mbid]
     assert cmd_note(cfg, args) == 1
     assert all("--new" not in hint for hint in json.loads(capsys.readouterr().out)["candidates"])
+
+
+@pytest.mark.parametrize("explicit_mbid", [False, True])
+def test_adoption_cannot_steal_notes_from_a_competing_library_artist(conn, explicit_mbid):
+    from spindlebot.services.note_resolve import resolve
+    library = [LibraryAlbum("Band", "Album", 2000, "band-id"),
+               LibraryAlbum("The Band", "Album", 2001, "the-band-id")]
+    legacy = notes.add_note(conn, subject=NoteSubjectRef.for_album("Band", "Album"), body="about Band")
+    resolved = resolve(library, artist="The Band", album="Album",
+                       mb_albumid="the-band-id" if explicit_mbid else None)
+    identified = notes.add_note(conn, subject=resolved.subject, body="about The Band")
+    assert identified.subject.id != legacy.subject.id
+    assert notes.get_note(conn, legacy.id).subject.artist_name == "Band"
+
+
+def test_import_cannot_adopt_from_a_competing_library_artist(conn):
+    library = [LibraryAlbum("Band", "Album", 2000, "band-id"),
+               LibraryAlbum("The Band", "Album", 2001, "the-band-id")]
+    legacy = notes.add_note(conn, subject=NoteSubjectRef.for_album("Band", "Album"), body="about Band")
+    parsed = ParsedNote(kind=NoteSubjectKind.ALBUM, artist="The Band", album="Album", body="about Band")
+    plan = plan_import(conn, library, [parsed])
+    assert plan.rows[0].status == ImportRowStatus.READY
+    applied = apply_import(conn, plan)
+    assert notes.get_note(conn, applied.rows[0].note_id).subject.id != legacy.subject.id
+    assert notes.get_note(conn, legacy.id).subject.artist_name == "Band"
+
+
+@pytest.mark.parametrize("tag", ["-urgent", "--json"])
+def test_dash_prefixed_tags_can_be_added_and_removed_with_escaped_operands(cfg, capsys, tag):
+    assert cmd_note(cfg, ["add", "--artist", "Beatles", "-m", "body", "--json"]) == 0
+    note_id = str(json.loads(capsys.readouterr().out)["id"])
+    # After --, even declared option names are literal tag operands.
+    assert cmd_note(cfg, ["tag", note_id, "--", tag]) == 0
+    assert not capsys.readouterr().out.startswith("{"), "literal --json is not a flag"
+    assert cmd_note(cfg, ["show", note_id, "--json"]) == 0
+    assert tag in json.loads(capsys.readouterr().out)["tags"]
+    assert cmd_note(cfg, ["untag", note_id, "--json", "--", tag]) == 0
+    assert tag not in json.loads(capsys.readouterr().out)["tags"]

@@ -190,6 +190,18 @@ wrong guess shreds a paragraph into fragments. Two notes means two headings.
 A heading with no prose under it produces no note — `# Old 97's` above
 `## Fight Songs` is structure, not an empty note about the band.
 
+### Tags beginning with a dash
+
+Put `--` before tag operands that could otherwise be read as options. Place
+output flags before that marker:
+
+```bash
+spindlebot note tag 12 -- -urgent
+spindlebot note untag 12 --json -- -urgent
+```
+
+Every token after `--` is literal, including a tag named `--json`.
+
 ## Exporting
 
 ```bash
