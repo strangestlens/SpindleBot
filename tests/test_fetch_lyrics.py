@@ -4,8 +4,10 @@ Tests for spindlebot.pipeline.stages.fetch_lyrics.
 from __future__ import annotations
 
 import json
+import io
 import struct
 import urllib.error
+from http.client import IncompleteRead
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -407,6 +409,59 @@ class TestPermanentVsTransientFailure:
             assert _process_file(str(audio), 0.0) == "plain"
         lrc = tmp_path / "01. Big Empty Country.lrc"
         assert lrc.exists() and "a line" in lrc.read_text()
+
+
+class TestResponseFailures:
+    @pytest.mark.parametrize("failure", [
+        json.JSONDecodeError("invalid JSON", "", 0),
+        IncompleteRead(b"partial response"),
+    ], ids=["malformed-json", "truncated-response"])
+    def test_response_failure_is_not_erased_by_a_clean_miss(self, tmp_path, failure):
+        audio = tmp_path / "01. Track.flac"
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics._query_lrclib",
+                   side_effect=[failure, (None, None)]):
+            with pytest.raises(type(failure)):
+                _fetch_from_lrclib("Artist", "Track", "Album", 100, str(audio), 0.0)
+
+    @pytest.mark.parametrize("failure", [
+        json.JSONDecodeError("invalid JSON", "", 0),
+        IncompleteRead(b"partial response"),
+    ], ids=["malformed-json", "truncated-response"])
+    def test_a_later_hit_recovers_a_response_failure(self, tmp_path, failure):
+        audio = tmp_path / "01. Track.flac"
+        hit = ("[00:01.00] Found", None)
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics._query_lrclib",
+                   side_effect=[failure, hit]):
+            assert _fetch_from_lrclib(
+                "Artist", "Track", "Album", 100, str(audio), 0.0
+            ) == hit
+
+    @pytest.mark.parametrize("truncated", [False, True],
+                             ids=["malformed-json", "truncated-response"])
+    def test_response_failure_writes_no_terminal_marker(self, tmp_path, truncated):
+        audio = tmp_path / "01. Track.flac"
+        _write_minimal_flac(audio, {"artist": "Artist", "title": "Track"})
+
+        def response(*args, **kwargs):
+            cm = MagicMock()
+            if truncated:
+                cm.__enter__.return_value.read.side_effect = IncompleteRead(b"partial")
+            else:
+                cm.__enter__.return_value = io.BytesIO(b"{invalid JSON")
+            return cm
+
+        with patch("spindlebot.pipeline.stages.fetch_lyrics.time.sleep"), \
+             patch("spindlebot.pipeline.stages.fetch_lyrics.urllib.request.urlopen",
+                   side_effect=response):
+            result = fetch_lyrics(tmp_path, _cfg())
+
+        assert result.errors == [audio.name]
+        assert result.missing == 0
+        assert not audio.with_suffix(".nolrc").exists()
+        assert not audio.with_suffix(".lrc").exists()
+        assert not album_lyrics_complete(tmp_path)
 
 
 # ── unit: per-track terminal markers (miss vs error) ─────────────────────────

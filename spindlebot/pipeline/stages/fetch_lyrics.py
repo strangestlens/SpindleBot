@@ -10,8 +10,9 @@ Per-track terminal state: every track ends in one of two terminal states, or
 stays incomplete (to be retried). A `<track>.lrc` means lyrics were found; a
 `<track>.nolrc` sibling means lrclib definitively has no lyrics for it (a
 successful response with no synced/plain lyrics, including a 404). A *transient*
-failure (connection error, timeout, 5xx, 429) writes NOTHING — the track stays
-incomplete so a later run retries it.
+failure (connection error, timeout, 5xx, 429), malformed response, or other
+unexpected exception writes NOTHING — the track stays incomplete so a later
+run retries it.
 
 This miss/error distinction is what makes completion reliable, and it cuts both
 ways: a transient network blip must not be swept into a permanent "no lyrics"
@@ -299,15 +300,12 @@ def _fetch_from_lrclib(
     # one query instead of sending the same request twice.
     dur_variants = list(dict.fromkeys([_usable_duration(duration), None]))
 
-    # Only a TRANSIENT failure may mask a hit, so only a transient failure is
-    # allowed to turn the whole lookup into an error. A permanent one (a non-429
-    # 4xx — the server rejecting this query as invalid, not failing to serve it)
-    # is that variant's final answer, exactly as definitive as a 404: it can
-    # never succeed, so it is hiding nothing and must not suppress a clean miss
-    # from another variant. Letting it through was what stranded albums in
-    # Processing forever — no terminal marker is ever written for an "error",
-    # and the same permanent rejection recurs on every retry.
-    last_transient_exc: BaseException | None = None
+    # Only a non-429 HTTP 4xx is a permanent rejection of that query variant.
+    # Keep all other failures: _is_retryable decides whether another immediate
+    # attempt is useful, not whether a response proves there are no lyrics.
+    # Malformed JSON and truncated responses must leave the track incomplete,
+    # even when a different variant later returns a clean miss.
+    last_exc: BaseException | None = None
     for i, (a, t, alb) in enumerate(attempts):
         if i > 0:
             time.sleep(request_delay)
@@ -316,12 +314,14 @@ def _fetch_from_lrclib(
                 synced, plain = _query_lrclib(a, t, alb, dur, request_delay)
                 if synced or plain:
                     return synced, plain
+            except urllib.error.HTTPError as exc:
+                if not (400 <= exc.code < 500 and exc.code != 429):
+                    last_exc = exc
             except Exception as exc:
-                if _is_retryable(exc):
-                    last_transient_exc = exc
+                last_exc = exc
 
-    if last_transient_exc:
-        raise last_transient_exc
+    if last_exc:
+        raise last_exc
 
     return None, None
 

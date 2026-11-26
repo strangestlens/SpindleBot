@@ -412,13 +412,16 @@ retries a query that can never succeed, forever. Two concrete rules, both load-b
 - **Never send lrclib a duration outside 1..3600.** It answers `400 ValidationError`, and a
   long continuous track (a 64-minute album side ripped as one file) always exceeds it.
   `_usable_duration` drops it; duration is a narrowing hint, never required.
-- **`_fetch_from_lrclib` only raises for a TRANSIENT failure.** It tries several
+- **`_fetch_from_lrclib` suppresses only non-429 HTTP 4xx failures.** It tries several
   (artist, title, album) × (duration, no-duration) variants. A non-429 4xx means the server
   rejected *that variant* as invalid — as definitive as a 404, hiding nothing — so it must not
-  suppress a clean miss from another variant. Only a retryable failure could have masked a hit.
+  suppress a clean miss from another variant. Every other exception remains an error:
+  malformed JSON and truncated responses are not proof of a miss, even when
+  `_is_retryable` declines an immediate retry. A later successful variant can still win.
 Letting a permanent error through also skipped the embedded-lyrics fallback in `_process_file`
 (it sits after the `except: return "error"`), so a file that already carried its lyrics still
-stranded. Guarded by `TestDurationCap` + `TestPermanentVsTransientFailure`.
+stranded. Guarded by `TestDurationCap`, `TestPermanentVsTransientFailure`, and
+`TestResponseFailures`.
 
 **8. fetch_art test fixtures**
 Tests that need controlled art-fetching behaviour must include `musicbrainz_albumid` in the
