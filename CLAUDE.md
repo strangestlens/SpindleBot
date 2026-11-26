@@ -115,7 +115,8 @@ spindlebot/
     models.py                    — frozen row dataclasses (+ from_row): Location, AudioContent,
                                      AudioPresence, Album, SidecarContent, SidecarPresence, Run,
                                      PendingAction, LyricDoc, LyricVersion, LyricVersionPresence,
-                                     Conflict
+                                     Conflict, NoteSubject, NoteSession, Note,
+                                     NoteRevision
     errors.py                    — SpindleBotError, MarkerMismatch, UnknownLocation
   db/                            — SpindleBot's own SQLite system-of-record
     connection.py                — open_db(): WAL, foreign_keys, migrate
@@ -166,6 +167,9 @@ spindlebot/
     lyrics_sync.py               — reconcile_doc(): per-doc lyric causal lineage — classify each
                                      location's observed .lrc as current/behind/concurrent vs the
                                      head via core.vclock + scan history; no bytes, no files
+    notes.py                     — note lifecycle, subject adoption, filters and sessions
+    note_resolve.py              — resolve typed subjects against the library; refuse ambiguity
+    note_import.py               — read-only Markdown import plans + explicit atomic application
 
 music-watcher.sh                 — fswatch daemon: fires spindlebot import on .log or dir drop
                                      installed to ~/.local/bin/ by setup.sh
@@ -366,14 +370,16 @@ Four rules follow, and none of them are negotiable:
    that the writing is never trapped in SQLite.
 
 **`normalize_artist` is a FUZZY-MATCHING normalizer and must never back an
-equality test.** Use `artist_key` / `text_key`. It went wrong three times on one
+identity key.** Use `artist_key` / `text_key`. It went wrong three times on one
 branch, two different ways: it replaces punctuation with a SPACE, so "Old 97's"
 folds to `old 97 s` and "Old 97s" to `old 97s`; and it strips a leading article,
 so "The Band" and "Band" reduce to the same string. The collection matcher
 absorbs both because it scores candidates afterwards — a uuid has no downstream,
 so the second one merged two real artists' notes permanently and in silence.
-Article-insensitivity belongs in **resolution**, which matches loosely and then
-keys off the library's own spelling, so both typings still land on one subject.
+Article-insensitivity belongs in **lookup**, which prefers strict keys before
+accepting a unique loose match. Resolution keys off the library's spelling;
+filters and wishlist adoption use the same preference without merging distinct
+identified releases or choosing among ambiguous loose candidates.
 
 **`note export` sorts by artist → album → track for a reason beyond
 readability.** Heading nesting cannot express an empty parent level once one is
@@ -428,9 +434,10 @@ ignored, dropped stray operands, and let a non-numeric id reach a bare `int()`
 and print a traceback.
 
 **Two export formats, and the split is deliberate.** Markdown carries PROSE for
-humans and nothing else; `note export --json` is the lossless one (tags, uuid,
+humans and nothing else; `note export --json` is a structured archival export (tags, uuid,
 subject key, timestamps, sessions, every revision, INCLUDING soft-deleted notes)
-and the one to back up. Markdown stays active-only — it cannot record deletion
+with no implemented JSON restore command. Database recovery needs a SQLite
+backup. Markdown stays active-only — it cannot record deletion
 state, so re-importing a deleted note would resurrect it.
 Encoding tags into the markdown was tried and reverted: tags are an open set, so
 no delimiter is safe inside one, and any marker can also begin a line of real

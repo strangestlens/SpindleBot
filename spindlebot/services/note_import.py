@@ -82,6 +82,7 @@ def plan_import(
 ) -> ImportPlan:
     """Resolve every parsed note and classify it. Writes nothing."""
     rows = []
+    planned_bodies = set()
     for parsed in notes:
         try:
             resolution = resolve(
@@ -100,19 +101,23 @@ def plan_import(
             continue
 
         subject = resolution.subject
+        digest = body_sha256(parsed.body)
+        planned_key = (subject.kind, subject.subject_key, digest)
         existing = _existing_subject(conn, subject)
         duplicate = (
-            note_repo.find_by_subject_and_sha(conn, existing.id, body_sha256(parsed.body))
+            note_repo.find_by_subject_and_sha(conn, existing.id, digest)
             if existing else None
         )
-        if duplicate is not None:
+        if duplicate is not None or planned_key in planned_bodies:
             rows.append(ImportRow(
                 parsed, ImportRowStatus.DUPLICATE, subject=subject,
-                detail="already imported", note_id=duplicate.id,
+                detail="already imported" if duplicate else "earlier row has the same body",
+                note_id=duplicate.id if duplicate else None,
             ))
             continue
 
         rows.append(ImportRow(parsed, ImportRowStatus.READY, subject=subject))
+        planned_bodies.add(planned_key)
     return ImportPlan(rows=tuple(rows))
 
 
@@ -130,8 +135,13 @@ def apply_import(
             # outright left it on the old key forever — only a brand-new body
             # happened to trigger the re-key. Nothing is written twice; the
             # adoption is idempotent.
-            adopt_subject(conn, row.subject, now)
-            rows.append(row)
+            subject_row = adopt_subject(conn, row.subject, now)
+            duplicate = note_repo.find_by_subject_and_sha(
+                conn, subject_row.id, body_sha256(row.parsed.body))
+            rows.append(ImportRow(
+                row.parsed, row.status, subject=row.subject, detail=row.detail,
+                note_id=duplicate.id if duplicate else row.note_id,
+            ))
             continue
         if row.status is not ImportRowStatus.READY:
             rows.append(row)

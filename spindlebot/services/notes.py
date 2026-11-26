@@ -13,6 +13,7 @@ from time import time
 
 from spindlebot.core.enums import NoteStatus, NoteSubjectKind
 from spindlebot.core.models import Note, NoteRevision, NoteSession, NoteSubject
+from spindlebot.core.collection_match import normalize_artist
 from spindlebot.core.notes import NoteSubjectRef, artist_key, text_key
 from spindlebot.db.repositories import note_repo, note_subject_repo
 
@@ -74,29 +75,36 @@ def find_adoptable_subject(conn, subject: NoteSubjectRef) -> NoteSubject | None:
     # and the note was stranded. An absent legacy field is treated as "not yet
     # known" — but only when the match is otherwise UNAMBIGUOUS, since a blank
     # field could describe several works.
-    candidates = [
-        row for row in note_subject_repo.list_all(conn, subject.kind)
-        if not row.mbid and _same_work(row, subject)
-    ]
-    return candidates[0] if len(candidates) == 1 else None
+    unidentified = [row for row in note_subject_repo.list_all(conn, subject.kind)
+                    if not row.mbid]
+    for loose_artist in (False, True):
+        candidates = [row for row in unidentified
+                      if _same_work(row, subject, loose_artist=loose_artist)]
+        if candidates:
+            return candidates[0] if len(candidates) == 1 else None
+    return None
 
 
-def _same_work(row: NoteSubject, subject: NoteSubjectRef) -> bool:
+def _loose_artist_key(name: str | None) -> str:
+    return text_key(normalize_artist(name))
+
+
+def _same_work(row: NoteSubject, subject: NoteSubjectRef, *, loose_artist=False) -> bool:
     """Whether an unidentified subject names the same work, field by field.
 
     A field the legacy row never recorded does not disqualify it; a field it
     recorded DIFFERENTLY does.
     """
     pairs = (
-        (row.artist_name, subject.artist_name, artist_key),
+        (row.artist_name, subject.artist_name, _loose_artist_key if loose_artist else artist_key),
         (row.album_title, subject.album_title, text_key),
         (row.track_title, subject.track_title, text_key),
     )
     known = 0
     for legacy, incoming, fold in pairs:
-        if legacy is None:
+        if not legacy:
             continue
-        if fold(legacy) != fold(incoming):
+        if incoming is None or fold(legacy) != fold(incoming):
             return False
         known += 1
     # At least one recorded field has to agree, or a subject with every field
@@ -238,9 +246,9 @@ def subject_ids_for(
     notes, its albums, and its tracks. Filtering to artist-KIND subjects only
     would answer a question nobody asks and hide most of what was written.
 
-    Matching goes through the identity keys (`artist_key` / `text_key`), not raw
-    string equality, so a filter can never disagree with the key it filters on —
-    the same reason resolution groups by `artist_key`.
+    Artist matching prefers the strict identity key, then a unique match with
+    the leading article ignored, just as resolution does. Album and track
+    comparisons use `text_key`; an absent field never matches a supplied filter.
     """
     # `is None` means "no filter given". An EMPTY normalized key is a filter
     # that happens to normalize to nothing — `--album '!!!'` has no alphanumerics
@@ -250,13 +258,29 @@ def subject_ids_for(
     want_album = text_key(album) if album is not None else None
     want_track = text_key(track) if track is not None else None
 
+    subjects = note_subject_repo.list_all(conn)
+    if artist is not None and not any(
+        s.artist_name is not None and artist_key(s.artist_name) == want_artist
+        for s in subjects
+    ):
+        loose = _loose_artist_key(artist)
+        matches = {artist_key(s.artist_name) for s in subjects
+                   if s.artist_name is not None and loose
+                   and _loose_artist_key(s.artist_name) == loose}
+        if len(matches) != 1:
+            return []
+        want_artist = matches.pop()
+
     out = []
-    for subject in note_subject_repo.list_all(conn):
-        if want_artist is not None and artist_key(subject.artist_name) != want_artist:
+    for subject in subjects:
+        if want_artist is not None and (subject.artist_name is None
+                                       or artist_key(subject.artist_name) != want_artist):
             continue
-        if want_album is not None and text_key(subject.album_title) != want_album:
+        if want_album is not None and (subject.album_title is None
+                                      or text_key(subject.album_title) != want_album):
             continue
-        if want_track is not None and text_key(subject.track_title) != want_track:
+        if want_track is not None and (subject.track_title is None
+                                      or text_key(subject.track_title) != want_track):
             continue
         out.append(subject.id)
     return out
@@ -276,7 +300,7 @@ def list_notes(
 ) -> list[NoteView]:
     """Notes matching every filter given, newest first."""
     subject_ids = None
-    if artist or album or track:
+    if any(value is not None for value in (artist, album, track)):
         subject_ids = subject_ids_for(conn, artist=artist, album=album, track=track)
 
     notes = note_repo.list_notes(

@@ -204,7 +204,7 @@ There are two formats, and the difference matters.
 a tested contract — export a corpus, import it into an empty database, export
 again, and the bytes match. It carries the writing and nothing else.
 
-**`--json` is the lossless one**, and the one worth scheduling:
+**`--json` is a structured archival export**:
 
 ```bash
 spindlebot note export --json -o ~/Backups/notes.json
@@ -214,9 +214,15 @@ It holds every un-regenerable thing — tags, the device-stable uuid, subject
 keys, timestamps, sessions, and the full append-only revision chain. Nothing
 else in this system can rebuild those rows.
 
+There is no JSON import or restore command yet. `note import` reads Markdown,
+which restores prose without reconstructing tags, UUIDs, sessions, deletion
+status, or revision history. Keep a SQLite backup of `spindlebot.db` for database
+recovery; the JSON export is useful for inspection and archival access, but is
+not an automated restore path.
+
 It also includes notes you have removed, carrying `status: "deleted"`. `note rm`
-is a status change precisely because the writing survives it, so a backup that
-dropped those would not be one. The markdown export stays active-only: it has
+is a status change precisely because the writing survives it, so the archival
+export includes those rows too. The markdown export stays active-only: it has
 nowhere to record deletion state, and re-importing a deleted note would
 silently resurrect it.
 

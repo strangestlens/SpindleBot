@@ -36,7 +36,7 @@ Usage:
                                                       Import a markdown document of notes (atomic; --dry-run shows the resolution table)
     python -m spindlebot note export [--artist <a>] [--album <b>] [--kind <k>] [--since <d>] [--root-level N] [-o <file>]
                                                       Write notes out as markdown that `note import` reads identically (prose only)
-    python -m spindlebot note export --json [-o <file>]  Lossless: tags, uuids, timestamps and every revision
+    python -m spindlebot note export --json [-o <file>]  Archival JSON: tags, uuids, timestamps and revisions
     python -m spindlebot notify <title> <message>      Send a test notification via all channels
     python -m spindlebot fetch-lyrics <dir> [--dry-run] [--force]   Fetch .lrc files for an album
     python -m spindlebot fetch-art <dir> [--dry-run] [--force]      Fetch/embed album art
@@ -1233,17 +1233,21 @@ _NOTE_SPECS: dict[str, dict] = {
 }
 
 
-def _note_opts(args: list[str], flag: str) -> list[str]:
+def _note_opts(args: list[str], *flags: str) -> list[str]:
     """Every value given for a repeatable flag, in order."""
-    return [args[i + 1] for i, a in enumerate(args) if a == flag and i + 1 < len(args)]
+    values = []
+    tokens = iter(args)
+    for arg in tokens:
+        if arg in _NOTE_VALUE_FLAGS:
+            value = next(tokens, None)
+            if arg in flags and value is not None:
+                values.append(value)
+    return values
 
 
 def _note_opt(args: list[str], *flags: str) -> str | None:
-    for flag in flags:
-        values = _note_opts(args, flag)
-        if values:
-            return values[0]
-    return None
+    values = _note_opts(args, *flags)
+    return values[0] if values else None
 
 
 def _note_positionals(args: list[str]) -> list[str]:
@@ -1299,11 +1303,12 @@ def _note_missing_values(args: list[str]) -> list[str]:
     value (read stdin), so it does not count as an option here.
     """
     missing = []
-    for i, arg in enumerate(args):
+    tokens = iter(args)
+    for arg in tokens:
         if arg not in _NOTE_VALUE_FLAGS:
             continue
-        nxt = args[i + 1] if i + 1 < len(args) else None
-        if nxt is None or (nxt.startswith("-") and nxt != "-"):
+        nxt = next(tokens, None)
+        if nxt is None or nxt in (_NOTE_VALUE_FLAGS | _NOTE_BOOL_FLAGS) - {"-"}:
             missing.append(arg)
     return missing
 
@@ -1397,7 +1402,7 @@ def read_note_body(
     stdin = stdin if stdin is not None else sys.stdin
     launch_editor = launch_editor or _launch_editor
 
-    messages = _note_opts(args, "-m") + _note_opts(args, "--message")
+    messages = _note_opts(args, "-m", "--message")
     if messages:
         return "\n\n".join(messages)
 
@@ -1519,10 +1524,13 @@ def cmd_note(cfg, args: list[str]) -> int:
                 return fail(str(e))
 
             if resolution.status is not ResolutionStatus.RESOLVED:
+                hints = [c.label for c in resolution.candidates]
+                if (resolution.status is ResolutionStatus.UNMATCHED
+                        and _note_opt(rest, "--mbid") is None):
+                    hints.append("(use --new to write about something the library doesn't have)")
                 return fail(
                     f"{resolution.status}: {resolution.reason}",
-                    hints=[c.label for c in resolution.candidates]
-                    + ["(use --new to write about something the library doesn't have)"],
+                    hints=hints,
                 )
 
             body = canonicalize_body(read_note_body(rest))
@@ -1813,7 +1821,7 @@ def cmd_note(cfg, args: list[str]) -> int:
                 album=_note_opt(rest, "--album"),
                 track=_note_opt(rest, "--track"),
                 kind=kind, since_utc=since,
-                # A backup that drops what you deleted is not a backup. Soft
+                # The archive includes soft-deleted notes too. Soft
                 # deletes are recoverable precisely because the writing survives,
                 # and the payload carries `status` so a restore can tell. Markdown
                 # stays active-only: it has nowhere to put deletion state, and
@@ -1845,10 +1853,10 @@ def cmd_note(cfg, args: list[str]) -> int:
                 v.note.id,
             ))
             if want_json:
-                # The LOSSLESS format. Markdown carries prose for humans and
+                # The structured archive. Markdown carries prose for humans and
                 # nothing else; everything un-regenerable — tags, the device
                 # -stable uuid, timestamps, and the full append-only revision
-                # chain — is here. This is the export worth scheduling.
+                # chain — is here. JSON restoration is not implemented.
                 payload = {
                     "schema": "spindlebot.notes/1",
                     "exported_utc": int(time.time()),
@@ -1962,6 +1970,8 @@ def cmd_note(cfg, args: list[str]) -> int:
         return fail(str(e))
     except _sqlite3.IntegrityError as e:
         return fail(f"refused by the database: {e}")
+    except _sqlite3.Error as e:
+        return fail(f"database error: {e}")
     except ValueError as e:
         return fail(str(e))
     finally:
