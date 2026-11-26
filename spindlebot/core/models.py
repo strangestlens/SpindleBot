@@ -91,6 +91,7 @@ class AudioPresence:
     byte_size: int | None
     observed_utc: int
     mtime: int | None = None
+    absence_scan_id: int | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "AudioPresence":
@@ -104,6 +105,7 @@ class AudioPresence:
             byte_size=row["byte_size"],
             observed_utc=row["observed_utc"],
             mtime=row["mtime"] if "mtime" in keys else None,
+            absence_scan_id=row["absence_scan_id"] if "absence_scan_id" in keys else None,
         )
 
 
@@ -163,6 +165,7 @@ class SidecarPresence:
     byte_size: int | None
     observed_utc: int
     mtime: int | None = None
+    absence_scan_id: int | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "SidecarPresence":
@@ -176,6 +179,7 @@ class SidecarPresence:
             byte_size=row["byte_size"],
             observed_utc=row["observed_utc"],
             mtime=row["mtime"] if "mtime" in keys else None,
+            absence_scan_id=row["absence_scan_id"] if "absence_scan_id" in keys else None,
         )
 
 
@@ -218,6 +222,8 @@ class PendingAction:
     executed_utc: int | None
     created_utc: int
     expected_sha256: str | None
+    source_rel_path: str | None = None
+    dest_must_be_absent: bool = False
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "PendingAction":
@@ -236,6 +242,8 @@ class PendingAction:
             executed_utc=row["executed_utc"],
             created_utc=row["created_utc"],
             expected_sha256=row["expected_sha256"],
+            source_rel_path=row["source_rel_path"] if "source_rel_path" in row.keys() else None,
+            dest_must_be_absent=bool(row["dest_must_be_absent"]) if "dest_must_be_absent" in row.keys() else False,
         )
 
 

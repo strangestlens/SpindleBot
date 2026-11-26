@@ -7,7 +7,9 @@ for a human to acknowledge at review time; the Phase-3 executor is the only code
 that acts, and only on acknowledged rows. Two concerns this phase:
 
 - COPY: audio present on an authoritative location but absent on the target
-  retention location → propose copying it there ("sync what's missing").
+  retention location → propose copying it there ("sync what's missing"). A
+  recorded path positively confirmed absent by the latest complete inventory
+  is restored directly, including sidecars and differently named target paths.
 - MISSING: audio the DB still believes present on the target but NOT re-confirmed
   by the target's latest scan (observed_utc older than that scan's start) →
   propose recording the absence (update_presence, non-destructive). If recording
@@ -50,7 +52,7 @@ class ReconcileResult:
     location: str
     run_id: int
     copies: int = 0           # COPY actions proposed
-    missing: int = 0          # update_presence (absent) actions proposed
+    missing: int = 0          # confirmed losses + unrefreshed audio observations
     below_floor: int = 0      # contents that drop below min_copies if marked absent
     below_floor_ids: list[int] = field(default_factory=list)
     conflicts: int = 0        # cross-location lyric divergences flagged
@@ -130,10 +132,15 @@ def reconcile_location(
             result.target_scanned = False
             return result
 
-        target_present = {
-            p.audio_id: p
-            for p in presence_repo.list_for_location(conn, target.id, present=True)
+        completed = ScanStatus(scan["status"]) == ScanStatus.OK and scan["finished_utc"] is not None
+        target_rows = presence_repo.list_for_location(conn, target.id)
+        confirmed_absent = {
+            p.audio_id: p for p in target_rows
+            if not p.present and completed and p.absence_scan_id == scan["id"]
         }
+        target_present = {p.audio_id: p for p in target_rows if p.present}
+        blocked_audio = {p.audio_id for p in target_rows if p.audio_id not in confirmed_absent}
+        occupied_audio_paths = {p.rel_path for p in target_rows if p.present}
 
         # Content flows OUT of the non-retention authoring library toward
         # retention, never back in — so never propose copies INTO it (else a
@@ -147,13 +154,18 @@ def reconcile_location(
             if src.id == target.id:
                 continue
             for p in presence_repo.list_for_location(conn, src.id, present=True):
-                if p.audio_id in target_present or p.audio_id in proposed:
+                if p.audio_id in blocked_audio or p.audio_id in proposed:
+                    continue
+                absence = confirmed_absent.get(p.audio_id)
+                dest_path = absence.rel_path if absence else p.rel_path
+                if absence and dest_path in occupied_audio_paths:
                     continue
                 action_repo.add(
                     conn, run_id=run_id, action_kind=ActionKind.COPY,
                     content_kind=ContentKind.AUDIO, content_id=p.audio_id,
                     source_location_id=src.id, dest_location_id=target.id,
-                    rel_path=p.rel_path, now=now,
+                    rel_path=dest_path, source_rel_path=p.rel_path, now=now,
+                    dest_must_be_absent=absence is not None,
                     expected_sha256=p.file_sha256,
                     reason=f"present on {src.name}, absent on {target.name}",
                 )
@@ -172,10 +184,14 @@ def reconcile_location(
         # path on retention before removing a Pending file, never just the content
         # — else an un-copied per-disc cover could be the only copy pruned away.
         # Proper fix is the "track all paths per (content, location)" model.
-        target_sidecars = {
-            sp.sidecar_id
-            for sp in sidecar_presence_repo.list_for_location(conn, target.id, present=True)
+        sidecar_rows = sidecar_presence_repo.list_for_location(conn, target.id)
+        confirmed_absent_sidecars = {
+            sp.sidecar_id: sp for sp in sidecar_rows
+            if not sp.present and completed and sp.absence_scan_id == scan["id"]
         }
+        target_sidecars = {sp.sidecar_id for sp in sidecar_rows
+                           if sp.sidecar_id not in confirmed_absent_sidecars}
+        occupied_sidecar_paths = {sp.rel_path for sp in sidecar_rows if sp.present}
         proposed_sc: set[int] = set()
         for src in copy_sources:
             if src.id == target.id:
@@ -183,11 +199,16 @@ def reconcile_location(
             for sp in sidecar_presence_repo.list_for_location(conn, src.id, present=True):
                 if sp.sidecar_id in target_sidecars or sp.sidecar_id in proposed_sc:
                     continue
+                absence = confirmed_absent_sidecars.get(sp.sidecar_id)
+                dest_path = absence.rel_path if absence else sp.rel_path
+                if absence and dest_path in occupied_sidecar_paths:
+                    continue
                 action_repo.add(
                     conn, run_id=run_id, action_kind=ActionKind.COPY,
                     content_kind=ContentKind.SIDECAR, content_id=sp.sidecar_id,
                     source_location_id=src.id, dest_location_id=target.id,
-                    rel_path=sp.rel_path, now=now,
+                    rel_path=dest_path, source_rel_path=sp.rel_path, now=now,
+                    dest_must_be_absent=absence is not None,
                     expected_sha256=sp.file_sha256,
                     reason=f"sidecar present on {src.name}, absent on {target.name}",
                 )
@@ -197,6 +218,15 @@ def reconcile_location(
 
         # MISSING: target rows not re-confirmed by the target's latest scan.
         cutoff = scan["started_utc"]
+        # Inventory has already recorded these exact paths absent. Keep the
+        # diagnostic count/floor warning, but COPY (above) repairs them directly;
+        # no unexecutable UPDATE_PRESENCE action is needed first.
+        for audio_id in confirmed_absent:
+            result.missing += 1
+            if target.is_retention and presence_repo.count_retention_copies(conn, audio_id) < min_copies:
+                result.below_floor += 1
+                result.below_floor_ids.append(audio_id)
+            _tick("missing")
         for audio_id, p in target_present.items():
             if p.observed_utc >= cutoff:
                 continue

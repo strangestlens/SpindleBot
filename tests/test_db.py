@@ -22,7 +22,7 @@ def _tables(conn) -> set[str]:
 
 def test_open_db_creates_schema_at_latest_version(tmp_path):
     conn = open_db(tmp_path / "spindlebot.db")
-    assert current_version(conn) == LATEST_VERSION == 9
+    assert current_version(conn) == LATEST_VERSION == 10
     assert {
         "location", "audio_content", "audio_presence", "location_scan",
         "album", "album_track", "sidecar_content", "sidecar_presence",
@@ -464,12 +464,12 @@ def test_v9_preserves_legacy_actions_without_guessing_their_hash(tmp_path):
         )
     conn.commit()
     assert current_version(conn) == 8
-    assert migrate(conn) == LATEST_VERSION == 9
+    assert migrate(conn) == LATEST_VERSION
     conn.close()
 
     # Reopening proves the migration and the original queue states are durable.
     with open_db(db) as reopened:
-        assert migrate(reopened) == 9
+        assert migrate(reopened) == LATEST_VERSION
         actions = action_repo.list_for_run(reopened, 1)
         assert len(actions) == 3
         assert all(a.expected_sha256 is None for a in actions)

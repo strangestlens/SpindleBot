@@ -22,7 +22,11 @@ REFUSED (never touched); it also defaults to a dry run.
 """
 from __future__ import annotations
 
+import os
+import shutil
+import stat
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -51,6 +55,48 @@ def _rsync_copy(src: Path, dst: Path) -> None:
         ["rsync", "-a", "--", str(src), str(dst)],
         check=True, capture_output=True,
     )
+
+
+def _restore_absent(src: Path, dst: Path, *, expected: str, copy_fn: CopyFn, action_id: int) -> None:
+    """Verify staged bytes, then publish through an exclusively created fd.
+
+    O_EXCL rejects entries that appear during transfer, including dangling
+    symlinks. Writing through our own fd cannot overwrite a replacement inode.
+    Failed or interrupted publication can leave an unverified partial file;
+    no presence is recorded until the caller verifies the final path.
+    """
+    try:
+        entry = dst.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        # A previous acknowledged action or another actor may already have
+        # restored the exact planned bytes. Verify without writing, so a retried
+        # queue can finish instead of failing forever on its own correct copy.
+        if stat.S_ISREG(entry.st_mode) and file_sha256(dst) == expected:
+            return
+        raise IntegrityMismatch(f"action {action_id}: restoration destination reappeared: {dst}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".spindlebot-restore-", dir=dst.parent) as scratch:
+        staged = Path(scratch) / "payload"
+        copy_fn(src, staged)
+        if file_sha256(staged) != expected:
+            raise IntegrityMismatch(f"action {action_id}: staged restoration hash differs from plan")
+        metadata = staged.stat()
+        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                     stat.S_IMODE(metadata.st_mode))
+        owned = os.fstat(fd)
+        # Never unlink the final pathname on failure: even an inode check and
+        # a subsequent unlink race with a replacement arriving between them.
+        with os.fdopen(fd, "wb") as out, staged.open("rb") as inp:
+            shutil.copyfileobj(inp, out)
+            out.flush()
+            os.fchmod(out.fileno(), stat.S_IMODE(metadata.st_mode))
+            if os.utime in os.supports_fd:
+                os.utime(out.fileno(), ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        current = dst.lstat()
+        if (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
+            raise IntegrityMismatch(f"action {action_id}: restoration destination replaced: {dst}")
 
 
 @dataclass
@@ -109,7 +155,7 @@ def execute_pending(
                         f"action {action.id}: source/dest not mounted or identified")
                     continue
 
-                src = Path(src_root) / action.rel_path
+                src = Path(src_root) / (action.source_rel_path or action.rel_path)
                 dst = Path(dst_root) / action.rel_path
                 if not src.is_file():
                     result.skipped += 1
@@ -126,7 +172,11 @@ def execute_pending(
                     raise IntegrityMismatch(
                         f"action {action.id}: source {src} hash {source_sha[:12]} != "
                         f"planned {expected[:12]}; source changed since inventory/plan")
-                copy_fn(src, dst)
+                if action.dest_must_be_absent:
+                    _restore_absent(src, dst, expected=expected, copy_fn=copy_fn,
+                                    action_id=action.id)
+                else:
+                    copy_fn(src, dst)
                 actual = file_sha256(dst)
                 if actual != expected:
                     raise IntegrityMismatch(

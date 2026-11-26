@@ -4,7 +4,7 @@ Inventory: scan a location's filesystem and record what audio it holds.
 Read-only with respect to the files (it never moves or edits one) — it only
 writes to the SpindleBot DB: upserting audio_content (by content identity),
 grouping tracks into albums, recording sidecars (.lrc / cover.jpg / .nolrc),
-and writing observed-present presence facts for the location.
+and writing observed-present or positively confirmed absent presence facts.
 
 Sidecars belong to identity, never to a path: a .lrc follows its track (matched
 by stem within the same directory), while cover.jpg and the .nolrc marker follow
@@ -322,6 +322,33 @@ def _sidecar_digest_or_reuse(
     return file_sha256(path)
 
 
+def _confirm_absences(conn, *, location_id, root, scan_id, now, observed, errored, result):
+    """Record absence only when an exact-path lstat proves no entry exists.
+
+    A tree walk can skip unreadable directories, and an unrefreshed presence
+    could be an identification error rather than a deletion. Neither is proof
+    of loss. lstat also preserves dangling symlinks and other existing entries.
+    Called only after the scan's normal completion, never from its finally.
+    """
+    for repo, id_field in ((presence_repo, "audio_id"), (sidecar_presence_repo, "sidecar_id")):
+        for presence in repo.list_for_location(conn, location_id):
+            rel = presence.rel_path
+            if rel is None or rel in observed or rel in errored:
+                continue
+            try:
+                (root / rel).lstat()
+            except FileNotFoundError:
+                repo.set_presence(
+                    conn, **{id_field: getattr(presence, id_field)}, location_id=location_id,
+                    present=False, observed_utc=now, rel_path=rel,
+                    file_sha256=presence.file_sha256, byte_size=presence.byte_size,
+                    mtime=presence.mtime, absence_scan_id=scan_id,
+                )
+            except OSError as exc:
+                result.errors += 1
+                result.error_paths.append(f"{root / rel}: {exc}")
+
+
 def inventory_location(
     conn,
     *,
@@ -334,7 +361,7 @@ def inventory_location(
     commit_every: int = 200,
     rehash: bool = False,
 ) -> InventoryResult:
-    """Scan `root` for audio + sidecars, upsert content + observed-present facts.
+    """Scan `root` for audio + sidecars, recording present and confirmed absent paths.
 
     Writes the location's marker file at `root`, records a `location_scan` row,
     groups tracks into albums, records sidecars (.lrc per track, cover.jpg /
@@ -361,16 +388,12 @@ def inventory_location(
     # Positively identify the location on disk before recording anything.
     ensure_marker(root, uuid=location.uuid, name=location.name, now=now)
 
-    beets_index = _load_beets_index(beets_db)
-    audio_files, sidecar_files, total_bytes = _walk_tree(root)
-    total = len(audio_files) + len(sidecar_files)
     done = 0
     done_bytes = 0
-    emit(progress, phase="scan", done=0, total=total,
-         done_bytes=0, total_bytes=total_bytes)
-
     scan_id = scan_repo.start_scan(conn, location.id, now)
     status = ScanStatus.OK
+    observed: set[str] = set()
+    errored: set[str] = set()
 
     def _maybe_checkpoint() -> None:
         if checkpoint is not None and commit_every > 0 and done % commit_every == 0:
@@ -381,6 +404,13 @@ def inventory_location(
     stem_audio: dict[tuple[Path, str], int] = {}         # (dir, stem) -> audio id
     seen_albums: set[int] = set()
     try:
+        # Failed preparation must supersede old absence evidence too; otherwise
+        # a failed tree walk leaves an earlier successful scan authorized.
+        beets_index = _load_beets_index(beets_db)
+        audio_files, sidecar_files, total_bytes = _walk_tree(root)
+        total = len(audio_files) + len(sidecar_files)
+        emit(progress, phase="scan", done=0, total=total,
+             done_bytes=0, total_bytes=total_bytes)
         for path in audio_files:
             result.scanned += 1
             try:
@@ -445,6 +475,7 @@ def inventory_location(
                     byte_size=byte_size,
                     mtime=mtime,
                 )
+                observed.add(rel_path)
                 done_bytes += byte_size
                 stem_audio[(path.parent, path.stem.lower())] = audio.id
                 if reused_album_id is not None:
@@ -465,6 +496,7 @@ def inventory_location(
                 result.updated += 1 if existed else 0
                 result.new += 0 if existed else 1
             except OSError as exc:  # file vanished/unreadable mid-scan: isolate, keep going
+                errored.add(str(path.relative_to(root)))
                 result.errors += 1
                 result.error_paths.append(f"{path}: {exc}")
             done += 1
@@ -536,10 +568,12 @@ def inventory_location(
                     byte_size=byte_size,
                     mtime=mtime,
                 )
+                observed.add(rel_path)
                 result.sidecars += 1
                 result.sidecars_updated += 1 if existed else 0
                 result.sidecars_new += 0 if existed else 1
             except OSError as exc:
+                errored.add(str(path.relative_to(root)))
                 result.errors += 1
                 result.error_paths.append(f"{path}: {exc}")
             done += 1
@@ -547,6 +581,10 @@ def inventory_location(
                  done_bytes=done_bytes, total_bytes=total_bytes,
                  current=str(path.relative_to(root)))
             _maybe_checkpoint()
+        _confirm_absences(
+            conn, location_id=location.id, root=root, scan_id=scan_id, now=now,
+            observed=observed, errored=errored, result=result,
+        )
     except BaseException:
         status = ScanStatus.INTERRUPTED
         raise

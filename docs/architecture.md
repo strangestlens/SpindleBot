@@ -104,6 +104,21 @@ against that planned checksum before copying, then verifies the destination
 against the same checksum before recording presence. Refreshing inventory after
 planning cannot change what an acknowledged action is allowed to copy.
 
+A completed inventory also checks previously recorded paths for absence. Only
+an exact-path check that finds no filesystem entry records a confirmed loss;
+unreadable files, dangling symlinks, and incomplete scans do not authorize a
+restoration. Schema v10 ties each absence to its scan ID, so two scans within
+one second cannot reuse each other's evidence. `review` can then propose COPY
+directly, restoring the recorded target path from an available source.
+
+Restoration plans freeze source and destination paths separately. Sync verifies
+a staged copy, exclusively creates the absent destination, and writes through
+that file descriptor. A symlink or different bytes that reappear are preserved
+and the action fails; an already-correct regular file is verified without writing.
+Only the final verified path is recorded present. Failed or interrupted
+publication can leave an unverified partial file requiring inspection and
+cleanup before retry. Normal copies retain their existing copy path.
+
 **Locations are first-class**, not paths in a config file. Each is identified by
 a marker file `.spindlebot-location-<uuid>` at its root, and a root may be a
 subfolder of a shared volume rather than a whole disk. Two deliberate rules:
