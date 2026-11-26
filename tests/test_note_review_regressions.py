@@ -195,3 +195,16 @@ def test_dash_prefixed_tags_can_be_added_and_removed_with_escaped_operands(cfg, 
 def test_usage_errors_preserve_json_output_without_a_valid_subcommand(cfg, capsys, args):
     assert cmd_note(cfg, args) == 1
     assert "error" in json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("literal", ["--message", "--json", "--tag", "--new", "--"])
+def test_inline_values_preserve_literal_option_names(cfg, capsys, literal):
+    assert cmd_note(cfg, ["add", "--artist", "Beatles", "--message=" + literal,
+                          "--tag=" + literal, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["body"] == literal and payload["tags"] == [literal]
+
+
+def test_inline_value_cannot_enable_json_output(cfg, capsys):
+    assert cmd_note(cfg, ["add", "--artist", "Beatles", "--message=--json"]) == 0
+    assert not capsys.readouterr().out.startswith("{")

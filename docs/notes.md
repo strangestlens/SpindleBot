@@ -31,6 +31,10 @@ Four input modes, in precedence order:
 
 `-m` is repeatable so multi-paragraph input never has to fight the shell over
 newlines, and a single `-m` value keeps whatever newlines it contains.
+When text equals an option name, use an inline value: `--message=--message`
+or `--tag=--json`. Ordinary dash-prefixed text such as `-m "- an observation"`
+also works. A separate declared option still reports a missing value rather
+than being silently consumed.
 
 The editor buffer is deliberately empty rather than carrying a commented header
 the way `git commit` does: `#` is a markdown heading here, so stripping comments

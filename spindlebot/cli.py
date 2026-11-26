@@ -1240,6 +1240,11 @@ def _note_opts(args: list[str], *flags: str) -> list[str]:
     for arg in tokens:
         if arg == "--":
             break
+        name, separator, value = arg.partition("=")
+        if separator and name in _NOTE_VALUE_FLAGS:
+            if name in flags:
+                values.append(value)
+            continue
         if arg in _NOTE_VALUE_FLAGS:
             value = next(tokens, None)
             if arg in flags and value is not None:
@@ -1309,6 +1314,11 @@ def _note_unknown_flags(args: list[str], allowed: set[str] | None = None) -> lis
             continue
         if arg == "--":
             break
+        name, separator, _value = arg.partition("=")
+        if separator and name in _NOTE_VALUE_FLAGS:
+            if allowed is not None and name not in allowed:
+                unknown.append(name)
+            continue
         if arg in _NOTE_VALUE_FLAGS:
             skip = True
             if allowed is not None and arg not in allowed:
