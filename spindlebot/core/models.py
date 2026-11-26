@@ -217,6 +217,7 @@ class PendingAction:
     acknowledged_utc: int | None
     executed_utc: int | None
     created_utc: int
+    expected_sha256: str | None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "PendingAction":
@@ -234,6 +235,7 @@ class PendingAction:
             acknowledged_utc=row["acknowledged_utc"],
             executed_utc=row["executed_utc"],
             created_utc=row["created_utc"],
+            expected_sha256=row["expected_sha256"],
         )
 
 

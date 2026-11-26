@@ -154,6 +154,7 @@ def reconcile_location(
                     content_kind=ContentKind.AUDIO, content_id=p.audio_id,
                     source_location_id=src.id, dest_location_id=target.id,
                     rel_path=p.rel_path, now=now,
+                    expected_sha256=p.file_sha256,
                     reason=f"present on {src.name}, absent on {target.name}",
                 )
                 proposed.add(p.audio_id)
@@ -187,6 +188,7 @@ def reconcile_location(
                     content_kind=ContentKind.SIDECAR, content_id=sp.sidecar_id,
                     source_location_id=src.id, dest_location_id=target.id,
                     rel_path=sp.rel_path, now=now,
+                    expected_sha256=sp.file_sha256,
                     reason=f"sidecar present on {src.name}, absent on {target.name}",
                 )
                 proposed_sc.add(sp.sidecar_id)

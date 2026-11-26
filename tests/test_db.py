@@ -22,7 +22,7 @@ def _tables(conn) -> set[str]:
 
 def test_open_db_creates_schema_at_latest_version(tmp_path):
     conn = open_db(tmp_path / "spindlebot.db")
-    assert current_version(conn) == LATEST_VERSION == 8
+    assert current_version(conn) == LATEST_VERSION == 9
     assert {
         "location", "audio_content", "audio_presence", "location_scan",
         "album", "album_track", "sidecar_content", "sidecar_presence",
@@ -429,3 +429,51 @@ def test_deleting_a_subject_with_notes_fails_rather_than_destroying_them(tmp_pat
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("DELETE FROM note_subject WHERE id = 1")
     assert conn.execute("SELECT COUNT(*) FROM note").fetchone()[0] == 1
+
+
+# ── v9: immutable source checksum on COPY plans ─────────────────────────────
+
+def test_v9_preserves_legacy_actions_without_guessing_their_hash(tmp_path):
+    from spindlebot.db.repositories import action_repo
+
+    db = tmp_path / "spindlebot.db"
+    conn = connect(db)
+    for target, sql_file in migrations.MIGRATIONS:
+        if target > 8:
+            break
+        conn.executescript((migrations._SCHEMA_DIR / sql_file).read_text(encoding="utf-8"))
+        conn.execute(f"PRAGMA user_version = {target}")
+    conn.execute("INSERT INTO location (uuid, name, kind) VALUES ('a', 'AuthoringLibrary', 'library')")
+    conn.execute(
+        "INSERT INTO audio_content (identity, identity_kind, first_seen_utc, last_seen_utc) "
+        "VALUES ('keep', 'audio_md5', 0, 0)"
+    )
+    conn.execute(
+        "INSERT INTO audio_presence "
+        "(audio_id, location_id, present, file_sha256, observed_utc) "
+        "VALUES (1, 1, 1, 'current-presence-is-not-the-old-plan', 10)"
+    )
+    conn.execute("INSERT INTO run (kind, started_utc) VALUES ('reconcile', 0)")
+    for acknowledged, executed in [(0, None), (1, None), (1, 20)]:
+        conn.execute(
+            "INSERT INTO pending_action "
+            "(run_id, action_kind, content_kind, content_id, source_location_id, "
+            "rel_path, acknowledged, executed_utc, created_utc) "
+            "VALUES (1, 'copy', 'audio', 1, 1, 'track.flac', ?, ?, 0)",
+            (acknowledged, executed),
+        )
+    conn.commit()
+    assert current_version(conn) == 8
+    assert migrate(conn) == LATEST_VERSION == 9
+    conn.close()
+
+    # Reopening proves the migration and the original queue states are durable.
+    with open_db(db) as reopened:
+        assert migrate(reopened) == 9
+        actions = action_repo.list_for_run(reopened, 1)
+        assert len(actions) == 3
+        assert all(a.expected_sha256 is None for a in actions)
+        assert [(a.acknowledged, a.executed_utc) for a in actions] == [
+            (False, None), (True, None), (True, 20),
+        ]
+        assert sum(c == "expected_sha256" for c in _cols(reopened, "pending_action")) == 1

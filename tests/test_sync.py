@@ -46,10 +46,12 @@ def _good_copy(src: Path, dst: Path) -> None:
 
 def _propose_copy(conn, *, audio, src_loc, dst_loc, rel_path, now=0):
     run_id = run_repo.start_run(conn, RunKind.RECONCILE, now=now)
+    src = Path(src_loc.root_path) / rel_path
     a = action_repo.add(conn, run_id=run_id, action_kind=ActionKind.COPY,
                         content_kind=ContentKind.AUDIO, content_id=audio.id,
                         source_location_id=src_loc.id, dest_location_id=dst_loc.id,
-                        rel_path=rel_path, now=now)
+                        rel_path=rel_path, now=now,
+                        expected_sha256=file_sha256(src) if src.is_file() else None)
     action_repo.acknowledge(conn, [a.id], now=now)
     return a
 
@@ -104,7 +106,7 @@ def test_copies_a_sidecar_and_records_sidecar_presence(conn, tmp_path):
     a = action_repo.add(conn, run_id=run_id, action_kind=ActionKind.COPY,
                         content_kind=ContentKind.SIDECAR, content_id=sc.id,
                         source_location_id=pending.id, dest_location_id=retention_drive.id,
-                        rel_path=rel, now=0)
+                        rel_path=rel, now=0, expected_sha256=file_sha256(src))
     action_repo.acknowledge(conn, [a.id], now=0)
 
     result = execute_pending(conn, copy_fn=_good_copy, now=1000)
@@ -383,7 +385,8 @@ def test_copied_sidecar_records_mtime(conn, tmp_path):
     a = action_repo.add(conn, run_id=run_id, action_kind=ActionKind.COPY,
                         content_kind=ContentKind.SIDECAR, content_id=sc.id,
                         source_location_id=pending.id, dest_location_id=retention_drive.id,
-                        rel_path=rel, reason="test", now=0)
+                        rel_path=rel, reason="test", now=0,
+                        expected_sha256=file_sha256(src))
     action_repo.acknowledge(conn, [a.id], now=0)
 
     execute_pending(conn, copy_fn=_good_copy, now=1000)

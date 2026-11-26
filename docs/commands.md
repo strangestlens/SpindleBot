@@ -67,7 +67,7 @@ next:
 |-------|----------------|--------------|
 | `inventory` | No | Hashes what's actually on disk at a location; upserts content, albums, sidecars, presence |
 | `review` | No | Diffs the DB against what was observed and writes `pending_action` rows — a plan, nothing more |
-| `sync` | Yes (writes) | Executes *acknowledged* copy actions: copy → verify dest sha256 → record presence |
+| `sync` | Yes (writes) | Executes *acknowledged* copy actions: verify source against plan → copy → verify dest → record presence |
 | `push` | Yes (writes) | The three above, for one location, in one pass (plus a rescan of the authoring library first). Stops there — never prunes |
 | `prune` | Yes (deletes) | Releases the non-retention authoring copy once retention is verified |
 | `delete` | Yes (deletes) | Removes a *retention* copy — the gated one |
@@ -75,6 +75,18 @@ next:
 `review` requires a fresh scan of the target location; it refuses to plan
 against stale observations. Nothing in `sync`, `prune`, or `delete` acts on an
 action that hasn't been acknowledged.
+
+COPY plans include the source checksum observed at planning time, for audio and
+sidecars. A changed source fails before any copy, writes no destination presence,
+and leaves the action unexecuted; `sync` reports the action ID and exits nonzero.
+Destination verification uses that same planned checksum, including when the
+source changes during transfer.
+
+Schema v9 adds this checksum without backfilling older actions from current
+presence. A COPY with no planned checksum is refused even if its source is
+readable. Re-inventory the source and review again to create a fresh plan.
+Old acknowledged actions remain queued and continue reporting failure until
+explicitly retired; a fresh plan does not silently replace them.
 
 ### `push` — one location, one pass
 

@@ -67,7 +67,8 @@ concurrently with a mount event:
 5. `inventory` — per-file errors are **not** fatal. One unreadable FLAC must not
    wedge the pipeline; it's isolated and logged, and the rest is cataloged.
 6. `review --yes` — plan and acknowledge the copies in one shot.
-7. `sync` — copy → verify → record, scoped to this destination so it doesn't try
+7. `sync` — verify source against plan → copy → verify destination → record,
+   scoped to this destination so it doesn't try
    to execute copies queued for some other, possibly unmounted, destination. On
    failure it aborts and **leaves Pending intact, without pruning**.
 8. `prune --execute` — release only files hash-verified on retention.
