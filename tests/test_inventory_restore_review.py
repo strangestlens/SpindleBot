@@ -13,6 +13,7 @@ from spindlebot.db.connection import open_db
 from spindlebot.db.repositories import (
     action_repo,
     audio_repo,
+    location_repo,
     presence_repo,
     scan_repo,
     sidecar_presence_repo,
@@ -77,7 +78,9 @@ def test_missing_path_with_ambiguous_historical_occupants_is_not_authorization(s
     assert all(p.rel_path != rel for p in repo.list_for_location(conn, target.id))
 
 
-@pytest.mark.parametrize("preparation", ["index", "walk", "progress"])
+@pytest.mark.parametrize("preparation", [
+    "index", "walk", "progress", "marker", "root_is_dir", "missing_root",
+])
 def test_failed_preparation_blocks_old_absence_after_connection_closes(seeded, monkeypatch, preparation):
     conn, source, target = seeded
     dst = Path(target.root_path) / "Artist/Album/01.flac"
@@ -96,13 +99,34 @@ def test_failed_preparation_blocks_old_absence_after_connection_closes(seeded, m
     kwargs = {}
     if preparation == "progress":
         kwargs["progress"] = failed
+    elif preparation == "marker":
+        monkeypatch.setattr(inventory, "ensure_marker", failed)
+    elif preparation in ("root_is_dir", "missing_root"):
+        is_dir = Path.is_dir
+
+        def root_check(path):
+            if path == Path(target.root_path):
+                if preparation == "root_is_dir":
+                    failed()
+                return False
+            return is_dir(path)
+
+        monkeypatch.setattr(Path, "is_dir", root_check)
     else:
         monkeypatch.setattr(inventory, "_load_beets_index" if preparation == "index" else "_walk_tree", failed)
-    with pytest.raises(failure_type, match="preparation interrupted"):
-        inventory.inventory_location(
+
+    def run():
+        return inventory.inventory_location(
             conn, location=target, root=target.root_path, now=300,
             checkpoint=conn.commit, commit_every=0, **kwargs,
         )
+
+    if preparation == "missing_root":
+        assert run().scanned == 0
+        assert scan_repo.latest_scan(conn, target.id)["status"] == ScanStatus.ERROR
+    else:
+        with pytest.raises(failure_type, match="preparation interrupted"):
+            run()
     conn.close()  # Drop uncommitted finish_scan, as a caller does on failure.
     reopened = open_db(db_path)
     try:
@@ -112,3 +136,17 @@ def test_failed_preparation_blocks_old_absence_after_connection_closes(seeded, m
         assert plan.copies == 0
     finally:
         reopened.close()
+
+
+def test_missing_root_on_first_inventory_does_not_enable_initial_fill(seeded, tmp_path):
+    conn, source, target = seeded
+    missing = location_repo.upsert(
+        conn, uuid="new-location", name="PortablePlayer", kind=target.kind,
+        root_path=str(tmp_path / "MissingFirstLocation"), is_retention=True,
+    )
+    result = inventory.inventory_location(
+        conn, location=missing, root=missing.root_path, now=300, checkpoint=conn.commit,
+    )
+    assert result.scanned == 0 and scan_repo.latest_scan(conn, missing.id) is None
+    plan = reconcile_location(conn, target=missing, source_locations=[source], now=400)
+    assert not plan.target_scanned and plan.copies == 0

@@ -115,9 +115,11 @@ When a scan observes a different recording or sidecar identity at an existing
 path, it retires the previous identity's path association. Deleting the new
 occupant therefore cannot restore the old one. If older records leave several
 identities claiming a now-missing path, inventory retires those ambiguous
-claims without authorizing a restoration. Scans also checkpoint their running
-marker before preparation, so an interrupted scan cannot revive older absence
-evidence when its connection closes.
+claims without authorizing a restoration. Rescans checkpoint their running
+marker before filesystem setup, including root checks and marker refresh, so a
+failed setup or interrupted scan cannot revive older absence evidence when its
+connection closes. First-time inventory still validates the root before recording
+its initial scan, preserving the existing first-fill planning gate.
 
 Restoration plans freeze source and destination paths separately. Absolute or
 parent-traversing queued paths are refused before source access; an invalid

@@ -402,12 +402,19 @@ def inventory_location(
     now = int(time.time()) if now is None else now
     result = InventoryResult(location=location.name)
     root = Path(root)
-    if not root.is_dir():
+
+    def prepare_root() -> bool:
+        if not root.is_dir():
+            return False
+        ensure_marker(root, uuid=location.uuid, name=location.name, now=now)
+        return True
+
+    # A first inventory has no old absence authorization to revoke. Preserve
+    # its no-scan result for an unavailable or unidentified root, because the
+    # reconciler uses the existence of any scan to gate initial-fill planning.
+    previous_scan = scan_repo.latest_scan(conn, location.id)
+    if previous_scan is None and not prepare_root():
         return result
-
-    # Positively identify the location on disk before recording anything.
-    ensure_marker(root, uuid=location.uuid, name=location.name, now=now)
-
     done = 0
     done_bytes = 0
     scan_id = scan_repo.start_scan(conn, location.id, now)
@@ -426,6 +433,12 @@ def inventory_location(
     try:
         if checkpoint is not None:
             checkpoint()
+        # Existing locations have older absence evidence to invalidate. Their
+        # setup follows the durable running marker; first-time roots have
+        # already been identified without enabling an unavailable initial fill.
+        if previous_scan is not None and not prepare_root():
+            status = ScanStatus.ERROR
+            return result
         # Failed preparation must supersede old absence evidence too; otherwise
         # a failed tree walk leaves an earlier successful scan authorized.
         beets_index = _load_beets_index(beets_db)
