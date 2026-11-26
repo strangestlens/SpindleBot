@@ -189,3 +189,9 @@ def test_dash_prefixed_tags_can_be_added_and_removed_with_escaped_operands(cfg, 
     assert tag in json.loads(capsys.readouterr().out)["tags"]
     assert cmd_note(cfg, ["untag", note_id, "--json", "--", tag]) == 0
     assert tag not in json.loads(capsys.readouterr().out)["tags"]
+
+
+@pytest.mark.parametrize("args", [["--json"], ["unknown", "--json"]])
+def test_usage_errors_preserve_json_output_without_a_valid_subcommand(cfg, capsys, args):
+    assert cmd_note(cfg, args) == 1
+    assert "error" in json.loads(capsys.readouterr().out)

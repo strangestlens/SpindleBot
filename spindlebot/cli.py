@@ -1477,7 +1477,7 @@ def cmd_note(cfg, args: list[str]) -> int:
     from spindlebot.services import notes as svc
     from spindlebot.services.note_resolve import ResolutionStatus
 
-    want_json = _note_has_flag(args[1:], "--json")
+    want_json = _note_has_flag(args, "--json")
     sub = args[0] if args and not args[0].startswith("-") else None
 
     def fail(msg: str, *, hints: list[str] | None = None) -> int:
