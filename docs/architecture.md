@@ -169,10 +169,13 @@ is read once per reconciliation. Changed plans remain separate proposals;
 approved plan fields are never rewritten. Unacknowledged previews and executed history
 do not suppress new work. Equivalent duplicate rows are not retroactively removed.
 
-A later acknowledged restoration supersedes older, unexecuted generic COPY
-approvals writing the same destination path. Schema v11 records when each older
-action was retired and its replacement ID, preserving original approval and
-plan fields. The retirement timestamp remains authoritative if replacement
+A later-approved restoration supersedes earlier, unexecuted generic COPY
+approvals writing the same destination path. Schema v11 records when each action
+was retired and its replacement ID, preserving original approval and plan values.
+An ordinal allocated atomically by each acknowledgement orders approvals; row
+creation IDs and run timestamps do not. An acknowledgement batch shares one
+ordinal and stricter mode wins ties. Pre-v11 approvals share legacy order zero;
+unknown orders from older clients also favor the stricter plan. The retirement timestamp remains authoritative if replacement
 history is purged. Planning and dry runs do not retire actions. Acknowledgement
 and the executor also normalize older mixed queues, including replacements
 already executed. Other destinations remain untouched.

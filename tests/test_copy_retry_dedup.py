@@ -360,3 +360,32 @@ def test_copy_refuses_an_autocommit_connection_without_a_transaction(library):
     with pytest.raises(sqlite3.ProgrammingError, match="transaction"):
         execute_pending(conn, copy_fn=_copy, now=400)
     assert not (Path(target.root_path) / REL).exists()
+
+
+def test_later_approval_wins_despite_earlier_creation_and_run_timestamp(library):
+    from spindlebot.core.enums import RunKind
+    from spindlebot.db.repositories import run_repo
+    from spindlebot.services.sync import execute_pending
+    conn, source, target = library
+    old, preview = _pending_mode_change(conn, source, target)
+    generic_run = run_repo.start_run(conn, RunKind.RECONCILE, now=300)
+    later_generic = []
+    for action in old:
+        later_generic.append(action_repo.add(
+            conn, run_id=generic_run, action_kind=action.action_kind,
+            content_kind=action.content_kind, content_id=action.content_id,
+            source_location_id=action.source_location_id, dest_location_id=target.id,
+            rel_path=action.rel_path, source_rel_path=action.source_rel_path,
+            expected_sha256=action.expected_sha256, now=300,
+        ))
+    action_repo.acknowledge_run(conn, generic_run, now=900)
+    # A long-running push stamps every stage with its start time. Its actual
+    # acknowledgement is later despite this earlier timestamp and preview id.
+    action_repo.acknowledge_run(conn, preview.run_id, now=100)
+    conn.commit()
+    dst = Path(target.root_path) / REL
+    dst.write_bytes(b"replacement must survive")
+    result = execute_pending(conn, copy_fn=_copy, now=1000, checkpoint=conn.commit)
+    assert dst.read_bytes() == b"replacement must survive"
+    assert result.copied == 3 and result.failed == 1
+    assert all(action_repo.get(conn, a.id).superseded_utc is not None for a in later_generic)

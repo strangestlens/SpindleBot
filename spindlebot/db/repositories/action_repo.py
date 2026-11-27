@@ -71,8 +71,11 @@ def acknowledge(conn: sqlite3.Connection, action_ids: list[int], now: int) -> in
     if not action_ids:
         return 0
     placeholders = ",".join("?" for _ in action_ids)
+    # The uncorrelated scalar subquery is evaluated once per UPDATE, under its
+    # write transaction: each acknowledgement batch gets one monotonic ordinal.
     cur = conn.execute(
-        f"UPDATE pending_action SET acknowledged = 1, acknowledged_utc = ? "
+        f"UPDATE pending_action SET acknowledged = 1, acknowledged_utc = ?, "
+        f"approval_order = (SELECT COALESCE(MAX(approval_order), 0) + 1 FROM pending_action) "
         f"WHERE acknowledged = 0 AND superseded_utc IS NULL AND id IN ({placeholders})",
         [now, *action_ids],
     )
@@ -84,7 +87,8 @@ def acknowledge(conn: sqlite3.Connection, action_ids: list[int], now: int) -> in
 def acknowledge_run(conn: sqlite3.Connection, run_id: int, now: int) -> int:
     """Acknowledge every outstanding action in a run (batch). Returns count."""
     cur = conn.execute(
-        "UPDATE pending_action SET acknowledged = 1, acknowledged_utc = ? "
+        "UPDATE pending_action SET acknowledged = 1, acknowledged_utc = ?, "
+        "approval_order = (SELECT COALESCE(MAX(approval_order), 0) + 1 FROM pending_action) "
         "WHERE run_id = ? AND acknowledged = 0 AND superseded_utc IS NULL",
         (now, run_id),
     )
@@ -111,9 +115,11 @@ def _supersede_for_acknowledgement(
 def supersede_weaker_copies(
     conn: sqlite3.Connection, *, now: int, dest_location_id: int | None = None,
 ) -> int:
-    """Retire older generic COPY approvals protected by a later restoration.
+    """Retire weaker COPY approvals protected by a later restoration approval.
 
-    Plan/approval fields stay unchanged. Completed restorations still protect
+    Original plan/approval values stay unchanged. The approval ordinal, not
+    creation IDs or run timestamps, orders events; ties/unknowns favor safety.
+    Completed restorations still protect
     their paths; purging replacement history cannot reactivate a retired row.
     Also called by the executor for mixed queues predating this lifecycle.
     """
@@ -122,12 +128,14 @@ def supersede_weaker_copies(
         "AND newer.acknowledged = 1 AND newer.dest_must_be_absent = 1 "
         "AND newer.superseded_utc IS NULL "
         "AND newer.dest_location_id = older.dest_location_id "
-        "AND newer.rel_path = older.rel_path AND newer.id > older.id"
+        "AND newer.rel_path = older.rel_path "
+        "AND (newer.approval_order IS NULL OR older.approval_order IS NULL "
+        "OR newer.approval_order >= older.approval_order)"
     )
     sql = (
         "UPDATE pending_action AS older SET superseded_utc = ?, "
         "superseded_by_action_id = (SELECT newer.id " + replacement +
-        " ORDER BY newer.id DESC LIMIT 1) "
+        " ORDER BY newer.approval_order DESC, newer.id DESC LIMIT 1) "
         "WHERE older.action_kind = ? AND older.acknowledged = 1 "
         "AND older.executed_utc IS NULL AND older.superseded_utc IS NULL "
         "AND older.dest_must_be_absent = 0 "

@@ -71,21 +71,23 @@ def test_only_newer_approved_restorations_retire_writers_to_the_same_path(queue)
     assert action_repo.get(conn, other_target.id).superseded_utc is None
     # A genuinely later generic proposal is not an old writer and is retained.
     later = _copy_plan(conn, target)
-    action_repo.acknowledge(conn, [later.id], now=300)
+    action_repo.acknowledge(conn, [later.id], now=200)
     assert action_repo.get(conn, later.id).superseded_utc is None
     # Re-acknowledgement must neither reactivate nor retimestamp a retired row.
     assert action_repo.acknowledge(conn, [old.id, strict.id], now=400) == 0
     assert action_repo.get(conn, old.id) == retired
 
 
-def test_old_draft_cannot_be_reactivated_after_a_stricter_approval(queue):
+def test_an_old_draft_acknowledged_later_is_a_new_approval(queue):
     conn, target = queue
     draft = _copy_plan(conn, target)
     strict = _copy_plan(conn, target, strict=True)
     action_repo.acknowledge(conn, [strict.id], now=200)
     action_repo.acknowledge(conn, [draft.id], now=300)
-    assert action_repo.get(conn, draft.id).superseded_by_action_id == strict.id
-    assert [a.id for a in action_repo.list_pending_execution(conn)] == [strict.id]
+    approved_draft = action_repo.get(conn, draft.id)
+    assert approved_draft.superseded_utc is None
+    assert approved_draft.approval_order > action_repo.get(conn, strict.id).approval_order
+    assert [a.id for a in action_repo.list_pending_execution(conn)] == [draft.id, strict.id]
 
 
 def test_normalization_respects_executor_destination_scope(queue):
@@ -122,6 +124,7 @@ def test_v11_preserves_legacy_plans_and_history_purge_cannot_reactivate_them(tmp
     conn = open_db(db)
     try:
         assert migrations.current_version(conn) == 11
+        original = replace(original, approval_order=0)
         assert action_repo.get(conn, old.id) == original
         assert migrations.migrate(conn) == 11
         assert action_repo.supersede_weaker_copies(conn, now=200) == 1
@@ -144,3 +147,22 @@ def test_v11_preserves_legacy_plans_and_history_purge_cannot_reactivate_them(tmp
         assert action_repo.list_pending_execution(reopened) == []
     finally:
         reopened.close()
+
+
+def test_a_batch_approval_favors_stricter_mode_even_with_earlier_creation(queue):
+    conn, target = queue
+    strict = _copy_plan(conn, target, strict=True)
+    generic = _copy_plan(conn, target)
+    action_repo.acknowledge(conn, [strict.id, generic.id], now=200)
+    assert [a.id for a in action_repo.list_pending_execution(conn)] == [strict.id]
+    assert action_repo.get(conn, generic.id).superseded_by_action_id == strict.id
+    assert action_repo.get(conn, generic.id).approval_order == action_repo.get(conn, strict.id).approval_order
+
+
+def test_legacy_unknown_approval_order_favors_stricter_mode(queue):
+    conn, target = queue
+    strict = _copy_plan(conn, target, strict=True)
+    _copy_plan(conn, target)
+    conn.execute("UPDATE pending_action SET acknowledged=1")
+    action_repo.supersede_weaker_copies(conn, now=300)
+    assert [a.id for a in action_repo.list_pending_execution(conn)] == [strict.id]

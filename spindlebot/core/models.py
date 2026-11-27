@@ -226,6 +226,7 @@ class PendingAction:
     dest_must_be_absent: bool = False
     superseded_utc: int | None = None
     superseded_by_action_id: int | None = None
+    approval_order: int | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "PendingAction":
@@ -248,6 +249,7 @@ class PendingAction:
             dest_must_be_absent=bool(row["dest_must_be_absent"]) if "dest_must_be_absent" in row.keys() else False,
             superseded_utc=row["superseded_utc"] if "superseded_utc" in row.keys() else None,
             superseded_by_action_id=row["superseded_by_action_id"] if "superseded_by_action_id" in row.keys() else None,
+            approval_order=row["approval_order"] if "approval_order" in row.keys() else None,
         )
 
 
