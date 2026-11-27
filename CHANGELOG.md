@@ -7,6 +7,9 @@ refactor epic is complete.
 ## [Unreleased]
 
 ### Fixed
+- Retried pushes reuse equivalent acknowledged COPY actions instead of queuing
+  and transferring them again. Changed source checksums, paths, and restoration
+  modes remain separate plans; existing approvals are preserved.
 - Import, Processing moves, and Pending promotion now refuse canonical album
   directories containing another album's audio identity, including filesystem
   case aliases. A mandatory beets adapter checks actual post-metadata paths;

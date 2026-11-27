@@ -142,6 +142,13 @@ that destination, not just the ones this pass planned. A copy an earlier push
 never finished (the DAP was unplugged mid-run) is still owed to the location,
 and the next push completes it.
 
+An equivalent acknowledged COPY is reused rather than queued a second time.
+The planned-copy count reports new proposals only: a retry can plan zero new
+copies and still execute its earlier queue. This also applies to `--dry-run`,
+which leaves the existing queue untouched. A changed source, checksum, path, or
+restoration mode gets a separate proposal; old approvals are never rewritten.
+Previously duplicated queue rows are not automatically retired.
+
 ### Destructive op gates
 
 The two destructive operations are genuinely different and are gated

@@ -162,6 +162,13 @@ against a stale scan. Actions must be acknowledged before `sync`, `prune`, or
 `delete` will execute them. The full staging table and the destructive-op gates
 are in [commands](commands.md#content-addressed-db-and-sync).
 
+An equivalent COPY already acknowledged and awaiting execution is not proposed
+again on a retry. Equivalence includes destination, content kind and identity,
+both paths, source location, planned checksum, and restoration mode. The queue
+is read once per reconciliation. Changed plans remain separate proposals;
+approved rows are never rewritten. Unacknowledged previews and executed history
+do not suppress new work. Existing duplicate rows are not retroactively removed.
+
 ## Import stage sequence
 
 `spindlebot/pipeline/runner.py`, `ImportRunner.run()`:

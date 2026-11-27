@@ -148,6 +148,18 @@ def reconcile_location(
         target_is_authoring = target.is_authoritative_audio and not target.is_retention
         copy_sources = [] if target_is_authoring else sources
 
+        # A retry executes earlier acknowledged work too. Do not propose it
+        # again, or the executor transfers the same file twice. Match the whole
+        # frozen plan: changed bytes, source paths or safety modes need their
+        # own acknowledgement, never an edit to an already approved action.
+        queued_copies = {
+            (a.content_kind, a.content_id, a.source_location_id,
+             a.source_rel_path or a.rel_path, a.rel_path,
+             a.expected_sha256, a.dest_must_be_absent)
+            for a in action_repo.list_pending_execution(
+                conn, action_kind=ActionKind.COPY, dest_location_id=target.id)
+        }
+
         # COPY: content the (retention) target doesn't have, from any source.
         proposed: set[int] = set()
         for src in copy_sources:
@@ -160,6 +172,10 @@ def reconcile_location(
                 dest_path = absence.rel_path if absence else p.rel_path
                 if absence and dest_path in occupied_audio_paths:
                     continue
+                proposed.add(p.audio_id)
+                if (ContentKind.AUDIO, p.audio_id, src.id, p.rel_path, dest_path,
+                        p.file_sha256, absence is not None) in queued_copies:
+                    continue
                 action_repo.add(
                     conn, run_id=run_id, action_kind=ActionKind.COPY,
                     content_kind=ContentKind.AUDIO, content_id=p.audio_id,
@@ -169,7 +185,6 @@ def reconcile_location(
                     expected_sha256=p.file_sha256,
                     reason=f"present on {src.name}, absent on {target.name}",
                 )
-                proposed.add(p.audio_id)
                 result.copies += 1
                 _tick("copy")
 
@@ -203,6 +218,10 @@ def reconcile_location(
                 dest_path = absence.rel_path if absence else sp.rel_path
                 if absence and dest_path in occupied_sidecar_paths:
                     continue
+                proposed_sc.add(sp.sidecar_id)
+                if (ContentKind.SIDECAR, sp.sidecar_id, src.id, sp.rel_path, dest_path,
+                        sp.file_sha256, absence is not None) in queued_copies:
+                    continue
                 action_repo.add(
                     conn, run_id=run_id, action_kind=ActionKind.COPY,
                     content_kind=ContentKind.SIDECAR, content_id=sp.sidecar_id,
@@ -212,7 +231,6 @@ def reconcile_location(
                     expected_sha256=sp.file_sha256,
                     reason=f"sidecar present on {src.name}, absent on {target.name}",
                 )
-                proposed_sc.add(sp.sidecar_id)
                 result.copies += 1
                 _tick("copy")
 
