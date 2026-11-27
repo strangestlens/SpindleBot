@@ -73,20 +73,72 @@ def acknowledge(conn: sqlite3.Connection, action_ids: list[int], now: int) -> in
     placeholders = ",".join("?" for _ in action_ids)
     cur = conn.execute(
         f"UPDATE pending_action SET acknowledged = 1, acknowledged_utc = ? "
-        f"WHERE acknowledged = 0 AND id IN ({placeholders})",
+        f"WHERE acknowledged = 0 AND superseded_utc IS NULL AND id IN ({placeholders})",
         [now, *action_ids],
     )
-    return cur.rowcount
+    count = cur.rowcount
+    _supersede_for_acknowledgement(conn, f"id IN ({placeholders})", action_ids, now)
+    return count
 
 
 def acknowledge_run(conn: sqlite3.Connection, run_id: int, now: int) -> int:
     """Acknowledge every outstanding action in a run (batch). Returns count."""
     cur = conn.execute(
         "UPDATE pending_action SET acknowledged = 1, acknowledged_utc = ? "
-        "WHERE run_id = ? AND acknowledged = 0",
+        "WHERE run_id = ? AND acknowledged = 0 AND superseded_utc IS NULL",
         (now, run_id),
     )
-    return cur.rowcount
+    count = cur.rowcount
+    _supersede_for_acknowledgement(conn, "run_id = ?", [run_id], now)
+    return count
+
+
+def _supersede_for_acknowledgement(
+    conn: sqlite3.Connection, clause: str, params: list[int], now: int,
+) -> None:
+    # Scope normalization to the destinations explicitly acknowledged here.
+    # clause is SQL assembled only by the two repository callers above.
+    destinations = conn.execute(
+        "SELECT DISTINCT dest_location_id FROM pending_action "
+        "WHERE acknowledged = 1 AND action_kind = ? "
+        "AND dest_location_id IS NOT NULL AND " + clause,
+        [str(ActionKind.COPY), *params],
+    ).fetchall()
+    for row in destinations:
+        supersede_weaker_copies(conn, now=now, dest_location_id=row[0])
+
+
+def supersede_weaker_copies(
+    conn: sqlite3.Connection, *, now: int, dest_location_id: int | None = None,
+) -> int:
+    """Retire older generic COPY approvals protected by a later restoration.
+
+    Plan/approval fields stay unchanged. Completed restorations still protect
+    their paths; purging replacement history cannot reactivate a retired row.
+    Also called by the executor for mixed queues predating this lifecycle.
+    """
+    replacement = (
+        "FROM pending_action AS newer WHERE newer.action_kind = ? "
+        "AND newer.acknowledged = 1 AND newer.dest_must_be_absent = 1 "
+        "AND newer.superseded_utc IS NULL "
+        "AND newer.dest_location_id = older.dest_location_id "
+        "AND newer.rel_path = older.rel_path AND newer.id > older.id"
+    )
+    sql = (
+        "UPDATE pending_action AS older SET superseded_utc = ?, "
+        "superseded_by_action_id = (SELECT newer.id " + replacement +
+        " ORDER BY newer.id DESC LIMIT 1) "
+        "WHERE older.action_kind = ? AND older.acknowledged = 1 "
+        "AND older.executed_utc IS NULL AND older.superseded_utc IS NULL "
+        "AND older.dest_must_be_absent = 0 "
+        "AND EXISTS (SELECT 1 " + replacement + ")"
+    )
+    copy = str(ActionKind.COPY)
+    params: list = [now, copy, copy, copy]
+    if dest_location_id is not None:
+        sql += " AND older.dest_location_id = ?"
+        params.append(dest_location_id)
+    return conn.execute(sql, params).rowcount
 
 
 def list_pending_execution(
@@ -95,10 +147,13 @@ def list_pending_execution(
     action_kind: ActionKind | str | None = None,
     dest_location_id: int | None = None,
 ) -> list[PendingAction]:
-    """Acknowledged-but-not-yet-executed actions, oldest first — the executor's
-    work queue. Optionally filtered to one action_kind and/or destination."""
+    """Active acknowledged actions, oldest first — the executor's work queue.
+
+    Executed and superseded rows remain history, excluded here. Optionally
+    filtered to one action_kind and/or destination.
+    """
     sql = ("SELECT * FROM pending_action "
-           "WHERE acknowledged = 1 AND executed_utc IS NULL")
+           "WHERE acknowledged = 1 AND executed_utc IS NULL AND superseded_utc IS NULL")
     params: list = []
     if action_kind is not None:
         sql += " AND action_kind = ?"
@@ -108,6 +163,24 @@ def list_pending_execution(
         params.append(dest_location_id)
     rows = conn.execute(sql + " ORDER BY id", params).fetchall()
     return [PendingAction.from_row(r) for r in rows]
+
+
+def lock_copy_for_execution(conn: sqlite3.Connection, action_id: int) -> bool:
+    """Recheck eligibility and hold the caller's write transaction through COPY.
+
+    Checkpoints release the previous action's transaction. This no-op UPDATE
+    reacquires it, so another approval cannot supersede the action between its
+    eligibility check and the transfer. No plan or approval field changes.
+    """
+    cur = conn.execute(
+        "UPDATE pending_action SET acknowledged = acknowledged "
+        "WHERE id = ? AND action_kind = ? AND acknowledged = 1 "
+        "AND executed_utc IS NULL AND superseded_utc IS NULL",
+        (action_id, str(ActionKind.COPY)),
+    )
+    if cur.rowcount and not conn.in_transaction:
+        raise sqlite3.ProgrammingError("COPY execution requires a caller-owned transaction")
+    return bool(cur.rowcount)
 
 
 def mark_executed(conn: sqlite3.Connection, action_id: int, now: int) -> None:

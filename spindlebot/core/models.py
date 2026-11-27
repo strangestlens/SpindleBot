@@ -224,6 +224,8 @@ class PendingAction:
     expected_sha256: str | None
     source_rel_path: str | None = None
     dest_must_be_absent: bool = False
+    superseded_utc: int | None = None
+    superseded_by_action_id: int | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "PendingAction":
@@ -244,6 +246,8 @@ class PendingAction:
             expected_sha256=row["expected_sha256"],
             source_rel_path=row["source_rel_path"] if "source_rel_path" in row.keys() else None,
             dest_must_be_absent=bool(row["dest_must_be_absent"]) if "dest_must_be_absent" in row.keys() else False,
+            superseded_utc=row["superseded_utc"] if "superseded_utc" in row.keys() else None,
+            superseded_by_action_id=row["superseded_by_action_id"] if "superseded_by_action_id" in row.keys() else None,
         )
 
 

@@ -209,6 +209,9 @@ def execute_pending(
     run_id = run_repo.start_run(conn, RunKind.SYNC, now=now)
     result = SyncResult(run_id=run_id)
     status = ScanStatus.OK
+    # Upgraded databases can contain both approvals from before the new
+    # acknowledgement hook. Normalize before taking the execution snapshot.
+    action_repo.supersede_weaker_copies(conn, now=now, dest_location_id=dest_location_id)
     actions = action_repo.list_pending_execution(
         conn, action_kind=ActionKind.COPY, dest_location_id=dest_location_id)
     total = len(actions)
@@ -217,6 +220,9 @@ def execute_pending(
     try:
         for action in actions:
             try:
+                if not action_repo.lock_copy_for_execution(conn, action.id):
+                    result.skipped += 1
+                    continue
                 if action.content_kind not in (ContentKind.AUDIO, ContentKind.SIDECAR):
                     result.skipped += 1
                     continue

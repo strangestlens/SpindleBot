@@ -9,7 +9,9 @@ refactor epic is complete.
 ### Fixed
 - Retried pushes reuse equivalent acknowledged COPY actions instead of queuing
   and transferring them again. Changed source checksums, paths, and restoration
-  modes remain separate plans; existing approvals are preserved.
+  modes remain separate plans. Schema v11 preserves approval history while
+  retiring older overwrite-capable copies when a stricter restoration is
+  acknowledged; each transfer rechecks eligibility under a write transaction.
 - Import, Processing moves, and Pending promotion now refuse canonical album
   directories containing another album's audio identity, including filesystem
   case aliases. A mandatory beets adapter checks actual post-metadata paths;

@@ -235,3 +235,128 @@ def test_a_different_source_location_gets_a_fresh_plan(library, tmp_path):
     assert result.sync.skipped == 4 and _pending(conn, target) == old
     assert all(a.source_location_id == archive.id
                for a in action_repo.list_for_run(conn, result.run_id))
+
+
+@pytest.mark.parametrize("name", ["01.flac", "01.lrc"])
+@pytest.mark.parametrize("symlink", [False, True])
+@pytest.mark.parametrize("acknowledgement", ["run", "ids", "legacy"])
+def test_stricter_approval_prevents_older_generic_copy_from_clobbering(
+    library, name, symlink, acknowledgement,
+):
+    from spindlebot.services.sync import execute_pending
+    conn, source, target = library
+    _push(conn, target, copy_fn=_fail_copy, now=200)
+    old = _pending(conn, target)
+    for action in old:
+        _copy(Path(source.root_path) / action.rel_path, Path(target.root_path) / action.rel_path)
+    inventory_location(conn, location=target, root=target.root_path, now=250)
+    for action in old:
+        (Path(target.root_path) / action.rel_path).unlink()
+    preview = _push(conn, target, dry_run=True, now=300)
+    replacements = action_repo.list_for_run(conn, preview.run_id)
+    assert len(replacements) == 4 and _pending(conn, target) == old
+    if acknowledgement == "run":
+        action_repo.acknowledge_run(conn, preview.run_id, now=350)
+    elif acknowledgement == "ids":
+        action_repo.acknowledge(conn, [a.id for a in replacements], now=350)
+    else:
+        # An upgraded DB may already contain both kinds of approval, so the
+        # executor must also normalize queues made before supersession existed.
+        conn.execute("UPDATE pending_action SET acknowledged=1, acknowledged_utc=350 WHERE run_id=?",
+                     (preview.run_id,))
+    conn.commit()
+    dst = Path(target.root_path) / "Artist/Album" / name
+    outside = Path(target.root_path).parent / "unrelated-file"
+    if symlink:
+        outside.write_bytes(b"outside replacement must survive")
+        dst.symlink_to(outside)
+    else:
+        dst.write_bytes(b"replacement must survive")
+    result = execute_pending(conn, copy_fn=_copy, now=400, checkpoint=conn.commit)
+    assert dst.is_symlink() if symlink else dst.read_bytes() == b"replacement must survive"
+    if symlink:
+        assert outside.read_bytes() == b"outside replacement must survive"
+    assert result.copied == 3 and result.failed == 1
+    for old_action in old:
+        retired = action_repo.get(conn, old_action.id)
+        newer = next(a for a in replacements if a.rel_path == old_action.rel_path)
+        assert retired.superseded_by_action_id == newer.id
+        assert retired.superseded_utc is not None
+        assert replace(retired, superseded_by_action_id=None, superseded_utc=None) == old_action
+
+
+def _pending_mode_change(conn, source, target):
+    _push(conn, target, copy_fn=_fail_copy, now=200)
+    old = _pending(conn, target)
+    for action in old:
+        _copy(Path(source.root_path) / action.rel_path, Path(target.root_path) / action.rel_path)
+    inventory_location(conn, location=target, root=target.root_path, now=250)
+    for action in old:
+        (Path(target.root_path) / action.rel_path).unlink()
+    preview = _push(conn, target, dry_run=True, now=300)
+    conn.commit()
+    return old, preview
+
+
+def test_retirement_after_queue_snapshot_is_checked_before_copy(library):
+    from spindlebot.services.sync import execute_pending
+    conn, source, target = library
+    _, preview = _pending_mode_change(conn, source, target)
+    dst = Path(target.root_path) / REL
+    approved = []
+
+    def approve_after_snapshot(event):
+        if not approved:
+            action_repo.acknowledge_run(conn, preview.run_id, now=350)
+            conn.commit()
+            dst.write_bytes(b"new replacement")
+            approved.append(True)
+
+    result = execute_pending(conn, copy_fn=_copy, now=400,
+                             progress=approve_after_snapshot, checkpoint=conn.commit)
+    assert dst.read_bytes() == b"new replacement"
+    assert result.copied == 0 and result.skipped == 4
+    retry = execute_pending(conn, copy_fn=_copy, now=500, checkpoint=conn.commit)
+    assert retry.copied == 3 and retry.failed == 1
+    assert dst.read_bytes() == b"new replacement"
+
+
+def test_each_copy_keeps_its_approval_valid_until_its_checkpoint(library):
+    import sqlite3
+    from spindlebot.services.sync import execute_pending
+    conn, source, target = library
+    _, preview = _pending_mode_change(conn, source, target)
+    db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+    other = open_db(db_path)
+    other.execute("PRAGMA busy_timeout=0")
+    calls = []
+    try:
+        def contend_during_second_copy(src, dst):
+            if len(calls) == 1:
+                # The first checkpoint released the run's initial transaction.
+                # This copy must have acquired its own write transaction so an
+                # approval cannot be retired between validation and transfer.
+                try:
+                    with pytest.raises(sqlite3.OperationalError, match="locked"):
+                        action_repo.acknowledge_run(other, preview.run_id, now=350)
+                finally:
+                    other.rollback()
+            _copy(src, dst)
+            calls.append(src)
+
+        result = execute_pending(conn, copy_fn=contend_during_second_copy, now=400,
+                                 checkpoint=conn.commit)
+        assert result.copied == 4 and result.failed == 0 and len(calls) == 4
+    finally:
+        other.close()
+
+
+def test_copy_refuses_an_autocommit_connection_without_a_transaction(library):
+    import sqlite3
+    from spindlebot.services.sync import execute_pending
+    conn, source, target = library
+    _pending_mode_change(conn, source, target)
+    conn.isolation_level = None
+    with pytest.raises(sqlite3.ProgrammingError, match="transaction"):
+        execute_pending(conn, copy_fn=_copy, now=400)
+    assert not (Path(target.root_path) / REL).exists()

@@ -147,7 +147,12 @@ The planned-copy count reports new proposals only: a retry can plan zero new
 copies and still execute its earlier queue. This also applies to `--dry-run`,
 which leaves the existing queue untouched. A changed source, checksum, path, or
 restoration mode gets a separate proposal; old approvals are never rewritten.
-Previously duplicated queue rows are not automatically retired.
+Equivalent duplicate queue rows are not automatically retired. A later
+acknowledged restoration does retire older overwrite-capable COPY actions for
+the same destination path, so the older approval cannot bypass its no-overwrite
+requirement. Those original plans and approvals remain in history, marked
+superseded; deleting replacement history cannot make them executable again.
+A dry run does not supersede anything.
 
 ### Destructive op gates
 

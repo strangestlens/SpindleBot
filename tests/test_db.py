@@ -22,7 +22,7 @@ def _tables(conn) -> set[str]:
 
 def test_open_db_creates_schema_at_latest_version(tmp_path):
     conn = open_db(tmp_path / "spindlebot.db")
-    assert current_version(conn) == LATEST_VERSION == 10
+    assert current_version(conn) == LATEST_VERSION == 11
     assert {
         "location", "audio_content", "audio_presence", "location_scan",
         "album", "album_track", "sidecar_content", "sidecar_presence",
