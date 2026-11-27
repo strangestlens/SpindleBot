@@ -29,6 +29,8 @@ from pathlib import Path
 
 from spindlebot.disc import AUDIO_EXTENSIONS, find_audio_files
 from spindlebot.pipeline.stages.fetch_lyrics import album_lyrics_complete
+from spindlebot.core.errors import SpindleBotError
+from spindlebot.services.beets_guard import guarded_beet
 
 
 @dataclass
@@ -207,11 +209,14 @@ def promote_album(album_dir: str | Path, beet: str | Path, *, label: str = "") -
     # No confirmation flag: `beet move` is non-interactive by default (it is
     # -t/--timid that ADDS confirmation). Passing --yes makes beets exit 2 with
     # "no such option", which silently stranded every album in Processing.
-    proc = subprocess.run(
-        [str(beet), "move", f"path:{album_dir}/"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        with guarded_beet(beet, "move") as (prefix, env):
+            proc = subprocess.run(
+                [*prefix, f"path:{album_dir}/"],
+                capture_output=True, text=True, env=env,
+            )
+    except (SpindleBotError, OSError) as exc:
+        proc = subprocess.CompletedProcess([str(beet), "move"], 1, "", str(exc))
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
         return PromoteResult(

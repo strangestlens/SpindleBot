@@ -9,13 +9,27 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import struct
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import mutagen.flac
+import pytest
 
 from spindlebot.disc import AUDIO_EXTENSIONS
 from spindlebot.pipeline.runner import ImportConfig, ImportRunner
+
+
+@pytest.fixture(autouse=True)
+def _stub_guard_configuration(monkeypatch):
+    """These orchestration tests stub beet; native guard tests use real beets."""
+
+    @contextmanager
+    def prepared(beet, command):
+        yield [str(beet), command], {}
+
+    monkeypatch.setattr("spindlebot.pipeline.runner.guarded_beet", prepared)
+    monkeypatch.setattr("spindlebot.services.promote.guarded_beet", prepared)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

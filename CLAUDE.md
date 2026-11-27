@@ -526,6 +526,15 @@ Set it on the **items**, not the album, because `tmpl_ifdef` checks `field in se
 `$album` to a readable value: `mbsync` is an enabled plugin and reverts MusicBrainz-derived
 fields on the next metadata sync, which sends the directory straight back to the noise name.
 
+**4c. Canonical import/move destinations must be guarded by audio identity**
+`beet import` can write canonical paths before the runner's Processing move.
+Both import and move therefore run through the mandatory collision adapter in
+`services/beets_guard.py` / `beets_plugins/spindlebot_collision_guard.py`.
+Use beets' post-metadata destination, never a hand-built path or a name-based
+album comparison. A directory holding foreign decoded-audio identity refuses
+the operation. Guard-owned commands must fail closed if the adapter cannot
+load; do not silently fall back to unguarded native import/move.
+
 **5. bootstrap.sh sourcing**
 Every shell script sources `~/.config/spindlebot/bootstrap.sh`, which evals
 `python -m spindlebot config shell`. If Python or the config fails, all `$SPINDLEBOT_*` vars

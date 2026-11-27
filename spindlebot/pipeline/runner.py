@@ -56,6 +56,8 @@ from spindlebot.disc import (
 )
 from spindlebot.pipeline.stages.notify import notify
 from spindlebot.pipeline.stages.pretag import posttag, pretag
+from spindlebot.core.errors import SpindleBotError
+from spindlebot.services.beets_guard import guarded_beet
 
 
 def _safe_name(name: str) -> str:
@@ -339,7 +341,12 @@ class ImportRunner:
                          f"added:{import_start}..", f"path:{cfg.pending_dir}/"]
             dest_label = "Pending"
 
-        move_proc = subprocess.run(move_argv, capture_output=True, text=True)
+        try:
+            with guarded_beet(cfg.beet, "move") as (prefix, env):
+                move_proc = subprocess.run([*prefix, *move_argv[2:]],
+                                           capture_output=True, text=True, env=env)
+        except (SpindleBotError, OSError) as exc:
+            move_proc = subprocess.CompletedProcess(move_argv, 1, "", str(exc))
         if move_proc.returncode != 0:
             # A failed move must abort — otherwise the runner would fetch lyrics
             # against files still sitting in Pending and the promote (scoped to
@@ -793,16 +800,20 @@ class ImportRunner:
         self._log(f"Starting beet import [{batch.label}]", echo=False)
 
         argv = [str(cfg.beet), "import", *batch.beet_target]
-        if self._echo is not None:
-            # Stream beet output live to the terminal — capture is skipped so
-            # the user sees progress in real time (beet can take a while).
-            beet_proc = subprocess.run(argv)
-        else:
-            beet_proc = subprocess.run(argv, capture_output=True, text=True)
-            if beet_proc.stdout.strip():
-                self._log(beet_proc.stdout.strip())
-            if beet_proc.stderr.strip():
-                self._log(beet_proc.stderr.strip())
+        try:
+            with guarded_beet(cfg.beet, "import") as (prefix, env):
+                argv = [*prefix, *argv[2:]]
+                if self._echo is not None:
+                    beet_proc = subprocess.run(argv, env=env)
+                else:
+                    beet_proc = subprocess.run(argv, capture_output=True, text=True, env=env)
+                    if beet_proc.stdout.strip():
+                        self._log(beet_proc.stdout.strip())
+                    if beet_proc.stderr.strip():
+                        self._log(beet_proc.stderr.strip())
+        except (SpindleBotError, OSError) as exc:
+            self._log(f"✗  collision protection failed: {exc}")
+            beet_proc = subprocess.CompletedProcess(argv, 1, "", str(exc))
 
         if beet_proc.returncode != 0:
             self._log(f"✗  beet import failed (exit {beet_proc.returncode})")
