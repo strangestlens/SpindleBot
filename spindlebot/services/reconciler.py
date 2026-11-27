@@ -33,10 +33,12 @@ from spindlebot.core.enums import (
     SidecarRole,
 )
 from spindlebot.core.models import Location
+from spindlebot.core.paths import path_key
 from spindlebot.core.progress import ProgressCallback, emit
 from spindlebot.db.repositories import (
     action_repo,
     conflict_repo,
+    location_repo,
     presence_repo,
     run_repo,
     scan_repo,
@@ -117,6 +119,10 @@ def reconcile_location(
     status = ScanStatus.OK
     # Prefer the authoring library as the copy source; dedup then records it.
     sources = sorted(source_locations, key=lambda loc: not loc.is_authoritative_audio)
+    policies = {loc.id: loc.path_case_sensitive for loc in location_repo.list_all(conn)}
+
+    def comparison_path(location_id, rel):
+        return path_key(rel, case_sensitive=policies.get(location_id))
 
     def _tick(phase: str) -> None:
         proposed_n = result.copies + result.missing + result.conflicts
@@ -154,7 +160,8 @@ def reconcile_location(
         # own acknowledgement, never an edit to an already approved action.
         queued_copies = {
             (a.content_kind, a.content_id, a.source_location_id,
-             a.source_rel_path or a.rel_path, a.rel_path,
+             comparison_path(a.source_location_id, a.source_rel_path or a.rel_path),
+             comparison_path(target.id, a.rel_path),
              a.expected_sha256, a.dest_must_be_absent)
             for a in action_repo.list_pending_execution(
                 conn, action_kind=ActionKind.COPY, dest_location_id=target.id)
@@ -173,7 +180,8 @@ def reconcile_location(
                 if absence and dest_path in occupied_audio_paths:
                     continue
                 proposed.add(p.audio_id)
-                if (ContentKind.AUDIO, p.audio_id, src.id, p.rel_path, dest_path,
+                if (ContentKind.AUDIO, p.audio_id, src.id, comparison_path(src.id, p.rel_path),
+                        comparison_path(target.id, dest_path),
                         p.file_sha256, absence is not None) in queued_copies:
                     continue
                 action_repo.add(
@@ -219,7 +227,8 @@ def reconcile_location(
                 if absence and dest_path in occupied_sidecar_paths:
                     continue
                 proposed_sc.add(sp.sidecar_id)
-                if (ContentKind.SIDECAR, sp.sidecar_id, src.id, sp.rel_path, dest_path,
+                if (ContentKind.SIDECAR, sp.sidecar_id, src.id, comparison_path(src.id, sp.rel_path),
+                        comparison_path(target.id, dest_path),
                         sp.file_sha256, absence is not None) in queued_copies:
                     continue
                 action_repo.add(

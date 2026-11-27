@@ -5,6 +5,7 @@ import sqlite3
 
 from spindlebot.core.enums import ActionKind, ContentKind
 from spindlebot.core.models import PendingAction
+from spindlebot.core.paths import path_key
 
 
 def add(
@@ -24,17 +25,22 @@ def add(
     dest_must_be_absent: bool = False,
 ) -> PendingAction:
     """Record a proposed (unacknowledged, unexecuted) action; return the row."""
+    policy = conn.execute(
+        "SELECT path_case_sensitive FROM location WHERE id = ?", (dest_location_id,),
+    ).fetchone()
+    sensitive = bool(policy[0]) if policy is not None and policy[0] is not None else None
     cur = conn.execute(
         """
         INSERT INTO pending_action
             (run_id, action_kind, content_kind, content_id,
              source_location_id, dest_location_id, rel_path, reason, created_utc,
-             expected_sha256, source_rel_path, dest_must_be_absent)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             expected_sha256, source_rel_path, dest_must_be_absent, dest_path_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (run_id, str(ActionKind(action_kind)), str(ContentKind(content_kind)),
          content_id, source_location_id, dest_location_id, rel_path, reason, now,
-         expected_sha256, source_rel_path, int(dest_must_be_absent)),
+         expected_sha256, source_rel_path, int(dest_must_be_absent),
+         path_key(rel_path, case_sensitive=sensitive)),
     )
     found = get(conn, int(cur.lastrowid))
     assert found is not None
@@ -112,8 +118,32 @@ def _supersede_for_acknowledgement(
         supersede_weaker_copies(conn, now=now, dest_location_id=row[0])
 
 
+def prepare_destination_keys(conn: sqlite3.Connection, *, dest_location_id: int) -> None:
+    """Rebuild missing derived keys; original approved paths are untouched."""
+    # Acquire the caller's write transaction before reading the policy, so a
+    # concurrent policy change cannot be followed by keys made from old data.
+    conn.execute(
+        "UPDATE pending_action SET dest_path_key = dest_path_key "
+        "WHERE dest_location_id = ? AND dest_path_key IS NULL AND rel_path IS NOT NULL",
+        (dest_location_id,),
+    )
+    rows = conn.execute(
+        "SELECT a.id, a.rel_path, l.path_case_sensitive FROM pending_action a "
+        "JOIN location l ON l.id = a.dest_location_id "
+        "WHERE a.dest_location_id = ? AND a.dest_path_key IS NULL AND a.rel_path IS NOT NULL",
+        (dest_location_id,),
+    ).fetchall()
+    conn.executemany(
+        "UPDATE pending_action SET dest_path_key = ? WHERE id = ?",
+        [(path_key(row["rel_path"], case_sensitive=(bool(row["path_case_sensitive"])
+                   if row["path_case_sensitive"] is not None else None)), row["id"])
+         for row in rows],
+    )
+
+
 def supersede_weaker_copies(
     conn: sqlite3.Connection, *, now: int, dest_location_id: int | None = None,
+    action_id: int | None = None,
 ) -> int:
     """Retire weaker COPY approvals protected by a later restoration approval.
 
@@ -123,12 +153,29 @@ def supersede_weaker_copies(
     their paths; purging replacement history cannot reactivate a retired row.
     Also called by the executor for mixed queues predating this lifecycle.
     """
+    if action_id is not None and dest_location_id is None:
+        row = conn.execute("SELECT dest_location_id FROM pending_action WHERE id = ?",
+                           (action_id,)).fetchone()
+        if row is None or row[0] is None:
+            return 0
+        dest_location_id = row[0]
+    if dest_location_id is None:
+        destinations = conn.execute(
+            "SELECT DISTINCT dest_location_id FROM pending_action "
+            "WHERE acknowledged = 1 AND executed_utc IS NULL AND superseded_utc IS NULL "
+            "AND action_kind = ? AND dest_must_be_absent = 0 AND dest_location_id IS NOT NULL",
+            (str(ActionKind.COPY),),
+        ).fetchall()
+        for row in destinations:
+            prepare_destination_keys(conn, dest_location_id=row[0])
+    else:
+        prepare_destination_keys(conn, dest_location_id=dest_location_id)
     replacement = (
         "FROM pending_action AS newer WHERE newer.action_kind = ? "
         "AND newer.acknowledged = 1 AND newer.dest_must_be_absent = 1 "
         "AND newer.superseded_utc IS NULL "
         "AND newer.dest_location_id = older.dest_location_id "
-        "AND newer.rel_path = older.rel_path "
+        "AND newer.dest_path_key = older.dest_path_key "
         "AND (newer.approval_order IS NULL OR older.approval_order IS NULL "
         "OR newer.approval_order >= older.approval_order)"
     )
@@ -146,7 +193,24 @@ def supersede_weaker_copies(
     if dest_location_id is not None:
         sql += " AND older.dest_location_id = ?"
         params.append(dest_location_id)
+    if action_id is not None:
+        sql += " AND older.id = ?"
+        params.append(action_id)
     return conn.execute(sql, params).rowcount
+
+
+def has_potential_restoration(conn: sqlite3.Connection, action_id: int) -> bool:
+    """Fail-closed check when mounted destination path semantics are unknown."""
+    row = conn.execute(
+        "SELECT 1 FROM pending_action older JOIN pending_action newer "
+        "ON newer.dest_location_id = older.dest_location_id "
+        "WHERE older.id = ? AND newer.action_kind = ? AND newer.acknowledged = 1 "
+        "AND newer.dest_must_be_absent = 1 AND newer.superseded_utc IS NULL "
+        "AND (newer.approval_order IS NULL OR older.approval_order IS NULL "
+        "OR newer.approval_order >= older.approval_order) LIMIT 1",
+        (action_id, str(ActionKind.COPY)),
+    ).fetchone()
+    return row is not None
 
 
 def list_pending_execution(

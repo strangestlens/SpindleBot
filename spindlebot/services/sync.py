@@ -46,6 +46,7 @@ from spindlebot.db.repositories import (
     sidecar_presence_repo,
 )
 from spindlebot.services.volumes import MARKER_PREFIX, resolve_root
+from spindlebot.services.location_paths import refresh_case_policy
 
 CopyFn = Callable[[Path, Path], None]
 
@@ -209,6 +210,13 @@ def execute_pending(
     run_id = run_repo.start_run(conn, RunKind.SYNC, now=now)
     result = SyncResult(run_id=run_id)
     status = ScanStatus.OK
+    queued = action_repo.list_pending_execution(
+        conn, action_kind=ActionKind.COPY, dest_location_id=dest_location_id)
+    for location_id in {a.dest_location_id for a in queued if a.dest_location_id is not None}:
+        location = location_repo.get_by_id(conn, location_id)
+        root = resolve_root(location) if location else None
+        if root is not None:
+            refresh_case_policy(conn, location=location, root=Path(root))
     # Upgraded databases can contain both approvals from before the new
     # acknowledgement hook. Normalize before taking the execution snapshot.
     action_repo.supersede_weaker_copies(conn, now=now, dest_location_id=dest_location_id)
@@ -223,6 +231,11 @@ def execute_pending(
                 if not action_repo.lock_copy_for_execution(conn, action.id):
                     result.skipped += 1
                     continue
+                if not action.dest_must_be_absent and action_repo.supersede_weaker_copies(
+                    conn, now=now, action_id=action.id,
+                ):
+                    result.skipped += 1
+                    continue
                 if action.content_kind not in (ContentKind.AUDIO, ContentKind.SIDECAR):
                     result.skipped += 1
                     continue
@@ -235,6 +248,16 @@ def execute_pending(
                     result.errors.append(
                         f"action {action.id}: source/dest not mounted or identified")
                     continue
+
+                if not action.dest_must_be_absent and dst_loc.path_case_sensitive is None:
+                    sensitive = refresh_case_policy(conn, location=dst_loc, root=Path(dst_root))
+                    if sensitive is None and action_repo.has_potential_restoration(conn, action.id):
+                        raise IntegrityMismatch(
+                            f"action {action.id}: destination path semantics unknown; "
+                            "inventory the mounted destination before retrying")
+                    if action_repo.supersede_weaker_copies(conn, now=now, action_id=action.id):
+                        result.skipped += 1
+                        continue
 
                 if action.dest_must_be_absent:
                     for relative in (action.rel_path, action.source_rel_path or action.rel_path):

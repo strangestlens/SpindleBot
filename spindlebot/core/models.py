@@ -31,6 +31,7 @@ class Location:
     enabled: bool
     last_seen_utc: int | None
     root_path: str | None = None
+    path_case_sensitive: bool | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "Location":
@@ -45,6 +46,9 @@ class Location:
             enabled=bool(row["enabled"]),
             last_seen_utc=row["last_seen_utc"],
             root_path=row["root_path"] if "root_path" in keys else None,
+            path_case_sensitive=(bool(row["path_case_sensitive"])
+                                 if "path_case_sensitive" in keys and row["path_case_sensitive"] is not None
+                                 else None),
         )
 
 

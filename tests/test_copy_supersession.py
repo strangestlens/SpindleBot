@@ -115,10 +115,21 @@ def test_v11_preserves_legacy_plans_and_history_purge_cannot_reactivate_them(tmp
         conn.executescript((migrations._SCHEMA_DIR / filename).read_text())
         conn.execute(f"PRAGMA user_version={version}")
     target = location_repo.upsert(conn, uuid="target", name="RetentionDrive", kind="local_drive")
-    old = _copy_plan(conn, target)
-    strict = _copy_plan(conn, target, strict=True)
-    conn.execute("UPDATE pending_action SET acknowledged=1, acknowledged_utc=150")
-    original = action_repo.get(conn, old.id)
+    # Seed the shipped v10 columns directly; current repository writes use
+    # additional v11 metadata that deliberately does not exist yet.
+    legacy_ids = []
+    for strict_mode in (False, True):
+        run_id = run_repo.start_run(conn, RunKind.RECONCILE, now=100)
+        cur = conn.execute(
+            "INSERT INTO pending_action (run_id,action_kind,content_kind,content_id,"
+            "dest_location_id,rel_path,source_rel_path,expected_sha256,"
+            "dest_must_be_absent,created_utc,acknowledged,acknowledged_utc) "
+            "VALUES (?,'copy','audio',1,?,'Album/track.flac','Source/track.flac',"
+            "'planned-sha',?,100,1,150)", (run_id, target.id, int(strict_mode)),
+        )
+        legacy_ids.append(cur.lastrowid)
+    old, strict = [action_repo.get(conn, action_id) for action_id in legacy_ids]
+    original = old
     conn.commit()
     conn.close()
     conn = open_db(db)
