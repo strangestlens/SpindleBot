@@ -17,14 +17,15 @@ def set_presence(
     file_sha256: str | None = None,
     byte_size: int | None = None,
     mtime: int | None = None,
+    absence_scan_id: int | None = None,
 ) -> AudioPresence:
     """Record an observed presence fact for (audio_id, location_id). Upsert on PK."""
     conn.execute(
         """
         INSERT INTO audio_presence
             (audio_id, location_id, present, rel_path, file_sha256, byte_size,
-             observed_utc, mtime)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             observed_utc, mtime, absence_scan_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(audio_id, location_id) DO UPDATE SET
             present = excluded.present,
             rel_path = excluded.rel_path,
@@ -34,10 +35,11 @@ def set_presence(
             -- Preserve a recorded mtime when the caller omits it (sync/prune
             -- write a new file_sha256 without an mtime); nulling it would force
             -- a needless full re-hash on the next inventory scan.
-            mtime = COALESCE(excluded.mtime, audio_presence.mtime)
+            mtime = COALESCE(excluded.mtime, audio_presence.mtime),
+            absence_scan_id = excluded.absence_scan_id
         """,
         (audio_id, location_id, int(present), rel_path, file_sha256, byte_size,
-         observed_utc, mtime),
+         observed_utc, mtime, absence_scan_id),
     )
     found = get(conn, audio_id, location_id)
     assert found is not None

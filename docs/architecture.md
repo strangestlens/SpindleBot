@@ -104,6 +104,44 @@ against that planned checksum before copying, then verifies the destination
 against the same checksum before recording presence. Refreshing inventory after
 planning cannot change what an acknowledged action is allowed to copy.
 
+A completed inventory also checks previously recorded paths for absence. Only
+an exact-path check that finds no filesystem entry records a confirmed loss;
+unreadable files, dangling symlinks, and incomplete scans do not authorize a
+restoration. Schema v10 ties each absence to its scan ID, so two scans within
+one second cannot reuse each other's evidence. `review` can then propose COPY
+directly, restoring the recorded target path from an available source.
+
+When a scan observes a different recording or sidecar identity at an existing
+path, it retires the previous identity's path association. Deleting the new
+occupant therefore cannot restore the old one. If older records leave several
+identities claiming a now-missing path, inventory retires those ambiguous
+claims without authorizing a restoration. Rescans checkpoint their running
+marker before filesystem setup, including root checks and marker refresh, so a
+failed setup or interrupted scan cannot revive older absence evidence when its
+connection closes. First-time inventory still validates the root before recording
+its initial scan, preserving the existing first-fill planning gate.
+
+Restoration plans freeze source and destination paths separately. Absolute or
+parent-traversing queued paths are refused before source access; an invalid
+action fails independently while valid queued work continues. Sync verifies
+a staged copy, exclusively creates the absent destination, and writes through
+that file descriptor. Directory descriptors anchored to the location root reject
+symlinked parents and prevent concurrent parent replacement from redirecting writes.
+This includes ancestors above the configured root: restoration requires a path
+without symlink components. The location marker policy is rechecked on the pinned
+root descriptor before copying and after verification; any foreign marker
+refuses an ambiguous root, even when the expected marker is also present.
+Final verification hashes a no-follow file descriptor and checks that the directory
+chain and final path still identify the verified inodes. A symlink or different
+bytes that reappear are preserved and the action fails; an already-correct regular file is verified without writing.
+Only the final verified path is recorded present. Failed or interrupted
+publication can leave an unverified partial file requiring inspection and
+cleanup before retry. Presence records describe bytes verified during the operation;
+external writers can change a path afterward. Open descriptors or an advisory
+lock cannot prevent non-cooperating external pathname changes. Prune retains
+its independent path-and-hash verification gate. Normal copies retain their
+existing copy path.
+
 **Locations are first-class**, not paths in a config file. Each is identified by
 a marker file `.spindlebot-location-<uuid>` at its root, and a root may be a
 subfolder of a shared volume rather than a whole disk. Two deliberate rules:

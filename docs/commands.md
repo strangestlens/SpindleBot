@@ -76,6 +76,15 @@ next:
 against stale observations. Nothing in `sync`, `prune`, or `delete` acts on an
 action that hasn't been acknowledged.
 
+After a destination file is deleted, run inventory → review/acknowledge → sync
+to restore its recorded path in one pass, provided another location holds the
+content. This includes tracked audio, lyrics, cover art, and `.nolrc` markers.
+Inventory confirms the exact path absent; a stale observation or failed scan
+alone is insufficient. Restorations preserve and refuse a symlink or different
+bytes that reappear at the target; already-correct regular files are verified
+without writing. An unreadable or unidentified existing path
+is not treated as a deletion.
+
 COPY plans include the source checksum observed at planning time, for audio and
 sidecars. A changed source fails before any copy, writes no destination presence,
 and leaves the action unexecuted; `sync` reports the action ID and exits nonzero.

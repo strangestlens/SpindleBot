@@ -23,6 +23,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (7, "schema_v7.sql"),
     (8, "schema_v8.sql"),
     (9, "schema_v9.sql"),
+    (10, "schema_v10.sql"),
 ]
 
 LATEST_VERSION = MIGRATIONS[-1][0]

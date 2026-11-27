@@ -20,6 +20,8 @@ def add(
     rel_path: str | None = None,
     reason: str | None = None,
     expected_sha256: str | None = None,
+    source_rel_path: str | None = None,
+    dest_must_be_absent: bool = False,
 ) -> PendingAction:
     """Record a proposed (unacknowledged, unexecuted) action; return the row."""
     cur = conn.execute(
@@ -27,12 +29,12 @@ def add(
         INSERT INTO pending_action
             (run_id, action_kind, content_kind, content_id,
              source_location_id, dest_location_id, rel_path, reason, created_utc,
-             expected_sha256)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             expected_sha256, source_rel_path, dest_must_be_absent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (run_id, str(ActionKind(action_kind)), str(ContentKind(content_kind)),
          content_id, source_location_id, dest_location_id, rel_path, reason, now,
-         expected_sha256),
+         expected_sha256, source_rel_path, int(dest_must_be_absent)),
     )
     found = get(conn, int(cur.lastrowid))
     assert found is not None
