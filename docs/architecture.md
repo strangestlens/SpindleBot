@@ -162,6 +162,31 @@ against a stale scan. Actions must be acknowledged before `sync`, `prune`, or
 `delete` will execute them. The full staging table and the destructive-op gates
 are in [commands](commands.md#content-addressed-db-and-sync).
 
+An equivalent COPY already acknowledged and awaiting execution is not proposed
+again on a retry. Equivalence includes destination, content kind and identity,
+both paths, source location, planned checksum, and restoration mode. The queue
+is read once per reconciliation. Changed plans remain separate proposals;
+approved plan fields are never rewritten. Unacknowledged previews and executed history
+do not suppress new work. Equivalent duplicate rows are not retroactively removed.
+
+A later-approved restoration supersedes earlier, unexecuted generic COPY
+approvals writing the same destination path. Schema v11 records when each action
+was retired and its replacement ID, preserving original approval and plan values.
+An ordinal allocated atomically by each acknowledgement orders approvals; row
+creation IDs and run timestamps do not. An acknowledgement batch shares one
+ordinal and stricter mode wins ties. Pre-v11 approvals share legacy order zero;
+unknown orders from older clients also favor the stricter plan. The retirement timestamp remains authoritative if replacement
+history is purged. Planning and dry runs do not retire actions. Acknowledgement
+and the executor also normalize older mixed queues, including replacements
+already executed. Other destinations remain untouched.
+
+Each COPY rechecks its queue eligibility while acquiring the caller's SQLite
+write transaction. That transaction remains held through transfer, verification,
+and presence publication until the caller's checkpoint, so a concurrent approval
+cannot retire the action between validation and transfer. Other database writers
+may wait for a file checkpoint. The executor refuses eligible copies on an
+autocommit connection without a caller-owned transaction.
+
 ## Import stage sequence
 
 `spindlebot/pipeline/runner.py`, `ImportRunner.run()`:

@@ -31,6 +31,7 @@ class Location:
     enabled: bool
     last_seen_utc: int | None
     root_path: str | None = None
+    path_case_sensitive: bool | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "Location":
@@ -45,6 +46,9 @@ class Location:
             enabled=bool(row["enabled"]),
             last_seen_utc=row["last_seen_utc"],
             root_path=row["root_path"] if "root_path" in keys else None,
+            path_case_sensitive=(bool(row["path_case_sensitive"])
+                                 if "path_case_sensitive" in keys and row["path_case_sensitive"] is not None
+                                 else None),
         )
 
 
@@ -224,6 +228,9 @@ class PendingAction:
     expected_sha256: str | None
     source_rel_path: str | None = None
     dest_must_be_absent: bool = False
+    superseded_utc: int | None = None
+    superseded_by_action_id: int | None = None
+    approval_order: int | None = None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "PendingAction":
@@ -244,6 +251,9 @@ class PendingAction:
             expected_sha256=row["expected_sha256"],
             source_rel_path=row["source_rel_path"] if "source_rel_path" in row.keys() else None,
             dest_must_be_absent=bool(row["dest_must_be_absent"]) if "dest_must_be_absent" in row.keys() else False,
+            superseded_utc=row["superseded_utc"] if "superseded_utc" in row.keys() else None,
+            superseded_by_action_id=row["superseded_by_action_id"] if "superseded_by_action_id" in row.keys() else None,
+            approval_order=row["approval_order"] if "approval_order" in row.keys() else None,
         )
 
 

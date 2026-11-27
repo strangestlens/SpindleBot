@@ -59,3 +59,12 @@ def get_by_id(conn: sqlite3.Connection, location_id: int) -> Location | None:
 def list_all(conn: sqlite3.Connection) -> list[Location]:
     rows = conn.execute("SELECT * FROM location ORDER BY name").fetchall()
     return [Location.from_row(r) for r in rows]
+
+
+def set_case_sensitive(conn: sqlite3.Connection, location_id: int, sensitive: bool | None) -> None:
+    """Cache a read-only probe; the schema invalidates derived keys on change."""
+    value = None if sensitive is None else int(sensitive)
+    conn.execute(
+        "UPDATE location SET path_case_sensitive = ? "
+        "WHERE id = ? AND path_case_sensitive IS NOT ?", (value, location_id, value),
+    )

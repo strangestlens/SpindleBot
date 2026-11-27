@@ -44,6 +44,7 @@ from spindlebot.db.repositories import (
 )
 from spindlebot.disc import AUDIO_EXTENSIONS
 from spindlebot.services.volumes import ensure_marker
+from spindlebot.services.location_paths import refresh_case_policy
 # Location registration lives in services.locations; re-exported here so existing
 # imports (from spindlebot.services.inventory import ensure_pending_location) hold.
 from spindlebot.services.locations import (  # noqa: F401
@@ -407,6 +408,7 @@ def inventory_location(
         if not root.is_dir():
             return False
         ensure_marker(root, uuid=location.uuid, name=location.name, now=now)
+        refresh_case_policy(conn, location=location, root=root)
         return True
 
     # A first inventory has no old absence authorization to revoke. Preserve

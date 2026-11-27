@@ -29,11 +29,11 @@ def test_v10_upgrades_existing_presence_without_inventing_absence(tmp_path):
     conn.execute("INSERT INTO pending_action (run_id,action_kind,content_kind,content_id,rel_path,expected_sha256,created_utc) VALUES (1,'copy','audio',1,'track.flac','audio-sha',100)")
     conn.commit()
     assert migrations.current_version(conn) == 9
-    assert migrations.migrate(conn) == 10
+    assert migrations.migrate(conn) == migrations.LATEST_VERSION
     conn.close()
     conn = open_db(db)
     try:
-        assert migrations.migrate(conn) == 10
+        assert migrations.migrate(conn) == migrations.LATEST_VERSION
         audio = presence_repo.get(conn, 1, 1)
         sidecar = sidecar_presence_repo.get(conn, 1, 1)
         assert not audio.present and audio.file_sha256 == "audio-sha"
